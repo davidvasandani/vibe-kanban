@@ -33,6 +33,9 @@ use std::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use ts_rs::TS;
+use uuid::Uuid;
+
+use crate::services::config::NewIssuePipelineDefaults;
 
 /// Bundled default pipeline files, seeded to `pipelines_dir()` on first run and
 /// used by the reset actions. Order here defines the display order of bundled
@@ -144,6 +147,22 @@ pub struct Pipeline {
     pub description: Option<String>,
     /// Ordered stages; this order is authoritative for the composed block.
     pub stages: Vec<PipelineStep>,
+}
+
+impl From<&Pipeline> for api_types::pipeline_block::BlockPipeline {
+    fn from(pipeline: &Pipeline) -> Self {
+        Self {
+            name: pipeline.name.clone(),
+            stages: pipeline
+                .stages
+                .iter()
+                .map(|s| api_types::pipeline_block::BlockStage {
+                    id: s.id.clone(),
+                    prompt_fragment: s.prompt_fragment.clone(),
+                })
+                .collect(),
+        }
+    }
 }
 
 /// A structured TOML parse/validation error, suitable for surfacing inline in
@@ -752,6 +771,147 @@ pub fn delete_pipeline(dir: &Path, id: &str) -> Result<(), PipelineError> {
     }
     std::fs::remove_file(path)?;
     Ok(())
+}
+
+/// Which level of [`NewIssuePipelineDefaults`] produced a resolved
+/// new-issue pipeline selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum NewIssuePipelineSource {
+    Project,
+    Organization,
+    Machine,
+}
+
+/// Response of `GET /api/pipelines/new-issue-defaults`: the pipelines a new
+/// issue starts with, already filtered to pipelines that currently load.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct NewIssuePipelineDefaultsResponse {
+    pub pipeline_ids: Vec<String>,
+    pub source: NewIssuePipelineSource,
+}
+
+/// Resolve the default pipelines for a new issue, most specific level
+/// first: the project override, then the organization override, then the
+/// machine default. A present override is authoritative even when empty
+/// ("no pipelines"); only an absent key inherits. `org_id` is `None` when
+/// the project's organization is unknown (e.g. the remote lookup failed),
+/// which falls through to the machine default.
+pub fn resolve_new_issue_pipelines(
+    defaults: &NewIssuePipelineDefaults,
+    project_id: Option<Uuid>,
+    org_id: Option<Uuid>,
+) -> (Vec<String>, NewIssuePipelineSource) {
+    if let Some(ids) = project_id.and_then(|id| defaults.projects.get(&id)) {
+        return (ids.clone(), NewIssuePipelineSource::Project);
+    }
+    if let Some(ids) = org_id.and_then(|id| defaults.organizations.get(&id)) {
+        return (ids.clone(), NewIssuePipelineSource::Organization);
+    }
+    (
+        defaults.pipeline_ids.clone(),
+        NewIssuePipelineSource::Machine,
+    )
+}
+
+/// Keep only ids naming a pipeline in `available`, in their configured
+/// order and without duplicates. Defaults may name a pipeline that was
+/// since deleted or broken; it is skipped rather than failing issue
+/// creation.
+pub fn retain_available(ids: &[String], available: &[Pipeline]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    ids.iter()
+        .filter(|id| available.iter().any(|p| &p.id == *id))
+        .filter(|id| seen.insert(id.as_str()))
+        .cloned()
+        .collect()
+}
+
+#[cfg(test)]
+mod new_issue_defaults_tests {
+    use std::collections::HashMap;
+
+    use super::*;
+
+    fn ids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn pipeline(id: &str) -> Pipeline {
+        Pipeline {
+            id: id.to_string(),
+            name: id.to_string(),
+            description: None,
+            stages: Vec::new(),
+        }
+    }
+
+    fn defaults(project: Uuid, org: Uuid) -> NewIssuePipelineDefaults {
+        NewIssuePipelineDefaults {
+            pipeline_ids: ids(&["basic"]),
+            organizations: HashMap::from([(org, ids(&["wikillm"]))]),
+            projects: HashMap::from([(project, ids(&["speckit"]))]),
+        }
+    }
+
+    #[test]
+    fn project_override_beats_org_and_machine() {
+        let (p, o) = (Uuid::new_v4(), Uuid::new_v4());
+        assert_eq!(
+            resolve_new_issue_pipelines(&defaults(p, o), Some(p), Some(o)),
+            (ids(&["speckit"]), NewIssuePipelineSource::Project)
+        );
+    }
+
+    #[test]
+    fn org_override_beats_machine() {
+        let (p, o) = (Uuid::new_v4(), Uuid::new_v4());
+        let other_project = Uuid::new_v4();
+        assert_eq!(
+            resolve_new_issue_pipelines(&defaults(p, o), Some(other_project), Some(o)),
+            (ids(&["wikillm"]), NewIssuePipelineSource::Organization)
+        );
+    }
+
+    #[test]
+    fn unknown_org_falls_through_to_machine() {
+        let (p, o) = (Uuid::new_v4(), Uuid::new_v4());
+        assert_eq!(
+            resolve_new_issue_pipelines(&defaults(p, o), Some(Uuid::new_v4()), None),
+            (ids(&["basic"]), NewIssuePipelineSource::Machine)
+        );
+        assert_eq!(
+            resolve_new_issue_pipelines(&defaults(p, o), None, None),
+            (ids(&["basic"]), NewIssuePipelineSource::Machine)
+        );
+    }
+
+    #[test]
+    fn empty_override_means_none_not_inherit() {
+        let (p, o) = (Uuid::new_v4(), Uuid::new_v4());
+        let mut d = defaults(p, o);
+        d.projects.insert(p, Vec::new());
+        assert_eq!(
+            resolve_new_issue_pipelines(&d, Some(p), Some(o)),
+            (Vec::new(), NewIssuePipelineSource::Project)
+        );
+        d.organizations.insert(o, Vec::new());
+        assert_eq!(
+            resolve_new_issue_pipelines(&d, Some(Uuid::new_v4()), Some(o)),
+            (Vec::new(), NewIssuePipelineSource::Organization)
+        );
+    }
+
+    #[test]
+    fn retain_available_keeps_order_drops_missing_and_dupes() {
+        let available = vec![pipeline("basic"), pipeline("wikillm"), pipeline("speckit")];
+        assert_eq!(
+            retain_available(&ids(&["speckit", "gone", "wikillm", "speckit"]), &available),
+            ids(&["speckit", "wikillm"])
+        );
+        assert!(retain_available(&ids(&["gone"]), &available).is_empty());
+    }
 }
 
 #[cfg(test)]

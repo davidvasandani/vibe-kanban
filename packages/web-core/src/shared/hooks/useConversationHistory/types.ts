@@ -8,6 +8,8 @@ import {
 export type PatchTypeWithKey = PatchType & {
   patchKey: string;
   executionProcessId: string;
+  /** Authoritative parent time for entries whose executor provides no event time. */
+  processCreatedAt?: string;
 };
 
 /**

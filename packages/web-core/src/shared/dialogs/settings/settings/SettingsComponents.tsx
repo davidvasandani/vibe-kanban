@@ -65,6 +65,8 @@ export function TwoColumnPickerColumn({
 // TwoColumnPickerItem - A selectable row within a column
 interface TwoColumnPickerItemProps {
   selected?: boolean;
+  /** De-emphasise the row, e.g. for a disabled entry that stays selectable. */
+  muted?: boolean;
   onClick?: () => void;
   leading?: ReactNode;
   trailing?: ReactNode;
@@ -73,6 +75,7 @@ interface TwoColumnPickerItemProps {
 
 export function TwoColumnPickerItem({
   selected,
+  muted,
   onClick,
   leading,
   trailing,
@@ -83,7 +86,8 @@ export function TwoColumnPickerItem({
       className={cn(
         'group flex items-center gap-half px-base py-half cursor-pointer transition-colors',
         'hover:bg-secondary',
-        selected && 'bg-brand/10 text-brand'
+        selected && 'bg-brand/10 text-brand',
+        muted && !selected && 'opacity-60'
       )}
       onClick={onClick}
     >

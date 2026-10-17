@@ -144,11 +144,12 @@ export function useAzureAttachments({
   }, [pendingAttachments.length]);
 
   useEffect(() => {
+    const localObjects = localObjectsRef.current;
     return () => {
-      for (const objectUrl of localObjectsRef.current.values()) {
+      for (const objectUrl of localObjects.values()) {
         URL.revokeObjectURL(objectUrl);
       }
-      localObjectsRef.current.clear();
+      localObjects.clear();
     };
   }, []);
 

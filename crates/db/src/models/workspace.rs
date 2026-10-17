@@ -347,6 +347,53 @@ impl WorkspacePlacement {
         .await?;
         Ok(result.rows_affected() == 1)
     }
+
+    /// Release the dispatch fence after clustered worktree reclamation has
+    /// durably marked the worktree deleted. The deleted flag is part of the
+    /// compare-and-set so a caller cannot reopen a workspace while cleanup is
+    /// still removing it.
+    pub async fn finish_cleanup(
+        pool: &SqlitePool,
+        workspace_id: Uuid,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            UPDATE workspaces
+            SET placement_state = 'ready',
+                updated_at = datetime('now', 'subsec')
+            WHERE id = ?
+              AND placement_state = 'cleaning'
+              AND worktree_deleted = TRUE
+            "#,
+        )
+        .bind(workspace_id)
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Release an unsuccessful cleanup claim without declaring the worktree
+    /// deleted. This returns the workspace to the state from which a later
+    /// cleanup sweep or user access can safely retry.
+    pub async fn cancel_cleanup(
+        pool: &SqlitePool,
+        workspace_id: Uuid,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            UPDATE workspaces
+            SET placement_state = 'ready',
+                updated_at = datetime('now', 'subsec')
+            WHERE id = ?
+              AND placement_state = 'cleaning'
+              AND worktree_deleted = FALSE
+            "#,
+        )
+        .bind(workspace_id)
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
 }
 
 impl Workspace {

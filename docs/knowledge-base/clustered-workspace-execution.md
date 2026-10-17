@@ -1,6 +1,6 @@
 # Clustered workspace execution and shared-storage safety
 
-Tags: `957e-clustered-vibe-k`, `19a4-git-worktrees-br`, `b72a-internal-error-o`, `8475-bubblewrap-missi`, `2fe7-vk-coordinator-m`, `eef5-coordinator-miss`
+Tags: `957e-clustered-vibe-k`, `19a4-git-worktrees-br`, `b72a-internal-error-o`, `8475-bubblewrap-missi`, `2fe7-vk-coordinator-m`, `eef5-coordinator-miss`, `VAS-448`, `vk/1d23-vk-worker-output`, `vk/ad2a-failed-to-start`
 
 ## Keep authority central and process ownership local
 
@@ -16,6 +16,52 @@ by an agent (for example Codex's `bwrap` sandbox helper) therefore belong in the
 worker unit's Nix `path`, with an evaluated-module assertion on that exact unit.
 Installing the package only for the coordinator or globally does not express or
 reliably satisfy the worker execution contract.
+
+Process ownership also includes the memory boundary. Children must never share
+the worker's leaf cgroup, because a ceiling there throttles the control plane
+(accept loop, heartbeats, journal) along with a runaway build
+(`vk/ad2a-failed-to-start`). With `VK_WORKER_JOB_CGROUP` set, and the unit
+delegated with `DelegateSubgroup=supervisor`, `job_cgroup.rs` creates a
+sibling `jobs` cgroup that carries `VK_WORKER_JOB_MEMORY_HIGH` and
+`VK_WORKER_JOB_MEMORY_MAX`. Placement uses two layers, because cgroup v2
+never migrates memory that is already charged. Children spawned through
+`utils::command_ext` (every executor, plus worker scripts) join `jobs` in a
+`pre_exec` hook of raw open/write/close calls, which are safe after fork.
+A plain thread then sweeps any other PID out of `supervisor` every 200 ms,
+which covers PTYs, one-off commands and future call sites that bypass the
+helper. Setup failure never stops the worker. It serves on and
+reports `job_cgroup.state = "failed"` on `/health`.
+
+`jobs` is a parent, not a leaf (`vk/f268-harden-cluster-w`). The pre-exec
+hook and the sweep target `jobs/shared`. Each running execution gets
+`jobs/exec-<execution_id>`, with `VK_WORKER_EXECUTION_MEMORY_HIGH` and
+`VK_WORKER_EXECUTION_MEMORY_MAX`, so one runaway build is throttled and
+OOM-killed inside its own execution. The sweep moves the execution's process
+group there. It also moves any descendant whose parent chain leads back to
+the execution, which covers a child that called `setsid`. The cgroup is
+removed once it is empty after the job ends. `VK_WORKER_JOB_CPU_WEIGHT` and
+`VK_WORKER_JOB_IO_WEIGHT` weight `jobs` against the supervisor, on a best
+effort basis. `io.weight` needs BFQ or iocost to take effect.
+
+Two more guards come from the same incident. Neither one needs isolation.
+
+- **Pressure admission.** While PSI `full avg60` for memory or IO is at or
+  above `VK_WORKER_ADMISSION_MAX_PRESSURE` (default 40, 0 disables), new
+  dispatches get a 503 that names the resource. Replays of accepted work
+  still succeed. `/health.pressure` and the heartbeat's
+  `admission_refusing` show the state, and placement ranks a refusing
+  worker last.
+- **Startup-stall reaper.** A coding-agent execution that has written
+  nothing `VK_WORKER_STARTUP_STALL_SECONDS` (default 600, 0 disables) after
+  it started is SIGKILLed, along with its cgroup, and reported `Failed` with
+  a `worker_error` that names the stall. If the spawn itself has not
+  returned, the worker owns no process it could kill, and dropping the
+  spawn could leak an executor's half-started process group. So the job
+  only gets a diagnostic and stays owned and active until the child is
+  handed over. Once that happens it is reaped as usual. A spawn that
+  returns after the job already ended is killed. A
+  process stuck in D-state keeps counting in `active_execution_count` until
+  it exits, but the session is no longer held behind it.
 
 Persist the worker ID on both the workspace and execution job. Never infer
 affinity from the currently selected UI host, and never retry a dispatch on a
@@ -101,6 +147,29 @@ A failed dispatch must also terminalise its worker-job record. Otherwise a job
 that never started appears pending indefinitely and contaminates later
 reconciliation.
 
+The dispatch path must also honour the registry's own liveness verdict. An
+expired lease that is visible in the admin UI, but ignored by
+`dispatch_execution`, still sends a sticky workspace's turn to a dead worker.
+In `vk/ad2a-failed-to-start`, think5 had been `offline` for about two hours.
+Each start waited out two 30s transport attempts and then reported "worker
+transport failed: error sending request for url (…)", which the API
+rendered as a generic 500. Gate on `dispatch_liveness` (missing row,
+`offline`, or lease missing or expired, where the lease is the authority
+because `expire_leases` may not have swept yet). The gate runs after the
+placement lookup and **before** `create_pending`, so a refusal leaves no record
+to terminalise. Refuse with a typed error (`ContainerError::WorkerUnavailable`
+→ 503 `WorkerUnavailableError`) that names the host, its last heartbeat, and
+the move-workspace remedy. Keep it narrower than scheduler `eligibility`:
+mount health and executor capability are placement rules, and a draining
+worker with a live lease keeps its admission semantics. Never reroute (sticky
+affinity).
+
+`reqwest::Error`'s `Display` omits its cause. "error sending request" is the
+same text for a timeout, a refused port, and a reset. Any transport error that
+reaches a user or an evidence record should render its `source()` chain, as
+`WorkerClientError::Transport` now does: an accept queue that is full (a
+wedged listener) times out, while a dead process is refused.
+
 ## Bind authentication to the complete request
 
 Worker requests are signed over timestamp, HTTP method, the full path and query,
@@ -153,6 +222,17 @@ Cleanup must require positive evidence that no execution is active. An offline
 or unreachable worker means the workspace is indeterminate, not idle, so retain
 the files until reconciliation or operator intervention proves reclamation is
 safe.
+
+Cluster cleanup also needs a complete fence lifecycle. Claim cleanup with an
+atomic `ready → cleaning` transition so dispatch cannot race deletion. Keep the
+fence until filesystem cleanup succeeds and the database durably records
+`worktree_deleted`; then atomically return the placement to `ready`, allowing a
+later access to recreate the worktree. If cleanup fails, cancel the claim back
+to `ready` without setting the deletion flag so another sweep can retry. If the
+process crashes after recording deletion but before releasing the fence, an
+access may recover only the proven `cleaning + worktree_deleted` state. A
+one-way `ready → cleaning` transition strands expired workspaces permanently
+and surfaces as a generic follow-up-send 500.
 
 ## A worktree is only as portable as the repository behind it
 
@@ -334,3 +414,31 @@ role evaluation with focused tests. Then run a two-node deployment exercise
 that disconnects the coordinator, cancels a process group, removes the shared
 mount, and verifies worktree integrity. Passing local tests does not replace
 that deployment gate.
+
+## Replay gaps and retained terminal evidence
+
+Contributed by: `vk/1d23-vk-worker-output`.
+
+The worker's default event journal holds 4,096 events and evicts old events on
+append, independently of acknowledgements. `EventJournal` keeps terminal evidence
+separately. A real output gap therefore does not by itself prove that the
+execution outcome is unknown.
+
+On `WorkerClientError::ReplayGap`, the coordinator checks authenticated worker
+inventory against the durable dispatch: execution ID, worker node/job IDs and
+request digest must match, the terminal state must agree with its evidence, and
+the summary sequence must not precede the gap or previously observed worker
+sequence. Matching completed/failed/killed/interrupted evidence can recover the
+outcome. Active, missing, contradictory, stale or unreachable evidence retains
+indeterminate status.
+
+Always persist `output_complete = false`; recovered exit evidence does not
+reconstruct missing stdout, stderr or interaction events. Never acknowledge a
+cursor across the missing range. Keep captured terminal evidence until both
+worker-job and process state writes succeed, and include requested/earliest
+sequence boundaries in diagnostics. Normal finalization follows persistence.
+A larger journal or a suppressed warning does not establish missing evidence.
+
+The exact original retention-loss trigger needs the affected execution identity
+and event boundaries. Stale Codex rollout warnings alone do not prove journal
+overflow caused a particular incident.

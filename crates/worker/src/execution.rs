@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
     process::{ExitStatus, Stdio},
     sync::{
@@ -20,8 +20,10 @@ use command_group::{AsyncCommandGroup, AsyncGroupChild};
 use executors::{
     actions::{Executable, ExecutorAction, ExecutorActionType},
     env::{ExecutionEnv, RepoContext},
-    executors::{BaseCodingAgent, CodingAgent, StandardCodingAgentExecutor},
-    mcp_config::write_coding_agent_mcp_servers_to_path,
+    executors::{BaseCodingAgent, CodingAgent, ExecutorExitResult, StandardCodingAgentExecutor},
+    mcp_config::{
+        CodexConfigMode, write_coding_agent_mcp_servers_to_path, write_scoped_codex_config,
+    },
     mcp_refresh::McpRefreshHandle,
     profile::{ExecutorConfig, ExecutorProfile},
 };
@@ -37,12 +39,15 @@ use uuid::Uuid;
 
 use crate::{
     interaction::{InteractionBroker, WorkerApprovalService},
+    job_cgroup::JobCgroupHandle,
     journal::{EventJournal, JournalError},
     path_authority::{PathAuthority, PathAuthorityError},
+    pressure::{AdmissionPressure, PressureReading, PressureRefusal, PressureStatus},
     recovery::{RecoveryError, RecoveryStore},
 };
 
 const DEFAULT_JOURNAL_CAPACITY: usize = 4_096;
+const OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Deserialize)]
 struct WorkerCommandAction {
@@ -82,6 +87,8 @@ pub enum ExecutionError {
     InvalidMcpSnapshot { executor: String },
     #[error("failed to materialize MCP configuration for executor {executor}")]
     McpMaterialization { executor: String },
+    #[error("execution {execution_id} Codex configuration: {stage}")]
+    CodexConfig { execution_id: Uuid, stage: String },
     #[error("Codex MCP status is unavailable")]
     McpReload,
     #[error("working directory resolves outside its authorized workspace")]
@@ -94,6 +101,8 @@ pub enum ExecutionError {
     NotFound(Uuid),
     #[error("worker is draining for a release handoff")]
     Draining,
+    #[error("{0}")]
+    UnderPressure(PressureRefusal),
     #[error("workspace contains a worktree this node cannot use: {detail}")]
     WorktreeUnusable { detail: String },
     #[error(transparent)]
@@ -105,11 +114,23 @@ pub struct ExecutionSupervisor {
     path_authority: PathAuthority,
     mcp_config_root: PathBuf,
     coordinator_url: reqwest::Url,
+    #[cfg(test)]
+    codex_source: Option<PathBuf>,
+    #[cfg(test)]
+    codex_command: Option<PathBuf>,
     jobs: Arc<RwLock<HashMap<Uuid, Arc<WorkerJob>>>>,
     journal_capacity: usize,
     recovery_store: Option<RecoveryStore>,
     admission_draining: Arc<AtomicBool>,
     admitting: Arc<AtomicU32>,
+    job_cgroup: JobCgroupHandle,
+    pressure: AdmissionPressure,
+    /// Reap a coding-agent execution with no output this long after start.
+    startup_stall: Option<Duration>,
+    /// Lets tests exercise the reaper with a plain command, since a real
+    /// coding agent cannot run in a unit test.
+    #[cfg(test)]
+    reap_commands: bool,
 }
 
 pub struct WorkerJob {
@@ -128,6 +149,12 @@ pub struct WorkerJob {
     mcp_refresh: RwLock<Option<McpRefreshHandle>>,
     mcp_refresh_claim: Mutex<()>,
     quiesced_by: Mutex<Option<Uuid>>,
+    /// Any stdout/stderr byte observed. An execution that never sets it never
+    /// started its turn, which is what the startup-stall reaper acts on.
+    output_seen: AtomicBool,
+    /// Process-group id of the spawned child (its leader's pid), 0 before
+    /// spawn. Kept after the leader is reaped so stragglers can be killed.
+    leader_pid: AtomicU32,
 }
 
 struct PreparedMcpConfig {
@@ -325,11 +352,19 @@ impl ExecutionSupervisor {
             path_authority,
             mcp_config_root,
             coordinator_url: reqwest::Url::parse("http://127.0.0.1:3334").unwrap(),
+            #[cfg(test)]
+            codex_source: None,
+            #[cfg(test)]
+            codex_command: None,
             jobs: Arc::new(RwLock::new(HashMap::new())),
             journal_capacity,
             recovery_store: None,
             admission_draining: Arc::new(AtomicBool::new(false)),
             admitting: Arc::new(AtomicU32::new(0)),
+            job_cgroup: JobCgroupHandle::disabled(),
+            pressure: AdmissionPressure::with_reader(None, PressureReading::default),
+            startup_stall: None,
+            reap_commands: false,
         }
     }
 
@@ -372,11 +407,20 @@ impl ExecutionSupervisor {
             path_authority,
             mcp_config_root,
             coordinator_url,
+            #[cfg(test)]
+            codex_source: None,
+            #[cfg(test)]
+            codex_command: None,
             jobs: Arc::new(RwLock::new(HashMap::new())),
             journal_capacity: DEFAULT_JOURNAL_CAPACITY,
             recovery_store: Some(recovery_store.clone()),
             admission_draining,
             admitting: Arc::new(AtomicU32::new(0)),
+            job_cgroup: JobCgroupHandle::disabled(),
+            pressure: AdmissionPressure::with_reader(None, PressureReading::default),
+            startup_stall: None,
+            #[cfg(test)]
+            reap_commands: false,
         };
         for mut summary in recovery_store.load().await? {
             let evidence = match summary.terminal.clone() {
@@ -415,10 +459,36 @@ impl ExecutionSupervisor {
                     mcp_refresh: RwLock::new(None),
                     mcp_refresh_claim: Mutex::new(()),
                     quiesced_by: Mutex::new(None),
+                    output_seen: AtomicBool::new(false),
+                    leader_pid: AtomicU32::new(0),
                 }),
             );
         }
         Ok(supervisor)
+    }
+
+    /// Per-execution cgroups, pressure admission and the startup-stall reaper
+    /// (constitution LVI).
+    pub fn with_hardening(
+        mut self,
+        job_cgroup: JobCgroupHandle,
+        pressure: AdmissionPressure,
+        startup_stall: Option<Duration>,
+    ) -> Self {
+        self.job_cgroup = job_cgroup;
+        self.pressure = pressure;
+        self.startup_stall = startup_stall;
+        self
+    }
+
+    pub fn pressure_status(&self) -> PressureStatus {
+        self.pressure.status()
+    }
+
+    /// SIGKILL everything in the execution's cgroup, including descendants
+    /// that left its process group. A no-op without job isolation.
+    pub fn kill_execution_cgroup(&self, execution_id: Uuid) {
+        self.job_cgroup.kill_execution(execution_id);
     }
 
     /// Accepts a dispatch exactly once per execution ID. Replays with the same
@@ -439,6 +509,11 @@ impl ExecutionSupervisor {
         if self.admission_draining.load(Ordering::Acquire) {
             return Err(ExecutionError::Draining);
         }
+        // A thrashing node wedges what it admits; refuse new work until the
+        // pressure subsides. Replays of accepted work returned above.
+        self.pressure
+            .check()
+            .map_err(ExecutionError::UnderPressure)?;
         self.admitting.fetch_add(1, Ordering::AcqRel);
         let admission = ExecutionAdmission(self.admitting.clone());
         if self.admission_draining.load(Ordering::Acquire) {
@@ -448,31 +523,106 @@ impl ExecutionSupervisor {
         let workspace_path = self
             .path_authority
             .authorize_workspace_path(&dispatch.workspace_path)?;
-        let working_directory = authorize_working_directory(
+        let mut working_directory = authorize_working_directory(
             &workspace_path,
             &dispatch.working_directory,
             &self.path_authority,
         )?;
-        let action: WorkerAction = serde_json::from_value(dispatch.action.clone())?;
-        // Refuse at admission rather than inside the turn: a malformed profile
-        // would otherwise fail at spawn, after the job record exists and the
-        // user is waiting on an agent that was never going to start.
-        let executor_profile: Option<ExecutorProfile> = dispatch
+        let repo_context_directory = working_directory.clone();
+        let mut action: WorkerAction = serde_json::from_value(dispatch.action.clone())?;
+        // Resolve malformed Codex profiles before acceptance without echoing values.
+        let codex_config = executor_config_for_action(&action)
+            .filter(|config| config.executor == BaseCodingAgent::Codex)
+            .cloned();
+        let mut executor_profile: Option<ExecutorProfile> = dispatch
             .executor_profile_config
             .clone()
             .map(serde_json::from_value)
-            .transpose()?;
-        let prepared_mcp = match &dispatch.mcp_config_snapshot {
-            Some(snapshot) => Some(
-                self.prepare_mcp_snapshot(
+            .transpose()
+            .map_err(|error| {
+                if codex_config.is_some() {
+                    ExecutionError::CodexConfig {
+                        execution_id: dispatch.execution_id,
+                        stage: "profile parse failed".into(),
+                    }
+                } else {
+                    ExecutionError::InvalidAction(error)
+                }
+            })?;
+        let prepared_mcp = if let Some(config) = codex_config {
+            let failure = |stage: &str| ExecutionError::CodexConfig {
+                execution_id: dispatch.execution_id,
+                stage: stage.into(),
+            };
+            let agent = ExecutionEnv::new(RepoContext::default(), false, String::new())
+                .with_executor_profile(executor_profile.clone())
+                .resolve_coding_agent(&config)
+                .map_err(|_| failure("profile resolution failed"))?;
+            if !matches!(agent, CodingAgent::Codex(_)) {
+                return Err(failure("profile executor mismatch"));
+            }
+            working_directory = authorize_codex_action_directory(
+                &mut action,
+                &working_directory,
+                &workspace_path,
+                &self.path_authority,
+            )?;
+            let source = agent
+                .default_mcp_config_path()
+                .ok_or_else(|| failure("source path resolution failed"))?;
+            #[cfg(test)]
+            let source = self.codex_source.clone().unwrap_or(source);
+            #[cfg(test)]
+            let agent = {
+                let mut agent = agent;
+                if let (Some(command), CodingAgent::Codex(codex)) =
+                    (&self.codex_command, &mut agent)
+                {
+                    codex.cmd.base_command_override = Some(command.to_str().unwrap().into());
+                }
+                agent
+            };
+            let prepared = self
+                .prepare_codex_config(
                     dispatch.execution_id,
-                    &action,
-                    executor_profile.as_ref(),
-                    snapshot,
+                    agent,
+                    &source,
+                    &working_directory,
+                    dispatch.mcp_config_snapshot.as_ref(),
                 )
-                .await?,
-            ),
-            None => None,
+                .await?;
+            let (recently_used_models, disabled_models, disabled) = executor_profile
+                .map(|profile| {
+                    (
+                        profile.recently_used_models,
+                        profile.disabled_models,
+                        profile.disabled,
+                    )
+                })
+                .unwrap_or_default();
+            executor_profile = Some(ExecutorProfile {
+                recently_used_models,
+                disabled_models,
+                disabled,
+                configurations: HashMap::from([(
+                    config.variant.unwrap_or_else(|| "DEFAULT".into()),
+                    prepared.agent.clone(),
+                )]),
+            });
+            Some(prepared)
+        } else {
+            match &dispatch.mcp_config_snapshot {
+                Some(snapshot) => Some(
+                    self.prepare_mcp_snapshot(
+                        dispatch.execution_id,
+                        &action,
+                        executor_profile.as_ref(),
+                        snapshot,
+                    )
+                    .await?,
+                ),
+                None => None,
+            }
         };
         if matches!(&action, WorkerAction::Command(action) if action.program.trim().is_empty()) {
             return Err(ExecutionError::EmptyProgram);
@@ -482,6 +632,15 @@ impl ExecutionSupervisor {
         // be worked in, and discovering that inside an agent turn wastes the
         // turn. The worker never repairs — that authority is the coordinator's.
         verify_worktrees_are_usable(&workspace_path, self.path_authority.shared_root()).await?;
+
+        #[cfg(test)]
+        let reap_commands = self.reap_commands;
+        #[cfg(not(test))]
+        let reap_commands = false;
+        let startup_stall = self.startup_stall.filter(|_| {
+            executor_config_for_action(&action).is_some()
+                || (reap_commands && matches!(action, WorkerAction::Command(_)))
+        });
 
         let worker_job_id = Uuid::new_v4();
         let mut journal = EventJournal::new(dispatch.execution_id, self.journal_capacity)?;
@@ -502,6 +661,8 @@ impl ExecutionSupervisor {
             mcp_refresh: RwLock::new(None),
             mcp_refresh_claim: Mutex::new(()),
             quiesced_by: Mutex::new(None),
+            output_seen: AtomicBool::new(false),
+            leader_pid: AtomicU32::new(0),
         });
         jobs.insert(dispatch.execution_id, job.clone());
         drop(admission);
@@ -511,11 +672,15 @@ impl ExecutionSupervisor {
         tokio::spawn(run_job(
             job.clone(),
             action,
-            working_directory,
+            (working_directory, repo_context_directory),
             dispatch.environment,
             executor_profile,
             prepared_mcp,
-            dispatch.timeout_seconds,
+            JobLimits {
+                timeout_seconds: dispatch.timeout_seconds,
+                job_cgroup: self.job_cgroup.clone(),
+                startup_stall,
+            },
         ));
         Ok(DispatchAccepted {
             execution_id: dispatch.execution_id,
@@ -524,6 +689,99 @@ impl ExecutionSupervisor {
             state: JobState::Accepted,
             last_sequence: 1,
         })
+    }
+
+    async fn prepare_codex_config(
+        &self,
+        execution_id: Uuid,
+        mut agent: CodingAgent,
+        source_config: &Path,
+        working_directory: &Path,
+        snapshot: Option<&McpConfigSnapshot>,
+    ) -> Result<PreparedMcpConfig, ExecutionError> {
+        let failure = |stage: &str| ExecutionError::CodexConfig {
+            execution_id,
+            stage: stage.into(),
+        };
+        if let Some(snapshot) = snapshot
+            && (snapshot.validate_size().is_err()
+                || snapshot.executor != BaseCodingAgent::Codex.to_string())
+        {
+            return Err(ExecutionError::InvalidMcpSnapshot {
+                executor: snapshot.executor.clone(),
+            });
+        }
+        working_directory
+            .to_str()
+            .ok_or_else(|| failure("trust update failed; non-UTF-8 directory"))?;
+        let execution_root = self.mcp_config_root.join(execution_id.to_string());
+        let scoped_home = execution_root.join("codex");
+        let home = scoped_home
+            .to_str()
+            .ok_or_else(|| failure("scoped-home preparation failed; non-UTF-8 path"))?
+            .to_owned();
+        let CodingAgent::Codex(codex) = &mut agent else {
+            return Err(failure("profile executor mismatch"));
+        };
+        codex
+            .cmd
+            .env
+            .get_or_insert_with(HashMap::new)
+            .insert("CODEX_HOME".into(), home.clone());
+        match std::fs::remove_dir_all(&execution_root) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(failure("scoped-home preparation failed")),
+        }
+        // Own cleanup before the first fallible overlay operation.
+        let prepared = PreparedMcpConfig {
+            execution_root,
+            target_config: scoped_home.join("config.toml"),
+            environment: BTreeMap::from([("CODEX_HOME".into(), home)]),
+            agent,
+        };
+        let source_home = source_config
+            .parent()
+            .ok_or_else(|| failure("source path resolution failed"))?;
+        // A fresh Codex home has no sessions directory for the overlay to link.
+        // Create the persistent owner first so rollouts written by this execution
+        // survive disposal of the scoped home and remain available to follow-ups.
+        std::fs::create_dir_all(source_home.join("sessions"))
+            .map_err(|_| failure("session storage preparation failed"))?;
+        prepare_scoped_home(source_home, &scoped_home, Path::new("config.toml"))
+            .map_err(|_| failure("scoped-home preparation failed"))?;
+        // Reserve sqlite_home as a real execution-owned directory. The generic
+        // overlay may have linked a same-named source entry: unlink only the
+        // alias, never the persistent source or its database sidecars.
+        let sqlite_home = scoped_home.join("sqlite");
+        match std::fs::symlink_metadata(&sqlite_home) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                std::fs::remove_file(&sqlite_home)
+                    .map_err(|_| failure("SQLite directory preparation failed"))?;
+            }
+            Ok(_) => return Err(failure("SQLite directory preparation failed")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(failure("SQLite directory preparation failed")),
+        }
+        std::fs::create_dir(&sqlite_home)
+            .map_err(|_| failure("SQLite directory preparation failed"))?;
+        std::fs::set_permissions(&sqlite_home, {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::Permissions::from_mode(0o700)
+        })
+        .map_err(|_| failure("SQLite directory preparation failed"))?;
+        let servers = snapshot.map(|snapshot| runtime_mcp_servers(snapshot, &self.coordinator_url));
+        write_scoped_codex_config(
+            source_config,
+            &prepared.target_config,
+            CodexConfigMode::Initial {
+                authorized_directory: working_directory,
+            },
+            servers.as_ref(),
+        )
+        .await
+        .map_err(|error| failure(&error.to_string()))?;
+        Ok(prepared)
     }
 
     async fn prepare_mcp_snapshot(
@@ -561,42 +819,21 @@ impl ExecutionSupervisor {
                     executor: snapshot.executor.clone(),
                 })?;
         let execution_root = self.mcp_config_root.join(execution_id.to_string());
+        let source_home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
+            ExecutionError::InvalidMcpSnapshot {
+                executor: snapshot.executor.clone(),
+            }
+        })?;
         let (source_home, scoped_home, target_relative, environment) =
-            if config.executor == BaseCodingAgent::Codex {
-                let source_home =
-                    source_config
-                        .parent()
-                        .ok_or_else(|| ExecutionError::InvalidMcpSnapshot {
-                            executor: snapshot.executor.clone(),
-                        })?;
-                let scoped_home = execution_root.join("codex");
-                let target_relative = PathBuf::from("config.toml");
-                let environment = std::collections::BTreeMap::from([(
-                    "CODEX_HOME".into(),
-                    scoped_home.to_string_lossy().into_owned(),
-                )]);
-                (
-                    source_home.to_path_buf(),
-                    scoped_home,
-                    target_relative,
-                    environment,
-                )
-            } else {
-                let source_home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
-                    ExecutionError::InvalidMcpSnapshot {
-                        executor: snapshot.executor.clone(),
-                    }
-                })?;
-                non_codex_scoped_config_layout(
-                    &source_config,
-                    source_home,
-                    std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
-                    &execution_root,
-                )
-                .ok_or_else(|| ExecutionError::InvalidMcpSnapshot {
-                    executor: snapshot.executor.clone(),
-                })?
-            };
+            non_codex_scoped_config_layout(
+                &source_config,
+                source_home,
+                std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
+                &execution_root,
+            )
+            .ok_or_else(|| ExecutionError::InvalidMcpSnapshot {
+                executor: snapshot.executor.clone(),
+            })?;
         match std::fs::remove_dir_all(&execution_root) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -677,10 +914,21 @@ impl ExecutionSupervisor {
             (prepared.agent.clone(), prepared.target_config.clone())
         };
         let servers = runtime_mcp_servers(snapshot, &self.coordinator_url);
-        if write_coding_agent_mcp_servers_to_path(&agent, &target_config, &target_config, &servers)
+        let write_result = if matches!(agent, CodingAgent::Codex(_)) {
+            write_scoped_codex_config(
+                &target_config,
+                &target_config,
+                CodexConfigMode::Refresh,
+                Some(&servers),
+            )
             .await
-            .is_err()
-        {
+            .map_err(|error| error.to_string())
+        } else {
+            write_coding_agent_mcp_servers_to_path(&agent, &target_config, &target_config, &servers)
+                .await
+                .map_err(|error| error.to_string())
+        };
+        if write_result.is_err() {
             return Ok(WorkerMcpRefreshResult {
                 status: WorkerMcpRefreshStatus::MaterializationFailed,
                 servers: Vec::new(),
@@ -1014,6 +1262,25 @@ impl WorkerJob {
         }
     }
 
+    /// SIGKILL whatever is left of the process group once its leader has
+    /// exited. A member that ignores SIGINT (a shell's background job) would
+    /// otherwise outlive a cancellation confirmed by the leader's exit.
+    pub(crate) fn kill_group_remainder(&self) {
+        let pgid = self.leader_pid.load(Ordering::Acquire);
+        #[cfg(unix)]
+        if let Ok(pgid) = libc::pid_t::try_from(pgid)
+            && pgid > 1
+        {
+            // SAFETY: killpg only sends a signal; ESRCH (no such group) is
+            // the expected outcome when nothing is left.
+            unsafe {
+                libc::killpg(pgid, libc::SIGKILL);
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = pgid;
+    }
+
     pub(crate) async fn emit(&self, payload: ExecutionEventPayload) {
         let _ = self.journal.lock().await.append(SystemTime::now(), payload);
     }
@@ -1022,20 +1289,24 @@ impl WorkerJob {
 async fn run_job(
     job: Arc<WorkerJob>,
     action: WorkerAction,
-    working_directory: PathBuf,
+    directories: (PathBuf, PathBuf),
     mut environment: std::collections::BTreeMap<String, String>,
     executor_profile: Option<ExecutorProfile>,
     prepared_mcp: Option<PreparedMcpConfig>,
-    timeout_seconds: Option<u64>,
+    limits: JobLimits,
 ) {
+    let (working_directory, repo_context_directory) = directories;
     set_state(&job, JobState::Starting, ExecutionEventPayload::Starting).await;
-    let inherited_path = environment
-        .get("PATH")
-        .map(std::ffi::OsString::from)
-        .unwrap_or_else(|| std::env::var_os("PATH").unwrap_or_default());
-    if let Some(path) = utils::shell::append_cli_tools_to_path(&inherited_path) {
-        environment.insert("PATH".into(), path.to_string_lossy().into_owned());
+    // Armed before the spawn, so a spawn that never returns is covered too.
+    if let Some(window) = limits.startup_stall {
+        tokio::spawn(reap_if_silent(
+            job.clone(),
+            window,
+            limits.job_cgroup.clone(),
+        ));
     }
+    prepend_workspace_gobin_to_path(&mut environment);
+    set_agent_path(&mut environment);
     if let Some(prepared) = &prepared_mcp {
         environment.extend(prepared.environment.clone());
     }
@@ -1050,20 +1321,21 @@ async fn run_job(
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
+            utils::command_ext::place_in_spawn_cgroup(&mut command);
             command
                 .group_spawn()
-                .map(|child| (child, None))
+                .map(|child| (child, None, None))
                 .map_err(|error| error.to_string())
         }
         WorkerAction::Executor(action) => {
             // Admission already proved this workspace is enumerable and its
             // worktrees usable, so an error here is a race, not a state worth
             // failing the spawn over.
-            let repo_names = discover_repo_names(&working_directory)
+            let repo_names = discover_repo_names(&repo_context_directory)
                 .await
                 .unwrap_or_default();
             let mut env = ExecutionEnv::new(
-                RepoContext::new(working_directory.clone(), repo_names),
+                RepoContext::new(repo_context_directory, repo_names),
                 false,
                 String::new(),
             )
@@ -1079,11 +1351,17 @@ async fn run_job(
                     &env,
                 )
                 .await
-                .map(|mut spawned| (spawned.child, spawned.mcp_refresh.take()))
+                .map(|mut spawned| {
+                    (
+                        spawned.child,
+                        spawned.exit_signal.take(),
+                        spawned.mcp_refresh.take(),
+                    )
+                })
                 .map_err(|error| error.to_string())
         }
     };
-    let (mut child, mcp_refresh) = match spawned {
+    let (mut child, mut exit_signal, mcp_refresh) = match spawned {
         Ok(spawned) => spawned,
         Err(error) => {
             finish_failed(&job, None, format!("failed to start process: {error}")).await;
@@ -1092,9 +1370,32 @@ async fn run_job(
     };
     let stdout = child.inner().stdout.take();
     let stderr = child.inner().stderr.take();
-    *job.child.lock().await = Some(child);
-    *job.state.write().await = JobState::Running;
+    let leader_pid = child.id();
+    {
+        // Serialized with cancellation and the reaper: a job they already
+        // ended must not be revived by a spawn that returned late.
+        let _cancellation = job.cancellation_guard().await;
+        if job.state().await.is_terminal() {
+            tracing::warn!(
+                execution_id = %job.execution_id,
+                "spawn returned after the execution ended; killing the late child"
+            );
+            let _ = child.kill().await;
+            return;
+        }
+        *job.child.lock().await = Some(child);
+        job.leader_pid
+            .store(leader_pid.unwrap_or_default(), Ordering::Release);
+        *job.state.write().await = JobState::Running;
+    }
     job.persist().await;
+    let _execution_cgroup = leader_pid.map(|pid| {
+        limits.job_cgroup.register_execution(job.execution_id, pid);
+        ExecutionCgroup {
+            handle: limits.job_cgroup.clone(),
+            execution_id: job.execution_id,
+        }
+    });
 
     if let Some(signal) = mcp_refresh {
         let job = job.clone();
@@ -1110,9 +1411,36 @@ async fn run_job(
     let mut stderr_task =
         stderr.map(|stderr| tokio::spawn(stream_output(job.clone(), stderr, true)));
 
-    let deadline =
-        timeout_seconds.map(|seconds| tokio::time::Instant::now() + Duration::from_secs(seconds));
+    let deadline = limits
+        .timeout_seconds
+        .map(|seconds| tokio::time::Instant::now() + Duration::from_secs(seconds));
     loop {
+        if let Some(signal) = exit_signal.as_mut() {
+            match signal.try_recv() {
+                Ok(result) => {
+                    stop_child(&job).await;
+                    await_output_tasks(stdout_task.take(), stderr_task.take()).await;
+                    finish_executor_result(&job, result).await;
+                    return;
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    stop_child(&job).await;
+                    await_output_tasks(stdout_task.take(), stderr_task.take()).await;
+                    if job.state().await == JobState::Cancelling {
+                        finish_executor_result(&job, ExecutorExitResult::Success).await;
+                    } else {
+                        finish_failed(
+                            &job,
+                            None,
+                            "executor completion channel closed without terminal evidence".into(),
+                        )
+                        .await;
+                    }
+                    return;
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
+            }
+        }
         let status = {
             let mut child = job.child.lock().await;
             match child
@@ -1142,6 +1470,129 @@ async fn run_job(
             return;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+struct JobLimits {
+    timeout_seconds: Option<u64>,
+    job_cgroup: JobCgroupHandle,
+    /// `Some` only for executions the startup-stall reaper watches.
+    startup_stall: Option<Duration>,
+}
+
+/// Stops per-execution placement when `run_job` returns; the cgroup is
+/// removed by the sweeper once its last process has exited.
+struct ExecutionCgroup {
+    handle: JobCgroupHandle,
+    execution_id: Uuid,
+}
+
+impl Drop for ExecutionCgroup {
+    fn drop(&mut self) {
+        self.handle.release_execution(self.execution_id);
+    }
+}
+
+/// Reap an execution that has written nothing `window` after it started.
+///
+/// On think3 an agent blocked in D-state during startup under node-wide I/O
+/// starvation and stayed `Running` with no output for hours, holding its
+/// session. The worker owns the evidence here: no output was ever observed,
+/// and SIGKILL is sent to the group and the execution cgroup. A process with
+/// SIGKILL pending never runs user code again, even while it waits out its
+/// I/O, so the turn is reported `Failed`. Drain accounting keeps counting the
+/// process until it actually exits. Executions that produced output are never
+/// reaped for being quiet, and neither is one a session transfer has stopped.
+async fn reap_if_silent(job: Arc<WorkerJob>, window: Duration, job_cgroup: JobCgroupHandle) {
+    let mut spawn_reported = false;
+    let _cancellation = loop {
+        tokio::time::sleep(window).await;
+        let cancellation = job.cancellation_guard().await;
+        if job.state().await.is_terminal() || job.output_seen.load(Ordering::Acquire) {
+            return;
+        }
+        // The spawn itself has not returned. Its future cannot be dropped
+        // safely (an executor may already own a process group it would leak)
+        // and no process is ours to kill yet, so nothing terminal is
+        // published: the job stays owned and active, with a visible
+        // diagnostic, and is reaped once the spawn hands over its child.
+        if job.child.lock().await.is_none() {
+            if !spawn_reported {
+                spawn_reported = true;
+                job.emit(ExecutionEventPayload::Structured {
+                    json: serde_json::json!({
+                        "worker_error": format!(
+                            "agent start has not returned after {window:?}; the node may be under memory or IO pressure. The execution stays owned until the start resolves"
+                        )
+                    })
+                    .to_string(),
+                })
+                .await;
+            }
+            continue;
+        }
+        // A session transfer stopped the process on purpose; its silence is
+        // not a stall. Check again one window later.
+        if job.quiesced_by.lock().await.is_none() {
+            break cancellation;
+        }
+    };
+    tracing::warn!(
+        execution_id = %job.execution_id,
+        window = ?window,
+        "execution produced no output since it started; reaping"
+    );
+    if let Some(child) = job.child.lock().await.as_mut() {
+        let _ = child.start_kill();
+    }
+    job_cgroup.kill_execution(job.execution_id);
+    finish_failed(&job, None, startup_stall_reason(window)).await;
+}
+
+fn startup_stall_reason(window: Duration) -> String {
+    format!(
+        "agent produced no output within {window:?} of starting; reaped by the worker (the node may be under memory or IO pressure)"
+    )
+}
+
+async fn stop_child(job: &WorkerJob) {
+    if let Some(child) = job.child.lock().await.as_mut() {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+    }
+}
+
+/// Give the agent this worker's PATH plus the app-managed CLI tools, and the
+/// same value as `VK_AGENT_PATH` so a login shell (Codex runs `bash -lc`) can
+/// restore it after the host profile replaces PATH.
+fn set_agent_path(environment: &mut BTreeMap<String, String>) {
+    let inherited = environment
+        .get("PATH")
+        .map(std::ffi::OsString::from)
+        .unwrap_or_else(|| std::env::var_os("PATH").unwrap_or_default());
+    let path = utils::shell::agent_path(&inherited)
+        .to_string_lossy()
+        .into_owned();
+    environment.insert("PATH".into(), path);
+    // GitHub owner routing uses this worker's own shim directory; the
+    // coordinator sends only the resolved tokens and owner manifest. It
+    // prepends to PATH, so record the agent PATH only after it.
+    utils::github_auth::apply_github_routing(environment);
+    utils::shell::sync_agent_path(environment);
+}
+
+fn prepend_workspace_gobin_to_path(environment: &mut BTreeMap<String, String>) {
+    let Some(gobin) = environment.get("GOBIN").cloned() else {
+        return;
+    };
+    let inherited = environment
+        .get("PATH")
+        .map(std::ffi::OsString::from)
+        .unwrap_or_else(|| std::env::var_os("PATH").unwrap_or_default());
+    if let Ok(path) = std::env::join_paths(
+        std::iter::once(PathBuf::from(gobin)).chain(std::env::split_paths(&inherited)),
+    ) {
+        environment.insert("PATH".into(), path.to_string_lossy().into_owned());
     }
 }
 
@@ -1228,11 +1679,29 @@ async fn await_output_tasks(
     stdout: Option<tokio::task::JoinHandle<()>>,
     stderr: Option<tokio::task::JoinHandle<()>>,
 ) {
-    if let Some(stdout) = stdout {
-        let _ = stdout.await;
-    }
-    if let Some(stderr) = stderr {
-        let _ = stderr.await;
+    await_output_tasks_with_timeout(stdout, stderr, OUTPUT_DRAIN_TIMEOUT).await;
+}
+
+async fn await_output_tasks_with_timeout(
+    mut stdout: Option<tokio::task::JoinHandle<()>>,
+    mut stderr: Option<tokio::task::JoinHandle<()>>,
+    timeout: Duration,
+) {
+    let drain = async {
+        if let Some(stdout) = stdout.as_mut() {
+            let _ = stdout.await;
+        }
+        if let Some(stderr) = stderr.as_mut() {
+            let _ = stderr.await;
+        }
+    };
+    if tokio::time::timeout(timeout, drain).await.is_err() {
+        if let Some(stdout) = stdout {
+            stdout.abort();
+        }
+        if let Some(stderr) = stderr {
+            stderr.abort();
+        }
     }
 }
 
@@ -1242,6 +1711,7 @@ async fn stream_output(job: Arc<WorkerJob>, mut reader: impl AsyncRead + Unpin, 
         match reader.read(&mut buffer).await {
             Ok(0) => return,
             Ok(size) => {
+                job.output_seen.store(true, Ordering::Release);
                 let data_base64 = BASE64_STANDARD.encode(&buffer[..size]);
                 let payload = if stderr {
                     ExecutionEventPayload::Stderr { data_base64 }
@@ -1266,6 +1736,8 @@ async fn set_state(job: &WorkerJob, state: JobState, payload: ExecutionEventPayl
 }
 
 async fn finish_status(job: &WorkerJob, status: ExitStatus) {
+    // Serialize terminal cleanup with publication/reload for this execution.
+    let _claim = job.mcp_refresh_claim.lock().await;
     let terminal_state = if job.state().await == JobState::Cancelling {
         TerminalState::Killed
     } else if status.success() {
@@ -1287,7 +1759,43 @@ async fn finish_status(job: &WorkerJob, status: ExitStatus) {
     *job.mcp_config.lock().await = None;
 }
 
+async fn finish_executor_result(job: &WorkerJob, result: ExecutorExitResult) {
+    // Serialize terminal cleanup with publication/reload for this execution.
+    let _claim = job.mcp_refresh_claim.lock().await;
+    let terminal_state = executor_terminal_state(&job.state().await, result);
+    let exit_code = match terminal_state {
+        TerminalState::Completed => Some(0),
+        TerminalState::Failed => Some(1),
+        _ => None,
+    };
+    let evidence = terminal_evidence(terminal_state.clone(), exit_code, None);
+    let (state, payload) = match terminal_state {
+        TerminalState::Completed => (
+            JobState::Completed,
+            ExecutionEventPayload::Completed(evidence),
+        ),
+        TerminalState::Killed => (JobState::Killed, ExecutionEventPayload::Killed(evidence)),
+        _ => (JobState::Failed, ExecutionEventPayload::Failed(evidence)),
+    };
+    set_state(job, state, payload).await;
+    *job.mcp_refresh.write().await = None;
+    *job.mcp_config.lock().await = None;
+}
+
+fn executor_terminal_state(current: &JobState, result: ExecutorExitResult) -> TerminalState {
+    if *current == JobState::Cancelling {
+        TerminalState::Killed
+    } else {
+        match result {
+            ExecutorExitResult::Success => TerminalState::Completed,
+            ExecutorExitResult::Failure => TerminalState::Failed,
+        }
+    }
+}
+
 async fn finish_failed(job: &WorkerJob, exit_code: Option<i32>, reason: String) {
+    // Serialize terminal cleanup with publication/reload for this execution.
+    let _claim = job.mcp_refresh_claim.lock().await;
     let _ = job.journal.lock().await.append(
         SystemTime::now(),
         ExecutionEventPayload::Structured {
@@ -1316,6 +1824,35 @@ fn terminal_evidence(
         signal,
         observed_at: Utc::now(),
     }
+}
+
+fn authorize_codex_action_directory(
+    action: &mut WorkerAction,
+    base: &Path,
+    workspace: &Path,
+    authority: &PathAuthority,
+) -> Result<PathBuf, ExecutionError> {
+    let WorkerAction::Executor(action) = action else {
+        unreachable!("Codex action")
+    };
+    let (effective, offset) = match &mut action.typ {
+        ExecutorActionType::CodingAgentInitialRequest(request) => {
+            (request.effective_dir(base), &mut request.working_dir)
+        }
+        ExecutorActionType::CodingAgentFollowUpRequest(request) => {
+            (request.effective_dir(base), &mut request.working_dir)
+        }
+        ExecutorActionType::ReviewRequest(request) => {
+            (request.effective_dir(base), &mut request.working_dir)
+        }
+        ExecutorActionType::ScriptRequest(_) => unreachable!("Codex action"),
+    };
+    let canonical = authority.authorize_workspace_path(&effective)?;
+    if !canonical.starts_with(workspace) {
+        return Err(ExecutionError::WorkingDirectoryOutsideWorkspace);
+    }
+    *offset = None;
+    Ok(canonical)
 }
 
 fn authorize_working_directory(
@@ -1365,6 +1902,512 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    fn codex_request(workspace: &Path, kind: &str, offset: &str) -> ExecutionDispatch {
+        let mut request = dispatch(workspace, "codex-fixture", "unused");
+        request.action = json!({"typ": {
+            "type": kind, "prompt": "fixture-context", "session_id": "fixture-session",
+            "executor_config": {"executor": "CODEX"}, "working_dir": offset
+        }, "next_action": null});
+        request
+    }
+
+    // The real Codex spawn path invokes this harmless child via its test binary.
+    #[tokio::test]
+    async fn codex_fake_child() {
+        let Ok(marker) = std::env::var("F558_MARKER") else {
+            return;
+        };
+        let home = PathBuf::from(std::env::var("CODEX_HOME").unwrap());
+        assert_eq!(home, PathBuf::from(std::env::var("EXPECTED_HOME").unwrap()));
+        let agent: CodingAgent = serde_json::from_value(json!({"CODEX": {}})).unwrap();
+        let config = executors::mcp_config::read_agent_config(
+            &home.join("config.toml"),
+            &agent.get_mcp_config(),
+        )
+        .await
+        .unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            config["projects"],
+            json!({cwd.to_str().unwrap(): {"trust_level": "trusted"}})
+        );
+        let expected: Vec<String> = std::env::var("EXPECTED_SERVERS")
+            .unwrap()
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(
+            config["mcp_servers"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            expected
+        );
+        let mut marker = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(marker)
+            .unwrap();
+        std::io::Write::write_all(&mut marker, cwd.to_str().unwrap().as_bytes()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn codex_launch_matrix_reads_trust_at_actual_child_boundary() {
+        // Deployments deliberately ignore profile command overrides. Isolate
+        // this fixture process so it can never invoke the deployed vendor CLI.
+        if std::env::var_os("VIBE_CODEX_COMMAND").is_some() {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "execution::tests::codex_launch_matrix_reads_trust_at_actual_child_boundary",
+                    "--nocapture",
+                ])
+                .env_remove("VIBE_CODEX_COMMAND")
+                .output()
+                .await
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        for kind in [
+            "CodingAgentInitialRequest",
+            "CodingAgentFollowUpRequest",
+            "ReviewRequest",
+        ] {
+            for snapshot_kind in ["absent", "empty", "present"] {
+                let local_profile = false;
+                let (temp, mut supervisor, workspace) = fixture();
+                let repo = workspace.join("repo");
+                fs::create_dir(&repo).unwrap();
+                let source = temp.path().join("source/config.toml");
+                fs::create_dir(source.parent().unwrap()).unwrap();
+                let original = "model = 'keep'\n[mcp_servers.original]\ncommand = 'unused'\n";
+                fs::write(&source, original).unwrap();
+                supervisor.codex_source = Some(source.clone());
+                let marker = temp.path().join("started");
+                let fake = temp.path().join("fake-codex");
+                fs::write(
+                    &fake,
+                    "#!/bin/sh\n\
+                     test \"$CODEX_HOME\" = \"$EXPECTED_HOME\" || exit 41\n\
+                     grep -F \"[projects.\\\"$PWD\\\"]\" \"$CODEX_HOME/config.toml\" >/dev/null || exit 42\n\
+                     grep -F 'trust_level = \"trusted\"' \"$CODEX_HOME/config.toml\" >/dev/null || exit 43\n\
+                     printf %s \"$PWD\" > \"$F558_MARKER\"\n",
+                )
+                .unwrap();
+                fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).unwrap();
+                let mut request = codex_request(
+                    &workspace,
+                    kind,
+                    repo.file_name().unwrap().to_str().unwrap(),
+                );
+                let profile = json!({"DEFAULT": {"CODEX": {"base_command_override": fake,
+                    "env": {"CODEX_HOME": "/wrong/profile"}}}});
+                if local_profile {
+                    supervisor.codex_command = Some(fake.clone());
+                } else {
+                    request.executor_profile_config = Some(profile.clone());
+                }
+                let expected = match snapshot_kind {
+                    "absent" => "original",
+                    "empty" => "",
+                    _ => "replacement",
+                };
+                if snapshot_kind != "absent" {
+                    request.mcp_config_snapshot = Some(McpConfigSnapshot {
+                        executor: "CODEX".into(),
+                        servers: if snapshot_kind == "empty" {
+                            BTreeMap::new()
+                        } else {
+                            BTreeMap::from([("replacement".into(), json!({"command": "unused"}))])
+                        },
+                    });
+                }
+                let execution_root = supervisor
+                    .mcp_config_root
+                    .join(request.execution_id.to_string());
+                request.environment = BTreeMap::from([
+                    ("CODEX_HOME".into(), "/wrong/dispatch".into()),
+                    (
+                        "EXPECTED_HOME".into(),
+                        execution_root.join("codex").to_str().unwrap().into(),
+                    ),
+                    ("EXPECTED_SERVERS".into(), expected.into()),
+                    ("F558_MARKER".into(), marker.to_str().unwrap().into()),
+                ]);
+                let id = request.execution_id;
+                let first = supervisor.dispatch(request.clone()).await.unwrap();
+                let replay = supervisor.dispatch(request.clone()).await.unwrap();
+                assert_eq!(first.worker_job_id, replay.worker_job_id);
+                let mut conflict = request;
+                conflict.request_digest = "changed-snapshot-and-action".into();
+                conflict.action["typ"]["working_dir"] = json!(".");
+                conflict.mcp_config_snapshot = Some(McpConfigSnapshot {
+                    executor: "CODEX".into(),
+                    servers: BTreeMap::new(),
+                });
+                assert!(matches!(
+                    supervisor.dispatch(conflict).await,
+                    Err(ExecutionError::DigestConflict { .. })
+                ));
+                wait_terminal(&supervisor, id).await;
+                assert!(
+                    marker.exists(),
+                    "{kind}/{snapshot_kind}/local={local_profile}: {:?}",
+                    supervisor.events(id, 0).await.unwrap()
+                );
+                assert_eq!(fs::read_to_string(&marker).unwrap(), repo.to_str().unwrap());
+                assert_eq!(fs::read_to_string(source).unwrap(), original);
+                assert_eq!(
+                    profile["DEFAULT"]["CODEX"]["env"]["CODEX_HOME"],
+                    "/wrong/profile"
+                );
+                assert!(!execution_root.exists());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn codex_offsets_and_failures_reject_before_acceptance() {
+        use std::os::unix::fs::symlink;
+        for kind in [
+            "CodingAgentInitialRequest",
+            "CodingAgentFollowUpRequest",
+            "ReviewRequest",
+        ] {
+            let (temp, mut supervisor, workspace) = fixture();
+            let source = temp.path().join("source/config.toml");
+            fs::create_dir(source.parent().unwrap()).unwrap();
+            supervisor.codex_source = Some(source.clone());
+            let sibling = workspace.parent().unwrap().join("sibling");
+            fs::create_dir(&sibling).unwrap();
+            symlink(&sibling, workspace.join("escape")).unwrap();
+            fs::create_dir(workspace.join("repo")).unwrap();
+            symlink(workspace.join("repo"), workspace.join("alias")).unwrap();
+            for offset in [".", "repo/../repo", "alias"] {
+                let request = codex_request(&workspace, kind, offset);
+                let mut action: WorkerAction = serde_json::from_value(request.action).unwrap();
+                let directory = authorize_codex_action_directory(
+                    &mut action,
+                    &workspace,
+                    &workspace,
+                    &supervisor.path_authority,
+                )
+                .unwrap();
+                assert_eq!(
+                    directory,
+                    if offset == "." {
+                        workspace.clone()
+                    } else {
+                        workspace.join("repo")
+                    }
+                );
+                let WorkerAction::Executor(action) = action else {
+                    unreachable!()
+                };
+                let value = serde_json::to_value(action).unwrap();
+                assert!(value["typ"]["working_dir"].is_null());
+                assert_eq!(value["typ"]["prompt"], "fixture-context");
+            }
+            for offset in ["../sibling", "escape"] {
+                let request = codex_request(&workspace, kind, offset);
+                let id = request.execution_id;
+                assert!(supervisor.dispatch(request).await.is_err());
+                assert!(supervisor.job(id).await.is_none());
+                assert!(!supervisor.mcp_config_root.join(id.to_string()).exists());
+            }
+            for content in ["secret = 'SENTINEL", "projects = 'SENTINEL'"] {
+                fs::write(&source, content).unwrap();
+                let request = codex_request(&workspace, kind, "repo");
+                let id = request.execution_id;
+                let error = supervisor.dispatch(request).await.unwrap_err();
+                assert!(matches!(error, ExecutionError::CodexConfig { .. }));
+                assert!(!error.to_string().contains("SENTINEL"));
+                assert!(supervisor.job(id).await.is_none());
+                assert!(!supervisor.mcp_config_root.join(id.to_string()).exists());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn codex_sqlite_directory_is_private_while_rollouts_survive_cleanup() {
+        use std::os::unix::fs::PermissionsExt;
+        let (temp, supervisor, workspace) = fixture();
+        let source_home = temp.path().join("source");
+        fs::create_dir_all(source_home.join("sqlite")).unwrap();
+        fs::write(source_home.join("sqlite/state.sqlite"), "shared-index").unwrap();
+        fs::write(source_home.join("auth.json"), "auth-fixture").unwrap();
+        let source = source_home.join("config.toml");
+        fs::write(&source, "sqlite_home = '/persistent/global'\n").unwrap();
+        let agent: CodingAgent = serde_json::from_value(json!({"CODEX": {}})).unwrap();
+        let mut homes = Vec::new();
+        for _ in 0..2 {
+            homes.push(
+                supervisor
+                    .prepare_codex_config(Uuid::new_v4(), agent.clone(), &source, &workspace, None)
+                    .await
+                    .unwrap(),
+            );
+        }
+        let first_home = homes[0].target_config.parent().unwrap().to_path_buf();
+        for prepared in &homes {
+            let home = prepared.target_config.parent().unwrap();
+            let sqlite = home.join("sqlite");
+            assert!(
+                !fs::symlink_metadata(&sqlite)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+            assert_eq!(
+                fs::metadata(&sqlite).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            assert!(!sqlite.join("state.sqlite").exists());
+            fs::write(sqlite.join("state.sqlite"), "private-index").unwrap();
+            fs::write(sqlite.join("state.sqlite-wal"), "private-wal").unwrap();
+            assert_eq!(
+                fs::read_to_string(home.join("auth.json")).unwrap(),
+                "auth-fixture"
+            );
+        }
+        fs::write(
+            first_home.join("sessions/rollout.jsonl"),
+            "persistent-rollout",
+        )
+        .unwrap();
+        drop(homes);
+        assert!(!first_home.exists());
+        assert_eq!(
+            fs::read_to_string(source_home.join("sessions/rollout.jsonl")).unwrap(),
+            "persistent-rollout"
+        );
+        assert_eq!(
+            fs::read_to_string(source_home.join("sqlite/state.sqlite")).unwrap(),
+            "shared-index"
+        );
+        assert!(!source_home.join("sqlite/state.sqlite-wal").exists());
+        assert_eq!(
+            fs::read_to_string(source).unwrap(),
+            "sqlite_home = '/persistent/global'\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_scoped_homes_are_private_and_failure_cleanup_is_owned() {
+        use std::os::unix::{ffi::OsStringExt, fs::PermissionsExt};
+        let (temp, supervisor, workspace) = fixture();
+        let source = temp.path().join("source/config.toml");
+        let agent: CodingAgent = serde_json::from_value(json!({"CODEX": {}})).unwrap();
+        // Missing source and absent snapshot are valid, including the selected root.
+        let first = supervisor
+            .prepare_codex_config(Uuid::new_v4(), agent.clone(), &source, &workspace, None)
+            .await
+            .unwrap();
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, "").unwrap();
+        let repo = workspace.join("repo");
+        fs::create_dir(&repo).unwrap();
+        let second = supervisor
+            .prepare_codex_config(Uuid::new_v4(), agent.clone(), &source, &repo, None)
+            .await
+            .unwrap();
+        for (prepared, expected, absent) in
+            [(&first, &workspace, &repo), (&second, &repo, &workspace)]
+        {
+            // Parse via the executor's native reader, retaining exact keys.
+            let config = fs::read_to_string(&prepared.target_config).unwrap();
+            assert!(config.contains(expected.to_str().unwrap()));
+            if expected == &repo {
+                assert!(!config.contains(&format!("projects.\"{}\"]", absent.display())));
+            }
+            assert!(
+                !fs::symlink_metadata(&prepared.target_config)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+            assert_eq!(
+                fs::metadata(prepared.target_config.parent().unwrap())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+            assert!(
+                fs::symlink_metadata(prepared.target_config.parent().unwrap().join("sessions"))
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+        }
+        fs::write(
+            second
+                .target_config
+                .parent()
+                .unwrap()
+                .join("sessions/rollout.jsonl"),
+            "persistent-session",
+        )
+        .unwrap();
+        let second_root = second.execution_root.clone();
+        drop(second);
+        assert!(!second_root.exists());
+        assert_eq!(
+            fs::read_to_string(source.parent().unwrap().join("sessions/rollout.jsonl")).unwrap(),
+            "persistent-session"
+        );
+        fs::remove_file(source.parent().unwrap().join("sessions/rollout.jsonl")).unwrap();
+        fs::remove_dir(source.parent().unwrap().join("sessions")).unwrap();
+        assert!(first.target_config.exists());
+        for stage in ["read", "preparation", "serialization", "write"] {
+            let id = Uuid::new_v4();
+            let mut snapshot = None;
+            let staged = source
+                .parent()
+                .unwrap()
+                .join(format!(".config.toml.{}.tmp", std::process::id()));
+            match stage {
+                "read" => {
+                    fs::remove_file(&source).unwrap();
+                    fs::create_dir(&source).unwrap();
+                }
+                "preparation" => {
+                    fs::remove_dir_all(source.parent().unwrap()).unwrap();
+                    fs::write(source.parent().unwrap(), "SENTINEL").unwrap();
+                }
+                "serialization" => {
+                    fs::remove_file(source.parent().unwrap()).unwrap();
+                    fs::create_dir(source.parent().unwrap()).unwrap();
+                    fs::write(&source, "").unwrap();
+                    snapshot = Some(McpConfigSnapshot {
+                        executor: "CODEX".into(),
+                        servers: BTreeMap::from([("invalid".into(), json!(null))]),
+                    });
+                }
+                "write" => {
+                    fs::create_dir(&staged).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let result = supervisor
+                .prepare_codex_config(id, agent.clone(), &source, &repo, snapshot.as_ref())
+                .await;
+            let error = match result {
+                Err(error) => error,
+                Ok(_) => panic!("expected {stage} failure"),
+            };
+            assert!(!error.to_string().contains("SENTINEL"));
+            assert!(!supervisor.mcp_config_root.join(id.to_string()).exists());
+            assert!(first.target_config.exists());
+        }
+        let invalid = PathBuf::from(std::ffi::OsString::from_vec(b"/invalid/\xff".to_vec()));
+        assert!(
+            supervisor
+                .prepare_codex_config(Uuid::new_v4(), agent.clone(), &source, &invalid, None)
+                .await
+                .is_err()
+        );
+        let mut invalid_supervisor = supervisor.clone();
+        invalid_supervisor.mcp_config_root = invalid;
+        assert!(
+            invalid_supervisor
+                .prepare_codex_config(Uuid::new_v4(), agent, &source, &repo, None)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_invalid_profile_and_snapshot_fail_before_writes() {
+        let (_temp, supervisor, workspace) = fixture();
+        for case in ["unknown", "mismatch", "snapshot"] {
+            let mut request = codex_request(&workspace, "CodingAgentInitialRequest", ".");
+            match case {
+                "unknown" => {
+                    request.action["typ"]["executor_config"]["variant"] =
+                        json!("MISSING_F558_VARIANT")
+                }
+                "mismatch" => {
+                    request.executor_profile_config = Some(json!({"DEFAULT": {"CLAUDE_CODE": {}}}))
+                }
+                "snapshot" => {
+                    request.mcp_config_snapshot = Some(McpConfigSnapshot {
+                        executor: "CLAUDE_CODE".into(),
+                        servers: BTreeMap::new(),
+                    })
+                }
+                _ => unreachable!(),
+            }
+            let id = request.execution_id;
+            assert!(supervisor.dispatch(request).await.is_err());
+            assert!(supervisor.job(id).await.is_none());
+            assert!(!supervisor.mcp_config_root.join(id.to_string()).exists());
+        }
+    }
+
+    #[test]
+    fn dispatched_gobin_is_prepended_to_worker_path() {
+        let mut environment = BTreeMap::from([
+            (
+                "GOBIN".into(),
+                "/shared/workspace/.vibe-kanban/go/bin".into(),
+            ),
+            ("PATH".into(), "/worker/nix/bin:/usr/bin".into()),
+        ]);
+
+        prepend_workspace_gobin_to_path(&mut environment);
+
+        let paths: Vec<_> =
+            std::env::split_paths(std::ffi::OsStr::new(&environment["PATH"])).collect();
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("/shared/workspace/.vibe-kanban/go/bin"),
+                PathBuf::from("/worker/nix/bin"),
+                PathBuf::from("/usr/bin"),
+            ]
+        );
+    }
+
+    #[test]
+    fn executor_signal_maps_to_terminal_state_without_os_exit() {
+        assert_eq!(
+            executor_terminal_state(&JobState::Running, ExecutorExitResult::Success),
+            TerminalState::Completed
+        );
+        assert_eq!(
+            executor_terminal_state(&JobState::Running, ExecutorExitResult::Failure),
+            TerminalState::Failed
+        );
+        assert_eq!(
+            executor_terminal_state(&JobState::Cancelling, ExecutorExitResult::Success),
+            TerminalState::Killed
+        );
+    }
+
+    #[tokio::test]
+    async fn output_drain_does_not_wait_forever_for_inherited_pipe() {
+        let pending = tokio::spawn(std::future::pending());
+
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            await_output_tasks_with_timeout(Some(pending), None, Duration::from_millis(10)),
+        )
+        .await
+        .expect("a retained output pipe must be abandoned after the drain deadline");
+    }
 
     fn fixture() -> (TempDir, ExecutionSupervisor, PathBuf) {
         let temp = TempDir::new().unwrap();
@@ -1427,12 +2470,17 @@ mod tests {
     #[derive(Default)]
     struct RefreshFixture {
         queued: AtomicUsize,
+        gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
     }
 
     #[async_trait]
     impl McpRefreshControl for RefreshFixture {
         async fn queue_refresh(&self) -> Result<(), McpRefreshErrorCategory> {
             self.queued.fetch_add(1, AtomicOrdering::SeqCst);
+            if let Some((entered, release)) = &self.gate {
+                entered.notify_one();
+                release.notified().await;
+            }
             Ok(())
         }
 
@@ -1443,9 +2491,16 @@ mod tests {
                 server_id: "snapshot-b".into(),
                 status: McpServerRefreshStatus::Ready,
                 tool_count: Some(1),
+                tool_names: Some(vec!["snapshot-b-tool".into()]),
+                tool_schema_fingerprint: Some("snapshot-b-schema".into()),
                 resource_count: Some(0),
                 prompt_count: Some(0),
                 restart_occurred: Some(true),
+                discovery_attempts: 1,
+                observed_errors: Vec::new(),
+                first_observed_at: None,
+                last_observed_at: None,
+                terminal_at: None,
                 error: None,
             }])
         }
@@ -1533,7 +2588,7 @@ mod tests {
         fs::create_dir_all(&scoped_home).unwrap();
         fs::write(
             scoped_home.join("config.toml"),
-            "model = 'preserved'\n[mcp_servers.snapshot-a]\ncommand = 'old'\n",
+            "model = 'preserved'\ntime = 1979-05-27T07:32:00Z\n[projects.'/exact/repo']\ntrust_level = 'trusted'\n[mcp_servers.snapshot-a]\ncommand = 'old'\n",
         )
         .unwrap();
         fs::write(scoped_home.join("history.jsonl"), "conversation-state").unwrap();
@@ -1563,6 +2618,8 @@ mod tests {
             mcp_refresh: RwLock::new(Some(McpRefreshHandle(control.clone()))),
             mcp_refresh_claim: Mutex::new(()),
             quiesced_by: Mutex::new(None),
+            output_seen: AtomicBool::new(false),
+            leader_pid: AtomicU32::new(0),
         });
         supervisor.jobs.write().await.insert(execution_id, job);
 
@@ -1588,6 +2645,9 @@ mod tests {
         let config = fs::read_to_string(scoped_home.join("config.toml")).unwrap();
         assert!(config.contains("model = \"preserved\""));
         assert!(config.contains("snapshot-b"));
+        assert!(config.contains("/exact/repo"));
+        assert!(config.contains("trust_level = \"trusted\""));
+        assert!(config.contains("1979-05-27T07:32:00Z"));
         assert!(!config.contains("snapshot-a"));
         assert!(config.contains("http://coordinator.internal:3334/base/mcp-gateway/connection-b"));
         assert_eq!(
@@ -1600,6 +2660,87 @@ mod tests {
             supervisor.job(execution_id).await.unwrap().state().await,
             JobState::Running
         );
+        let snapshot = McpConfigSnapshot {
+            executor: "CODEX".into(),
+            servers: BTreeMap::new(),
+        };
+        let job = supervisor.job(execution_id).await.unwrap();
+        let claim = job.mcp_refresh_claim.lock().await;
+        assert_eq!(
+            supervisor
+                .refresh_mcp(execution_id, &snapshot)
+                .await
+                .unwrap()
+                .status,
+            WorkerMcpRefreshStatus::Busy
+        );
+        drop(claim);
+        for content in [None, Some("secret = 'SENTINEL")] {
+            let path = scoped_home.join("config.toml");
+            fs::remove_file(&path).unwrap();
+            if let Some(content) = content {
+                fs::write(&path, content).unwrap();
+            }
+            assert_eq!(
+                supervisor
+                    .refresh_mcp(execution_id, &snapshot)
+                    .await
+                    .unwrap()
+                    .status,
+                WorkerMcpRefreshStatus::MaterializationFailed
+            );
+            assert_eq!(control.queued.load(AtomicOrdering::SeqCst), 1);
+            assert_eq!(job.state().await, JobState::Running);
+            if content.is_none() {
+                fs::write(&path, "").unwrap();
+            }
+        }
+        // Hold a real refresh at its reload boundary while terminal cleanup contends.
+        fs::write(scoped_home.join("config.toml"), &config).unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let gated = Arc::new(RefreshFixture {
+            queued: AtomicUsize::new(0),
+            gate: Some((entered.clone(), release.clone())),
+        });
+        *job.mcp_refresh.write().await = Some(McpRefreshHandle(gated.clone()));
+        let refreshing = {
+            let supervisor = supervisor.clone();
+            let snapshot = snapshot.clone();
+            tokio::spawn(async move {
+                supervisor
+                    .refresh_mcp(execution_id, &snapshot)
+                    .await
+                    .unwrap()
+            })
+        };
+        entered.notified().await;
+        let finishing = {
+            let job = job.clone();
+            tokio::spawn(async move {
+                finish_executor_result(&job, ExecutorExitResult::Success).await;
+            })
+        };
+        tokio::task::yield_now().await;
+        assert!(!finishing.is_finished());
+        assert!(scoped_home.exists());
+        release.notify_one();
+        assert_eq!(
+            refreshing.await.unwrap().status,
+            WorkerMcpRefreshStatus::Queued
+        );
+        finishing.await.unwrap();
+        assert!(!scoped_home.exists());
+        assert_eq!(
+            supervisor
+                .refresh_mcp(execution_id, &snapshot)
+                .await
+                .unwrap()
+                .status,
+            WorkerMcpRefreshStatus::Unsupported
+        );
+        assert!(!scoped_home.exists());
+        assert_eq!(gated.queued.load(AtomicOrdering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -1678,6 +2819,41 @@ mod tests {
             "global = true"
         );
         assert!(!first.join("config.toml.bak").exists());
+    }
+
+    #[test]
+    fn scoped_home_sees_shared_aws_login_and_atomic_token_refresh() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("source");
+        let shared = temp.path().join("shared-aws");
+        let scoped = temp.path().join("scoped");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&shared).unwrap();
+        symlink(&shared, source.join(".aws")).unwrap();
+        prepare_scoped_home(&source, &scoped, Path::new(".gemini/settings.json")).unwrap();
+        assert!(!scoped.join(".aws/config").exists());
+
+        // Login can happen after the execution home was prepared.
+        fs::create_dir_all(shared.join("sso/cache")).unwrap();
+        fs::write(shared.join("config"), "[profile fixture]").unwrap();
+        fs::write(shared.join("sso/cache/fixture.json"), "first").unwrap();
+        assert_eq!(
+            fs::read_to_string(scoped.join(".aws/config")).unwrap(),
+            "[profile fixture]"
+        );
+        fs::write(shared.join("sso/cache/replacement.json"), "refreshed").unwrap();
+        fs::rename(
+            shared.join("sso/cache/replacement.json"),
+            shared.join("sso/cache/fixture.json"),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(scoped.join(".aws/sso/cache/fixture.json")).unwrap(),
+            "refreshed"
+        );
+        assert!(!source.join(".gemini/settings.json").exists());
     }
 
     #[test]
@@ -1772,6 +2948,123 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dispatched_github_tokens_get_worker_local_routing() {
+        let (_temp, supervisor, workspace) = fixture();
+        let mut request = dispatch(
+            &workspace,
+            "github",
+            "printf '%s|%s' \"${PATH%%:*}\" \"$GIT_CONFIG_PARAMETERS\"",
+        );
+        request
+            .environment
+            .insert(utils::github_auth::OWNERS_ENV.into(), "org-a".into());
+        request.environment.insert(
+            utils::github_auth::token_env_name("org-a"),
+            "synthetic-token".into(),
+        );
+        let execution_id = request.execution_id;
+        supervisor.dispatch(request).await.unwrap();
+        let summary = wait_terminal(&supervisor, execution_id).await;
+        assert_eq!(summary.state, JobState::Completed);
+
+        let batch = supervisor.events(execution_id, 0).await.unwrap();
+        let output = batch
+            .events
+            .iter()
+            .filter_map(|event| match &event.payload {
+                ExecutionEventPayload::Stdout { data_base64 } => {
+                    BASE64_STANDARD.decode(data_base64).ok()
+                }
+                _ => None,
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        let output = String::from_utf8_lossy(&output);
+        let fields: Vec<_> = output.split('|').collect();
+        assert!(
+            fields[1].contains("'credential.https://github.com/org-a.helper="),
+            "{output}"
+        );
+        assert_eq!(
+            std::path::Path::new(fields[0]),
+            utils::assets::github_auth_bin_dir()
+        );
+        assert!(!output.contains("synthetic-token"));
+    }
+
+    #[tokio::test]
+    async fn spawned_agents_can_restore_their_path_in_a_login_shell() {
+        // A login shell may replace PATH (NixOS set-environment; Codex runs
+        // `bash -lc`). The spawned process must carry an identical copy for
+        // the host login profile to restore.
+        let (_temp, supervisor, workspace) = fixture();
+        let mut request = dispatch(
+            &workspace,
+            "agent-path",
+            r#"[ -n "$VK_AGENT_PATH" ] && [ "$VK_AGENT_PATH" = "$PATH" ] && printf %s "$VK_AGENT_PATH""#,
+        );
+        request
+            .environment
+            .insert("PATH".into(), "/fixture/bin".into());
+        let execution_id = request.execution_id;
+        supervisor.dispatch(request).await.unwrap();
+        let summary = wait_terminal(&supervisor, execution_id).await;
+        assert_eq!(summary.state, JobState::Completed);
+
+        let batch = supervisor.events(execution_id, 0).await.unwrap();
+        let output = batch
+            .events
+            .iter()
+            .filter_map(|event| match &event.payload {
+                ExecutionEventPayload::Stdout { data_base64 } => {
+                    BASE64_STANDARD.decode(data_base64).ok()
+                }
+                _ => None,
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        assert!(String::from_utf8_lossy(&output).starts_with("/fixture/bin"));
+    }
+
+    #[test]
+    fn a_dispatched_agent_path_cannot_override_the_worker_value() {
+        let mut environment = BTreeMap::from([
+            ("PATH".into(), "/worker/bin".into()),
+            (
+                utils::shell::AGENT_PATH_ENV.into(),
+                "/coordinator/bin".into(),
+            ),
+        ]);
+        set_agent_path(&mut environment);
+        assert_eq!(
+            environment[utils::shell::AGENT_PATH_ENV],
+            environment["PATH"]
+        );
+        assert!(environment["PATH"].starts_with("/worker/bin"));
+    }
+
+    #[test]
+    fn agent_path_includes_the_github_routing_shim() {
+        // The shim must survive a login shell too, or `gh` there would bypass
+        // per-owner token routing.
+        let mut environment = BTreeMap::from([
+            ("PATH".into(), "/worker/bin".into()),
+            (utils::github_auth::OWNERS_ENV.into(), "org-a".into()),
+            (
+                utils::github_auth::token_env_name("org-a"),
+                "synthetic-token".into(),
+            ),
+        ]);
+        set_agent_path(&mut environment);
+        let agent_path = &environment[utils::shell::AGENT_PATH_ENV];
+        assert_eq!(agent_path, &environment["PATH"]);
+        assert_eq!(
+            std::env::split_paths(std::ffi::OsStr::new(agent_path)).next(),
+            Some(utils::assets::github_auth_bin_dir())
+        );
+    }
+
+    #[tokio::test]
     async fn active_count_is_authoritative_drain_evidence() {
         let (_temp, supervisor, workspace) = fixture();
         assert_eq!(supervisor.active_execution_count().await, 0);
@@ -1838,6 +3131,202 @@ mod tests {
                 .await,
             Err(ExecutionError::Draining)
         ));
+    }
+
+    #[tokio::test]
+    async fn pressure_refuses_new_dispatch_but_keeps_idempotent_retries() {
+        let (_temp, supervisor, workspace) = fixture();
+        let refusing = Arc::new(AtomicBool::new(false));
+        let reading = refusing.clone();
+        let supervisor = supervisor.with_hardening(
+            JobCgroupHandle::disabled(),
+            AdmissionPressure::with_reader(Some(40.0), move || PressureReading {
+                memory_full_avg60: Some(1.0),
+                io_full_avg60: Some(if reading.load(Ordering::Acquire) {
+                    78.0
+                } else {
+                    0.0
+                }),
+            }),
+            None,
+        );
+        let accepted = dispatch(&workspace, "accepted-before-pressure", "sleep 0.2");
+        supervisor.dispatch(accepted.clone()).await.unwrap();
+
+        refusing.store(true, Ordering::Release);
+        assert!(supervisor.pressure_status().admission_refusing);
+        assert!(supervisor.dispatch(accepted).await.is_ok());
+        let refused = supervisor
+            .dispatch(dispatch(&workspace, "new-under-pressure", "true"))
+            .await
+            .unwrap_err();
+        assert!(matches!(refused, ExecutionError::UnderPressure(_)));
+        assert!(refused.to_string().contains("io pressure"), "{refused}");
+    }
+
+    fn reaping(supervisor: ExecutionSupervisor, window: Duration) -> ExecutionSupervisor {
+        let mut supervisor = supervisor.with_hardening(
+            JobCgroupHandle::disabled(),
+            AdmissionPressure::with_reader(None, PressureReading::default),
+            Some(window),
+        );
+        supervisor.reap_commands = true;
+        supervisor
+    }
+
+    async fn journal_text(supervisor: &ExecutionSupervisor, execution_id: Uuid) -> String {
+        let batch = supervisor.events(execution_id, 0).await.unwrap();
+        serde_json::to_string(&batch).unwrap()
+    }
+
+    #[tokio::test]
+    async fn silent_execution_is_reaped_with_a_named_cause_and_its_process_killed() {
+        let (_temp, supervisor, workspace) = fixture();
+        let supervisor = reaping(supervisor, Duration::from_millis(200));
+        let request = dispatch(&workspace, "silent", "exec sleep 30");
+        let execution_id = request.execution_id;
+        supervisor.dispatch(request).await.unwrap();
+
+        let summary = wait_terminal(&supervisor, execution_id).await;
+        assert_eq!(summary.state, JobState::Failed);
+        assert_eq!(
+            summary.terminal.map(|terminal| terminal.state),
+            Some(TerminalState::Failed)
+        );
+        let journal = journal_text(&supervisor, execution_id).await;
+        assert!(
+            journal.contains("agent produced no output within 200ms of starting; reaped"),
+            "{journal}"
+        );
+
+        // The kill landed: the process exits and drain evidence clears.
+        let job = supervisor.job(execution_id).await.unwrap();
+        for _ in 0..200 {
+            if supervisor.active_execution_count().await == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(supervisor.active_execution_count().await, 0);
+        assert!(matches!(
+            job.child().await.as_mut().unwrap().try_wait(),
+            Ok(Some(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn execution_that_produced_output_is_never_reaped_for_silence() {
+        let (_temp, supervisor, workspace) = fixture();
+        let supervisor = reaping(supervisor, Duration::from_millis(100));
+        let request = dispatch(&workspace, "talkative", "echo started; sleep 0.5");
+        let execution_id = request.execution_id;
+        supervisor.dispatch(request).await.unwrap();
+
+        let summary = wait_terminal(&supervisor, execution_id).await;
+        assert_eq!(summary.state, JobState::Completed);
+        assert!(
+            !journal_text(&supervisor, execution_id)
+                .await
+                .contains("reaped")
+        );
+    }
+
+    #[tokio::test]
+    async fn reaper_ignores_actions_it_does_not_watch() {
+        let (_temp, supervisor, workspace) = fixture();
+        let mut supervisor = reaping(supervisor, Duration::from_millis(100));
+        // Without the test opt-in only coding-agent actions are watched.
+        supervisor.reap_commands = false;
+        let request = dispatch(&workspace, "quiet-script", "sleep 0.4");
+        let execution_id = request.execution_id;
+        supervisor.dispatch(request).await.unwrap();
+        assert_eq!(
+            wait_terminal(&supervisor, execution_id).await.state,
+            JobState::Completed
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stalled_spawn_is_reported_but_never_published_as_terminal() {
+        let execution_id = Uuid::new_v4();
+        let job = Arc::new(WorkerJob {
+            execution_id,
+            worker_job_id: Uuid::new_v4(),
+            workspace_id: Uuid::new_v4(),
+            request_digest: "stalled-spawn".into(),
+            state: RwLock::new(JobState::Starting),
+            journal: Mutex::new(EventJournal::new(execution_id, 16).unwrap()),
+            child: Mutex::new(None),
+            cancellation: Mutex::new(()),
+            acknowledged_sequence: Mutex::new(0),
+            recovery_store: None,
+            interactions: Arc::new(InteractionBroker::default()),
+            mcp_config: Mutex::new(None),
+            mcp_refresh: RwLock::new(None),
+            mcp_refresh_claim: Mutex::new(()),
+            quiesced_by: Mutex::new(None),
+            output_seen: AtomicBool::new(false),
+            leader_pid: AtomicU32::new(0),
+        });
+        let reaper = tokio::spawn(reap_if_silent(
+            job.clone(),
+            Duration::from_millis(20),
+            JobCgroupHandle::disabled(),
+        ));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Several windows passed: one diagnostic, still owned and active.
+        let journal = serde_json::to_string(&job.journal.lock().await.replay_after(0)).unwrap();
+        assert_eq!(
+            journal.matches("agent start has not returned").count(),
+            1,
+            "{journal}"
+        );
+        assert_eq!(job.state().await, JobState::Starting);
+        assert!(job.is_active_for_drain().await);
+
+        // Once the job ends some other way, the reaper stops.
+        finish_failed(&job, None, "spawn failed".into()).await;
+        tokio::time::timeout(Duration::from_secs(2), reaper)
+            .await
+            .expect("the reaper exits once the job is terminal")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_spawn_that_returns_after_the_job_ended_is_killed_and_changes_nothing() {
+        let (_temp, supervisor, workspace) = fixture();
+        let request = dispatch(&workspace, "late-spawn", "true");
+        let execution_id = request.execution_id;
+        supervisor.dispatch(request).await.unwrap();
+        let summary = wait_terminal(&supervisor, execution_id).await;
+        let job = supervisor.job(execution_id).await.unwrap();
+
+        // Re-running the job models a spawn that completes after the job was
+        // already made terminal (reaped or cancelled).
+        let action: WorkerAction =
+            serde_json::from_value(json!({"program": "/bin/sh", "args": ["-c", "sleep 30"]}))
+                .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            run_job(
+                job.clone(),
+                action,
+                (workspace.clone(), workspace.clone()),
+                BTreeMap::new(),
+                None,
+                None,
+                JobLimits {
+                    timeout_seconds: None,
+                    job_cgroup: JobCgroupHandle::disabled(),
+                    startup_stall: None,
+                },
+            ),
+        )
+        .await
+        .expect("a late child is killed instead of supervised");
+        let after = job.summary().await;
+        assert_eq!(after.state, summary.state);
+        assert_eq!(after.last_sequence, summary.last_sequence);
     }
 
     #[tokio::test]

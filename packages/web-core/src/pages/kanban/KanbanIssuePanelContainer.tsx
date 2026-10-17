@@ -12,6 +12,10 @@ import type { OrganizationMemberWithProfile } from 'shared/types';
 import type { IssuePriority } from 'shared/remote-types';
 import { useDebouncedCallback } from '@/shared/hooks/useDebouncedCallback';
 import { useProjectContext } from '@/shared/hooks/useProjectContext';
+import {
+  useNewIssuePipelineDefaults,
+  usePipelines,
+} from '@/shared/hooks/usePipelines';
 import { useOrgContext } from '@/shared/hooks/useOrgContext';
 import { useProjectWorkspaceCreateDraft } from '@/shared/hooks/useProjectWorkspaceCreateDraft';
 import WYSIWYGEditor from '@/shared/components/WYSIWYGEditor';
@@ -394,6 +398,24 @@ export function KanbanIssuePanelContainer({
   useEffect(() => {
     pipelineRef.current = null;
   }, [issueComposerKey]);
+
+  // The project's resolved new-issue default pipelines (project → org →
+  // machine). `null` while loading so the create-mode card waits instead of
+  // seeding a guess; `[]` on failure, i.e. no pipeline.
+  const newIssuePipelineDefaults = useNewIssuePipelineDefaults(
+    projectId,
+    mode === 'create'
+  );
+  const createDefaultPipelineIds = newIssuePipelineDefaults.isError
+    ? []
+    : (newIssuePipelineDefaults.data?.pipeline_ids ?? null);
+  // Until the pipeline list and its defaults settle, the create-mode card
+  // hasn't seeded its selection, so submitting would silently create the
+  // issue without its configured pipelines.
+  const { isPending: pipelinesPending } = usePipelines();
+  const pipelineSeedPending =
+    mode === 'create' &&
+    (pipelinesPending || newIssuePipelineDefaults.isPending);
 
   // Edit-mode Pipeline selection (state, not a ref: the Update Issue
   // button's enabled/disabled derives from it). Reset on issue switch, in
@@ -888,7 +910,13 @@ export function KanbanIssuePanelContainer({
 
   // Submit handler
   const handleSubmit = useCallback(async () => {
-    if (!displayData.title.trim() || hasPendingAttachments) return;
+    if (
+      !displayData.title.trim() ||
+      hasPendingAttachments ||
+      pipelineSeedPending
+    ) {
+      return;
+    }
 
     setIsSubmitting(true);
     try {
@@ -1048,6 +1076,7 @@ export function KanbanIssuePanelContainer({
     getAttachmentIds,
     clearAttachments,
     hasPendingAttachments,
+    pipelineSeedPending,
     onExpectIssueOpen,
     t,
   ]);
@@ -1222,6 +1251,7 @@ export function KanbanIssuePanelContainer({
         />
       )}
       isSubmitting={isSubmitting}
+      isSubmitBlocked={pipelineSeedPending}
       descriptionSaveStatus={
         mode === 'edit' ? descriptionSaveStatus : undefined
       }
@@ -1251,6 +1281,7 @@ export function KanbanIssuePanelContainer({
             // composer or a deleted draft gets a fresh instance.
             key={`create:${issueComposerKey}:${pipelineResetKey}`}
             disabled={isSubmitting}
+            defaultPipelineIds={createDefaultPipelineIds}
             onChange={handlePipelineChange}
           />
         ) : selectedKanbanIssueId ? (

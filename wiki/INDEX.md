@@ -18,11 +18,72 @@ contributed to it.
 
 ## Pages
 
+- [1password-reference-resolution.md](1password-reference-resolution.md) — How `op://` org Env Vars and owner tokens are resolved and under which token, how failures are classified (rate-limited, token rejected, not found, unknown) and why stderr is never shown, the echoed-name and pipe-deadlock gotchas, and a no-secret debugging recipe that includes the shared 1,000-request/24 h service-account quota (`vk/76ab-debug-1password`).
+
+- [aws-sso-agent-state.md](aws-sso-agent-state.md) — Shared AWS state, scoped homes, profile selection, host-versus-agent availability evidence, and bounded authentication probes. Lazy admission prevents same-batch queue expiry; executable discovery is shared per refresh. Final deployed check: 31/31 authenticated, plus successful agent CLI and Node SDK default-provider authentication.
+
+- [unattended-reauth.md](unattended-reauth.md) — Re-authenticating AWS SSO,
+  the Entra CLIs, acli and sgsc backends with no human
+  (`vk/ba8f-auth-auth`). Covers server-defined canonical targets, detached
+  runs with cheap registry polling, and the shared-account refusal latch
+  with its check/attempt/latch lock. Explains why refusals must be
+  normalised from every error path, why credentials go only to Entra
+  origins, and why probes need auth-error evidence rather than exit codes.
+  Also covers the browser session and profile-lock hazards and the
+  stale-response rules for the Settings card.
+
+- [mcp-pr-tools-and-connection-notices.md](mcp-pr-tools-and-connection-notices.md) — Why a Claude "failed to connect" notice can name a shadowing project `.mcp.json` duplicate rather than the working VK server (same-name replacement, ancestor loading, `disabledMcpjsonServers`); reading CI without the Checks permission (per-source coverage, truncation, superseded runs, pass-by-allowlist, two-witness merge gate); safe SHA-guarded merge, fork-aware encoded branch deletion, remote-aware PR resolution and endpoint-routed `gh api` credentials (`vk/53bc-agents-fall-back`).
+
+- [embedded-mcp-oauth-server.md](embedded-mcp-oauth-server.md) — VK as the
+  OAuth 2.1 server for OAuth-only MCP clients (ChatGPT connectors): opt-in
+  issuer, verify endpoint for reverse-proxy `forward_auth`, opaque hashed
+  tokens, explicit `now`. Treat a lost concurrent code exchange as a replay,
+  enforce caps inside the INSERT, and keep `form-action` out of the consent
+  CSP (`vk/50df-chatgpt-custom-m`).
+
+- [mcp-oauth-connection-identity.md](mcp-oauth-connection-identity.md) — Preserve owner-bound gateway identity across identifier changes and both OAuth completion paths.
+
+- [issue-workspace-lifecycle.md](issue-workspace-lifecycle.md) — Comment-driven activation, transactional Done reopening, queue handoff ordering and local/remote sync boundaries.
+
+- [issue-workspace-advisory.md](issue-workspace-advisory.md) — Exact issue matching, sibling-scoped evidence, dismissible creation warnings, collapsed active counts and host-safe navigation.
+
+- [preview-app-url-persistence.md](preview-app-url-persistence.md) — Embedded
+  preview origins and in-app routes are separate authorities: persist only the
+  transport-clean path/query/hash, restore it at iframe lifecycle boundaries,
+  scope navigation by workspace, and serialize complete scratch writes against
+  acknowledged versions so live navigation never reloads or loops.
+- [executor-model-catalogs.md](executor-model-catalogs.md) — Executor
+  discovery is the authoritative source for model pickers. Verify current IDs
+  and reasoning boundaries against provider sources, keep Default implicit,
+  test exact ordered catalogs, and keep catalog refreshes separate from managed
+  CLI upgrades. Claude upgrades must align the npm launcher, catalog and
+  context mapping. Advertise versioned IDs only, and resolve legacy aliases
+  through `model_aliases` read from the pinned binary.
+- [model-picker-preferences.md](model-picker-preferences.md) — Per-agent
+  picker preferences on `ExecutorProfile` (serde, merge, reserved keys).
+  Hiding keeps the selection visible. Invalidate `['user-system']` so stale
+  chat copies cannot overwrite a save. Settings discovery follows the settings
+  host, and touch pickers must not autofocus inputs.
+- [agent-picker-visibility.md](agent-picker-visibility.md) — Disabling
+  agents is a per-host `ExecutorProfile.disabled` display flag, not access
+  control. One resolver (`disabledAgents.ts`) keeps the current value visible,
+  never strands a picker, skips disabled agents only in implicit fallbacks,
+  and guards the default/last agent against unsaved state. Includes the
+  picker inventory and the `settings.agents.availability` i18n key trap
+  (`vk/2e22-disable-agent`).
+- [host-env-sensitive-tests.md](host-env-sensitive-tests.md) — The Slack
+  `shared_mcp_config` tests and the worker GitHub-routing test fail only on
+  the agent host because of real `VIBE_KANBAN_SLACK_MCP_URL` and
+  `GIT_CONFIG_*`/`VK_GITHUB_PAT_*` variables. Re-run with them unset before
+  blaming a diff. Also covers foreground-only test runs in VK turns
+  (`vk/2e22-disable-agent`).
 - [browser-title-selection.md](browser-title-selection.md) — Browser-tab titles
   select one meaningful label from an ordered fallback chain, trim metadata
   whitespace, use product branding only as the empty-state fallback, and remain
   separate from visible breadcrumb identity.
 - [browser-session-control-arbiter.md](browser-session-control-arbiter.md) —
+  Mobile keyboard gesture focus, composition, plain-text clipboard fallbacks
+  and control-scoped async results (`vk/5c0e-vk-browser`), plus
   Workspace browser sessions with shared human/agent control: the
   three-lock concurrency shape (control mutex / command gate / Arc'd driver
   handle), lease+generation arbitration with invalidate-never-replay,
@@ -42,10 +103,12 @@ contributed to it.
   paths, generated TypeScript types, generic route/UI behavior, focused
   validation, and host-first PATH propagation across local and clustered
   workspace process boundaries.
+- [claude-missing-transcript-fallback.md](claude-missing-transcript-fallback.md) — When Claude's private transcript is gone, a follow-up starts a visible fresh session instead of failing forever with `No conversation found`. Covers the fail-open probe across all `projects/*` folders (vendor scope verified on 2.1.281), resolving from the execution env, the stderr notice channel (IX) and why history is never seeded (`vk/9f5d-no-conversation`).
 - [agent-process-lifecycle.md](agent-process-lifecycle.md) — How a coding-agent
   turn ends at the process level: the one-turn-one-`ExecutionProcess` identity
   chain, the implicit app-server marker (`exit_signal: Some` vs `None`, distinct
-  from `is_persistent()`), the exit monitor's **two** kill points (exit-signal
+  from `is_persistent()`), why process liveness is turn evidence only for
+  natural-exit executors, the exit monitor's **two** kill points (exit-signal
   `killpg` + tail `start_kill`/`kill_on_drop`), the 250ms OS-exit-watcher
   poll-loop gotcha, why teardown skips `Completed` executions (warm-process
   trap), the pgid re-adoption substrate, the keep-warm enablement order, **and
@@ -55,6 +118,40 @@ contributed to it.
   reap, the env gate, the Codex/ACP Phase-3 decisions, and why cleanup-skip early
   finalization must dispatch queued follow-ups before setting its finalized
   guard.
+- [vk-pollers.md](vk-pollers.md) — Replacing each agent CLI's in-turn background
+  poller with a VK-owned one: why a poller is deliberately a background helper
+  (migration-free `Option<PollerSpec>`, one shared concurrency budget), why
+  denying tool *names* is insufficient when the vendor's real path runs through a
+  **parameter** (`Bash(run_in_background)` plus an undeniable `Read` on the
+  output file), the verify-the-executing-artifact rule (the Claude npm package is
+  a stub whose `sdk-tools.d.ts` lists schema titles rather than wire tool names;
+  Codex config keys fail open and so are pinned by test), Grok's evidenced
+  no-op, Claude's resettable post-result hook quiescence window and fail-loud
+  response delivery, the `exit N`-in-a-subshell trap that would silently
+  swallow tick failures, and the drawer summary that rides a stream the layout
+  already had; workspace-wide Polling classification through the existing bulk
+  summary, approval/run precedence, and why dropped history still counts as live;
+  required stopping rules, portable process-group deadlines, and scratch cleanup
+  before forced termination (`vk/bd71-require-all-poll`); and why a control must
+  bound the *effect* rather than a name — the tool-name and `run_in_background`
+  denials both held while a plain foreground `until … sleep` loop hung a turn for
+  an hour, plus the `BASH_*_TIMEOUT_MS` clamp that makes lowering the maximum
+  alone silently inert, and why a deny predicate on `Bash` is mostly
+  false-positive engineering (`vk/603d-prevent-stuck-jo`).
+- [codex-credential-refresh.md](codex-credential-refresh.md) — Why concurrent
+  `codex app-server` processes sharing one ChatGPT `auth.json` hit "refresh token
+  already used" (rotating single-use refresh tokens + Codex's guarded reload but
+  **no cross-process lock**), and the serialized up-front refresh that fixes it:
+  a JWT-expiry gate mirroring Codex's 5-min window, a per-path in-process async
+  mutex + `fd-lock`/`flock` on the shared `auth.json` inode (non-blocking
+  `try_write` poll), `get_account(refresh_token=true)` to drive Codex's guarded
+  refresh once, the shared-inode + lock-order invariants, fail-safe fallbacks,
+  and the rejected alternatives (external-auth bridge, blind retry). Plus
+  copy-holders whose refresh token is blank by design: Codex's in-turn 401
+  recovery is the fatal path, the deployment's `CODEX_REFRESH_TOKEN_URL_OVERRIDE`
+  endpoint serves the owner's current token, and VK skips doomed pre-turn
+  refreshes and renders refresh failures as `SetupRequired`
+  (`vk/82c6-vk-error-when-us`, `vk/6c79-codex-auth-error`).
 - [slack-shortcut-ai-summarization.md](slack-shortcut-ai-summarization.md) —
   Optional AI thread summarization for the Slack "Create issue from message"
   shortcut: the ack-fast/enrich-later shape (all slow work in the post-ack
@@ -77,6 +174,7 @@ contributed to it.
   error/recovery callback chain to the navbar banner, why the readiness timeout
   must fall back silently ("falling back is recovery, not an error"), and the
   stable-callback / caching / testing gotchas.
+- [new-issue-pipeline-defaults.md](new-issue-pipeline-defaults.md) — Which pipelines new issues start with (UI and MCP `create_issue`). Defaults are stored per machine in `Config.new_issue_pipelines`, because pipeline ids are per-machine files; cloud columns and TOML flags were rejected. One pure resolver serves both paths (project, then org, then machine). A present-but-empty override means none, MCP `[]` is honoured, and missing ids are skipped. Covers the async-seeding gotchas: wait on `null`, disable the controls, block Create, host-scoped query keys. Also covers the whole-object settings saves and the collapsed-by-default card (`vk/16dc-default-pipeline`).
 - [task-pipeline-block.md](task-pipeline-block.md) — Per-task pipelines as
   a generated `## Pipeline` block in the issue description: the
   compose/parse round-trip contract, why under-recognizing the selection is
@@ -106,11 +204,22 @@ contributed to it.
   `NODE_ENV=production` act() gotcha, and how an external-connector link
   (Jira badge) is surfaced identically on the card and the panel header (one
   `JiraBadge` + `jiraLink` data prop + `getJiraLinkForIssue` lookup).
+- [workspace-sidebar-filtering.md](workspace-sidebar-filtering.md) — The one pure `filterSidebarWorkspaces` pipeline for the active and archived lists. Joining local workspaces to remote issue status through `local_workspace_id`. Need-gated per-project shape subscriptions, fail-open hiding and the `__no_issue__` sentinel. Global name-keyed hide lists. The typed Rust scratch silently drops frontend-only preference fields. web-core is now covered by repo lint (`vk/848f-lint-packages-we`), and the i18n duplicate check fails spuriously without `diff`.
+- [kanban-board-filtering.md](kanban-board-filtering.md) — The single Also covers per-user remembered filters, explicit personal/site defaults, browser-versus-server storage and transient-search inheritance (`vk/e831-remember-filter`).
+  `filterKanbanIssues` pipeline and its stage order, why view defaults (Team
+  view hides sub-issues) must yield to an explicit search while deliberate
+  filters still apply, and pairing absence assertions with positive cases
+  (`vk/eaef-missing-issues`).
 - [kanban-items-state-and-activity-grouping.md](kanban-items-state-and-activity-grouping.md)
   — The `items` array ↔ drag-and-drop index/sort_order contract, the
   `isSyncingRef` rebuild-swallowing gotcha, the In progress Active/Waiting
   split, preference-gated vs semantic workspace signals, name-based
   "In progress" identification.
+- [mobile-issue-list-rows.md](mobile-issue-list-rows.md) — Why list rows
+  overlapped on phones (`shrink-0` clusters in a `justify-between` row), the
+  two-line mobile row behind `isMobile`, keeping the avatar outside the
+  clipped badge box, and rendering real `ui` components at 390px via SSR,
+  real Tailwind and Nix Chromium (`vk/2b39-fix-mobile-ui`).
 - [mobile-kanban-scrolling.md](mobile-kanban-scrolling.md) — Mobile kanban
   board scroll/snap architecture: nested single-axis scrollers, the
   `overflow-y` → `overflow-x` promotion gotcha, gesture routing, history of
@@ -160,3 +269,99 @@ contributed to it.
   desktop-only fixed chrome in a drawer component also reused on mobile; plus
   discoverable mobile access, stable persisted tab identifiers, truthful button
   semantics, and route-owned availability during async workspace loading.
+- [left-drawer-space-fit.md](left-drawer-space-fit.md) — The workspaces drawer shows while it fits: a measured `ResizeObserver` fit rule over the rendered panels, a derived `selectIsLeftSidebarShown` shared by the layout, the hover reopen tag and the toggle action, and a transient show-anyway override. It never writes layout decisions into the persisted `is_left_sidebar_visible`; the old `isWideScreen()` collapse did, and it outlived resizes and reloads (`vk/dc99-show-left-drawer`).
+- [settings-drawer.md](settings-drawer.md) — Settings as a docked non-modal
+  right drawer: keep the nice-modal API, app shells reserve the width, a sheet
+  fallback below 1240px, the workspace right sidebar hides, toggle and close
+  routing through the unsaved-changes guard, requestId-stamped deep links, and
+  the z-index and Escape rules (`vk/4643-move-settings-to`).
+- [workspace-creation-reliability.md](workspace-creation-reliability.md) —
+  Repository-ID admin queue identity, bounded pre-operation lease contention
+  waits, cancellation and fencing limits, original-code regression proof, and
+  distinguishing rejected placement transitions from SQL failures; durable creation
+  phase evidence, terminal-state precedence, host-scoped progress polling, and
+  truthful unknown/legacy presentation (`vk/855b-show-the-steps-w`).
+- [global-search.md](global-search.md) — Search across remote metadata and host
+  conversations: authorization, issue-ID identity/routing, relay targeting,
+  deadline isolation, Unicode matching, historical session navigation and
+  organization redirect coordination.
+- [awaited-stream-settlement.md](awaited-stream-settlement.md) — An awaited
+  log read must settle exactly once: a close is never completion, only
+  settled-history reads get a deadline, and a failed turn degrades the chat
+  instead of blocking it. Includes a debugging recipe for a chat spinner that
+  never clears (direct coordinator access, phone-width iframe reproduction,
+  NFS I/O-wait signature) (`vk/5f70-not-loading-chat`). Each WebSocket is a
+  new handshake through Cloudflare, and Safari connects them one at a time,
+  so history goes over HTTP with a `complete` flag. Identical streams share
+  one socket, settled turns are fetched once per scope, and hidden mobile
+  panels wait for the chat (`vk/45a2-make-workspace-c`).
+- [auto-error-remediation.md](auto-error-remediation.md) — Self-spawned
+  agent work: trigger at `finalize_task` and hand off over a broadcast
+  channel. Subscribe before boot resumes agents. Reserve guard slots before
+  I/O. The durable `Auto-fix: ` recursion guard. Fail closed on missing
+  pipelines. Deployed pipelines differ from bundled ones, so a merge stage is
+  guaranteed explicitly. `updateDraft`'s lodash merge cannot shrink arrays.
+  Active similar issues are reused through a one-snapshot, fail-closed lookup
+  with every id form normalized to one placeholder (`vk/7e4f-auto-error-remed`).
+- [coordinator-nfs-load.md](coordinator-nfs-load.md) — Diagnosing coordinator
+  load from NFS waits (io PSI and `procs_blocked` miss it, so count D-state
+  threads). Root cause was per-client summaries git sweeps. Bulk worktree scans
+  go through a shared single-flight, tiered-TTL, generation-invalidated cache
+  whose leader task owns the lock and permit past cancellation
+  (`vk/78a5-analyze-and-redu`). The summaries response is also bounded by a
+  request-wide 3 s budget, using `get_within` with a last-known fallback, so
+  cheap metadata never waits on git (`vk/b923-workspaces-loadi`).
+- [worker-execution-hardening.md](worker-execution-hardening.md) — Why each worker execution gets its own `jobs/exec-<id>` cgroup (and `jobs` becomes a parent with a `shared` leaf, because of the no-internal-process rule), PSI `full avg60` admission refusal that ranks a worker last rather than excluding it, and the startup-stall reaper (`Failed` is truthful once SIGKILL is pending; a pending spawn is reported, never dropped or published). Also the cancellation-straggler `killpg`, quiesce re-arm, the coordinator Indeterminate-event finalize, and the advisory `io.weight` on `none` schedulers (`vk/f268-harden-cluster-w`).
+- [worker-journal-agent-stream-boundary.md](worker-journal-agent-stream-boundary.md)
+  — Worker `Structured` metadata (cancellation phases, worker/stream errors)
+  must never be projected into agent stdout, where vendor parsers render it as
+  "Unrecognized JSON message". Coordinator classifier routing and the rule for
+  new kinds (`vk/5276-debug-unrecogniz`).
+- [github-owner-token-routing.md](github-owner-token-routing.md) — One PAT per
+  GitHub owner, chosen per `gh` invocation and per Git URL
+  (`vk/0f52-manage-gh-token`). Covers: machine secrets kept out of `Config` in
+  a host-key-encrypted table; environment names that survive Codex's
+  KEY/SECRET/TOKEN filter (hex owner encoding, `GIT_CONFIG_PARAMETERS` instead
+  of `GIT_CONFIG_KEY_n`, a manifest name disjoint from per-owner names);
+  owner-scoped Git credential contexts; a prepended `gh` shim that survives
+  profile PATH merging; and the gh argument-parsing traps (value flags consumed
+  first, short letters reused per subcommand, `--`, `GH_REPO`, `gh-resolved`,
+  API placeholders). Also covers server-side git/PR operations
+  (`vk/8b57-use-settings-git`): a per-request owner-keyed credential set,
+  a TTL'd and invalidated `op://` cache, fail-closed unavailable owners,
+  attributed 401/403s, and the push skip. It lists every git config path that
+  routes around a credential helper (URL forms,
+  `insteadOf`/`pushInsteadOf` longest-first-match, `extraHeader`, rewritten
+  `remote -v`/libgit2 URLs, `gh pr checkout`'s own git, Enterprise), with
+  network-free verification recipes.
+- [coordinator-restart-handoff.md](coordinator-restart-handoff.md) — Why a VK
+  deploy no longer stops worker-owned tasks (parents, sub-tasks, pollers).
+  Shutdown hands them off with no cancel and no WIP commit. Boot re-attaches
+  each tracker from the acknowledged cursor, with a seeded MsgStore and a
+  count-based writer skip. Reconcile defers a `Running` row to that tracker
+  so finalization still runs. A replay gap on a live job is reported, not
+  treated as an ending. Unanswered approvals are replayed. The handoff
+  cursor is persisted only after the log writer has drained. Six Codex
+  rounds of cursor and log-writer traps (`vk/80c1-tasks-should-sur`).
+  Coordinator-host work can use think2's colocated worker. Existing `Local`
+  workspaces cannot be moved to a worker (`vk/ec43-run-a-vibe-kanba`).
+  A worker journal behind the cursor (undrained worker restart) is resolved
+  from matching inventory evidence (`Interrupted` → Resume) or classified
+  `Indeterminate`, never polled forever (`vk/9c15-stopped-job-look`).
+- [read-only-markdown-links.md](read-only-markdown-links.md) — Bare-URL
+  autolinking and the clickability policy in read-only markdown. Mutation
+  listeners are exact-class. Read-only editors still export via `onChange`
+  (issue descriptions, sending composers), and split formatted text is not
+  byte-identical on export. So display-only changes use tagged, microtask-
+  queued updates, export is skipped while a read-only tree holds auto links,
+  and links are unwrapped on becoming editable (`vk/e4ef-urls-always-clic`).
+- [frontend-linting.md](frontend-linting.md) — One shared ESLint rule set (`eslint.frontend.cjs`) for local-web, web-core and remote-web. Plugins resolve from the consuming package, and a tsconfig that covers tests prevents parse errors. Directive comments are banned outright, and layer boundaries forbid same-feature aliased imports. Covers the `ignoreRestSiblings` trap and patterns for fixing `exhaustive-deps` without changing when hooks fire (`vk/848f-lint-packages-we`).
+- [session-chat-history-search.md](session-chat-history-search.md) — Reading
+  any part of a session's chat log through the MCP (`search_session_messages`,
+  `GET /api/sessions/{id}/history`): every coding-agent turn, time, keyword,
+  role and turn filters, and paging. Covers why time filtering is effectively
+  per event for new live logs, with explicit turn fallback for legacy logs, keyword matching on
+  untruncated text, metadata pruning before any log read, sequential loading
+  under a budget, and why an unreadable turn must not count as a searched
+  empty one. Also how it differs from global search (`vk/5b8a-vk-mcp-chat-logs`,
+  `vk/77a2-session-step-tim`).

@@ -16,6 +16,7 @@ import {
   extractManualLines,
   orderedEnabledStages,
   parsePipelineSelection,
+  seedPipelineIds,
 } from '@/shared/lib/pipeline/taskPipeline';
 
 export interface PipelineSelection {
@@ -51,11 +52,18 @@ interface PipelineSectionProps {
    */
   initialBlock?: string;
   /**
-   * Whether to default the picker to the `basic` pipeline when there is no
-   * `initialBlock` (create-mode behavior). Edit mode passes `false` so an
-   * issue without a pipeline starts with nothing selected.
+   * Whether to seed a default selection when there is no `initialBlock`
+   * (create-mode behavior). Edit mode passes `false` so an issue without a
+   * pipeline starts with nothing selected.
    */
   seedDefaultPipeline?: boolean;
+  /**
+   * The resolved new-issue default pipeline ids to seed in create mode
+   * (`GET /api/pipelines/new-issue-defaults`). `null` means they are still
+   * loading, so seeding waits rather than guessing; `undefined` falls back
+   * to the `basic` (or first) pipeline.
+   */
+  defaultPipelineIds?: readonly string[] | null;
   /** Overrides the create-mode helper copy under the section title. */
   helperText?: string;
   /** Rendered at the bottom of the expanded card (e.g. an apply button). */
@@ -77,29 +85,39 @@ export function PipelineSection({
   onChange,
   initialBlock,
   seedDefaultPipeline = true,
+  defaultPipelineIds,
   helperText,
   footer,
 }: PipelineSectionProps) {
   const { t } = useTranslation('common');
 
   const { data: pipelines = [] } = usePipelines();
-  const [expanded, setExpanded] = useState(true);
+  // Collapsed by default; the header still names the selected pipelines.
+  const [expanded, setExpanded] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [enabledIds, setEnabledIds] = useState<Set<string>>(() => new Set());
   // The composed block, incl. delimiters. Regenerated (non-destructively)
   // whenever the selection/ticks change.
   const [text, setText] = useState('');
 
-  // Seed the selection once the pipelines list loads, exactly once: from
-  // `initialBlock` when given (edit mode), else the `basic`/first default
-  // (create mode), else nothing. Ticks are set here and on pipeline toggle
+  // Seed the selection once the pipelines list (and, in create mode, the
+  // resolved defaults) load, exactly once: from `initialBlock` when given
+  // (edit mode), else the new-issue defaults (create mode), else nothing. Ticks are set here and on pipeline toggle
   // (`togglePipeline`), never by a selection-watching effect — an effect
   // can't tell a user toggle from this seeding and would clobber the parsed
   // ticks with the `default_enabled` union.
+  const awaitingDefaults =
+    !initialBlock && seedDefaultPipeline && defaultPipelineIds === null;
+  // Controls stay disabled until seeded: a tick made before the defaults
+  // arrive would be overwritten by the seeding below.
+  const [seeded, setSeeded] = useState(false);
+  const controlsDisabled = disabled || !seeded;
   const appliedDefaultRef = useRef(false);
   useEffect(() => {
     if (appliedDefaultRef.current || pipelines.length === 0) return;
+    if (awaitingDefaults) return;
     appliedDefaultRef.current = true;
+    setSeeded(true);
     if (initialBlock) {
       const parsed = parsePipelineSelection(initialBlock, pipelines);
       setSelectedIds(parsed.pipelineIds);
@@ -110,10 +128,18 @@ export function PipelineSection({
       return;
     }
     if (!seedDefaultPipeline) return;
-    const def = pipelines.find((p) => p.id === 'basic') ?? pipelines[0] ?? null;
-    setSelectedIds(def ? [def.id] : []);
-    setEnabledIds(defaultEnabledUnion(def ? [def] : []));
-  }, [pipelines, initialBlock, seedDefaultPipeline]);
+    const ids = seedPipelineIds(pipelines, defaultPipelineIds ?? undefined);
+    setSelectedIds(ids);
+    setEnabledIds(
+      defaultEnabledUnion(pipelines.filter((p) => ids.includes(p.id)))
+    );
+  }, [
+    pipelines,
+    initialBlock,
+    seedDefaultPipeline,
+    defaultPipelineIds,
+    awaitingDefaults,
+  ]);
 
   const selectedPipelines = useMemo(
     () =>
@@ -226,7 +252,8 @@ export function PipelineSection({
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
-        className="flex items-center gap-half text-sm font-medium text-high"
+        aria-expanded={expanded}
+        className="flex min-w-0 max-w-full items-center gap-half text-sm font-medium text-high"
       >
         {expanded ? (
           <CaretDownIcon className="size-icon-sm" weight="bold" />
@@ -234,6 +261,13 @@ export function PipelineSection({
           <CaretRightIcon className="size-icon-sm" weight="bold" />
         )}
         {t('taskPipeline.title')}
+        {!expanded && selectedPipelines.length > 0 && (
+          <span className="min-w-0 truncate font-normal text-low">
+            {t('taskPipeline.collapsedSummary', {
+              names: selectedPipelines.map((p) => p.name).join(', '),
+            })}
+          </span>
+        )}
       </button>
 
       {expanded && (
@@ -255,7 +289,7 @@ export function PipelineSection({
                   <input
                     type="checkbox"
                     checked={selectedIds.includes(p.id)}
-                    disabled={disabled}
+                    disabled={controlsDisabled}
                     onChange={() => togglePipeline(p.id)}
                     className="mt-0.5"
                   />
@@ -287,7 +321,7 @@ export function PipelineSection({
                   <input
                     type="checkbox"
                     checked={enabledIds.has(step.id)}
-                    disabled={disabled}
+                    disabled={controlsDisabled}
                     onChange={() => toggleStep(step.id)}
                   />
                   <span>
@@ -311,7 +345,7 @@ export function PipelineSection({
               <button
                 type="button"
                 onClick={resetToGenerated}
-                disabled={disabled}
+                disabled={controlsDisabled}
                 className="text-xs text-brand hover:underline disabled:opacity-50"
               >
                 {t('taskPipeline.resetToGenerated')}
@@ -319,7 +353,7 @@ export function PipelineSection({
             </div>
             <textarea
               value={text}
-              disabled={disabled}
+              disabled={controlsDisabled}
               rows={6}
               onChange={(e) => setText(e.target.value)}
               placeholder={t('taskPipeline.addonPlaceholder')}

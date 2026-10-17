@@ -127,3 +127,65 @@ export function getRecentProcessIdsToRetain(
 
   return retainedIds;
 }
+
+export interface SettledEntriesResult<TEntry> {
+  entries: TEntry[];
+  complete: boolean;
+}
+
+export interface SettledEntriesCache<TEntry> {
+  /**
+   * Entries for a completed process. A cached result is returned as is, a
+   * request already in flight for the same process is joined, and otherwise
+   * `load` runs. Only complete results are kept.
+   */
+  get(
+    process: ExecutionProcess,
+    load: (process: ExecutionProcess) => Promise<SettledEntriesResult<TEntry>>
+  ): Promise<TEntry[]>;
+  /** Record a settled result fetched outside `get`, e.g. a finished reload. */
+  set(processId: string, entries: TEntry[]): void;
+}
+
+/**
+ * Per-scope memory of completed turns' entries, so each one is requested at
+ * most once per scope.
+ *
+ * `loadProcessesInOrder` fetches a whole slice concurrently and discards the
+ * responses past the threshold. Without this, the first "load earlier",
+ * which the top sentinel fires as soon as a short recent window renders,
+ * fetched those same turns again. A completed turn's settled entries cannot
+ * change, so a fresh cache per scope is all the invalidation needed.
+ * Failures and incomplete results are not kept, so a retry goes back to the
+ * network.
+ */
+export function createSettledEntriesCache<
+  TEntry,
+>(): SettledEntriesCache<TEntry> {
+  const settled = new Map<string, TEntry[]>();
+  const inFlight = new Map<string, Promise<TEntry[]>>();
+
+  return {
+    get(process, load) {
+      const cached = settled.get(process.id);
+      if (cached) return Promise.resolve(cached);
+
+      const pending = inFlight.get(process.id);
+      if (pending) return pending;
+
+      const request = load(process)
+        .then(({ entries, complete }) => {
+          if (complete) settled.set(process.id, entries);
+          return entries;
+        })
+        .finally(() => {
+          inFlight.delete(process.id);
+        });
+      inFlight.set(process.id, request);
+      return request;
+    },
+    set(processId, entries) {
+      settled.set(processId, entries);
+    },
+  };
+}

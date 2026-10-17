@@ -574,6 +574,19 @@
     },
     "session": {
       "forceCloseConfirm": "此會話由代理控制。要強制關閉嗎？"
+    },
+    "textInput": {
+      "keyboard": "鍵盤",
+      "selectAll": "全選",
+      "copy": "複製",
+      "paste": "貼上",
+      "close": "關閉",
+      "failed": "輸入失敗，請重試。",
+      "tooLong": "文字過長（最多65,536個字元）。",
+      "noSelection": "請先在遠端瀏覽器中選取文字。",
+      "copied": "已複製到剪貼簿。",
+      "copyManually": "請在裝置上選取並複製此文字。",
+      "pasteManually": "在此貼上文字，然後點擊貼上。"
     }
   }
 }

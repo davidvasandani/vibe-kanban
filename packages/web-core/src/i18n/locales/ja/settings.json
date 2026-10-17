@@ -13,6 +13,7 @@
       "hostSwitchMessage": "You have unsaved changes for the current host. Switching hosts will discard those drafts."
     },
     "layout": {
+      "resizeDrawer": "設定の幅を変更",
       "nav": {
         "title": "設定",
         "general": "一般",
@@ -23,12 +24,14 @@
         "reposDesc": "リポジトリスクリプトと設定",
         "agents": "エージェント",
         "agentsDesc": "コーディングエージェントの設定",
+        "skills": "スキル",
+        "skillsDesc": "共有エージェントスキルと提案",
         "mcp": "MCPサーバー",
         "mcpDesc": "モデルコンテキストプロトコルサーバー",
         "cli-tools": "CLI ツール",
         "cli-toolsDesc": "エージェント向けのアプリ管理コマンドラインツール",
-        "aws": "AWS",
-        "awsDesc": "AWS SSO プロファイルとサインイン",
+        "auth": "認証",
+        "authDesc": "自動認証ダッシュボードと AWS SSO プロファイル",
         "organizations": "Organization Settings",
         "organizationsDesc": "Manage organization members and permissions",
         "remote-projects": "プロジェクト",
@@ -47,6 +50,27 @@
         "pipelinesDesc": "Pipeline TOML files and defaults",
         "workers": "クラスターワーカー",
         "workersDesc": "ワーカーの正常性、ストレージ、スケジューリング"
+      }
+    },
+    "skills": {
+      "title": "スキル",
+      "description": "共有エージェントスキルを作成・管理します。変更は {{baseBranch}} へのプルリクエストになります。",
+      "loading": "スキルを読み込み中…",
+      "unavailable": "Git ベースのスキル管理が設定されていません。",
+      "add": "スキルを追加",
+      "delete": "スキルを削除",
+      "untitled": "無題のスキル",
+      "empty": "スキルを追加して開始します。",
+      "fields": {
+        "name": "名前",
+        "description": "説明と起動ガイド",
+        "instructions": "手順 (Markdown)"
+      },
+      "proposal": {
+        "title": "変更を提案",
+        "description": "Vibe Kanban がカタログを検証し、レビュー可能なプルリクエストを作成します。",
+        "submit": "プルリクエストを作成 ({{count}} 件)",
+        "open": "プルリクエストを開く"
       }
     },
     "general": {
@@ -86,6 +110,37 @@
         "autoResume": {
           "label": "起動時に中断された実行を再開",
           "helper": "再起動によって中断されたコーディングエージェントの実行に、フォローアップを自動送信します。各実行の再開は最大1回です。エージェントは確認なしに開始され、トークンを消費する可能性があります。"
+        }
+      },
+      "autoRemediation": {
+        "title": "エラーの自動修復",
+        "description": "コーディングエージェントのターンが失敗すると、パイプライン付きの課題を作成し、無人で修正するワークスペースを開始します。",
+        "enabled": {
+          "label": "失敗したエージェント実行を自動修復する",
+          "helper": "エージェントは確認なしで起動し、トークンを消費し、ベースブランチへマージする場合があります。修復ワークスペース自体は修復をトリガーしません。各ワークスペースの修復は1日1回までです。"
+        },
+        "project": {
+          "label": "課題のプロジェクト",
+          "helper": "修復課題を受け取るプロジェクト。",
+          "source": "失敗したワークスペースのプロジェクト"
+        },
+        "repos": {
+          "label": "リポジトリ",
+          "helper": "修復ワークスペースのリポジトリ。未選択の場合は失敗したワークスペースのリポジトリを使用します。"
+        },
+        "executor": {
+          "label": "エージェント"
+        },
+        "variant": {
+          "label": "プロファイルのバリアント",
+          "helper": "このバリアントが未定義の場合はデフォルトを使用します。"
+        },
+        "model": {
+          "label": "モデル"
+        },
+        "maxPerHour": {
+          "label": "1時間あたりの最大起動数",
+          "helper": "0 で起動を無効にします。"
         }
       },
       "editor": {
@@ -316,6 +371,19 @@
       "description": "コーディングエージェントの動作を異なる設定でカスタマイズします。",
       "loading": "エージェント設定を読み込み中...",
       "selectAgent": "エージェントを選択",
+      "visibility": {
+        "title": "表示",
+        "description": "無効にしたエージェントはエージェント選択に表示されません。ここで引き続き設定でき、既存の作業はそのまま実行されます。",
+        "label": "エージェント選択に表示",
+        "defaultLocked": "デフォルトのエージェントは無効にできません。先に別のエージェントをデフォルトに設定してください。",
+        "lastLocked": "少なくとも 1 つのエージェントを有効にしておく必要があります。"
+      },
+      "models": {
+        "title": "モデル",
+        "description": "チェックを外したモデルは、このエージェントのモデルメニューに表示されません。",
+        "lastEnabled": "少なくとも 1 つのモデルを有効にしておく必要があります。",
+        "loading": "モデルを読み込み中..."
+      },
       "save": {
         "button": "エージェント設定を保存",
         "success": "✓ 実行設定が正常に保存されました！",
@@ -346,7 +414,8 @@
         "jsonLabel": "エージェント設定（JSON）",
         "jsonPlaceholder": "プロファイルを読み込み中...",
         "jsonLoading": "読み込み中...",
-        "pathLabel": "設定ファイルの場所："
+        "pathLabel": "設定ファイルの場所：",
+        "disabled": "無効"
       },
       "errors": {
         "deleteFailed": "設定の削除に失敗しました。もう一度お試しください。",
@@ -675,6 +744,22 @@
       "overview": {
         "available": "Available",
         "unavailable": "Unavailable"
+      },
+      "management": {
+        "title": "ペアリング済みのマシン",
+        "description": "このクライアントとペアリングしたリモートマシンを管理します。",
+        "refresh": "更新",
+        "loading": "ペアリング済みのマシンを読み込み中…",
+        "loadError": "マシンを読み込めませんでした。更新して再試行してください。",
+        "statusError": "接続状態を確認できませんでした。更新して再試行してください。",
+        "empty": "ペアリング済みのマシンはありません。クライアント設定からペアリングしてください。",
+        "online": "オンライン",
+        "offline": "オフライン",
+        "unpaired": "ペアリングが必要",
+        "unknown": "状態不明",
+        "pairedAt": "ペアリング日：{{date}}",
+        "open": "ワークスペースを開く",
+        "removeConfirm": "このクライアントから {{name}} とのペアリングを削除しますか？リモートのワークスペースは削除されません。"
       }
     },
     "remoteProjects": {
@@ -774,7 +859,7 @@
     },
     "cliTools": {
       "title": "CLI ツール",
-      "description": "ベンダー CLI ツールの固定バージョンをアプリ管理ディレクトリにインストールします。ツールはエージェントの PATH に追加されますが、このマシンに既にあるコピーが優先されます。認証情報は保存されません。",
+      "description": "選択したホストに CLI ツールをインストールします。確認はそのホスト上で、エージェントが受け取る環境（ログインシェルと非ログインシェル）で実行されます。認証情報は各 CLI が管理します。",
       "loading": "ツールの利用可否を確認中…",
       "docs": "ベンダーのドキュメント",
       "actions": {
@@ -797,18 +882,69 @@
         "cancel": "キャンセル",
         "retry": "再試行"
       },
+      "agent": {
+        "available": "このホストのエージェント: {{path}}",
+        "missing": "このホストのエージェントから見つかりません",
+        "login_shell_missing": "エージェント: {{path}} にありますが、ログインシェルでは失われます",
+        "login_shell_mismatch": "エージェント: {{path}}。ただしログインシェルでは別のコピーが実行されます",
+        "runtime_unavailable": "エージェント: {{path}} を起動できません（実行時依存関係が利用できません）",
+        "failed": "エージェント: {{path}} が起動しませんでした"
+      },
       "status": {
-        "host": "このマシンが提供: {{path}}",
-        "app": "Vibe Kanban がインストール ({{version}})",
+        "host": "マシン側のコピー: {{path}}",
+        "app": "Vibe Kanban がホストにインストール（{{version}}）",
         "outdated": "カタログの固定バージョンは {{version}} です",
         "shadowed": "マシン側のコピーが PATH で優先されます",
         "notAvailable": "未インストール。カタログバージョン: {{version}}",
         "unsupported": "ここにはインストールできません"
       }
     },
+    "reauth": {
+      "title": "自動認証",
+      "description": "保存済みの Entra ブラウザーセッションと 1Password を使い、人の操作なしでこのホストが再サインインする資格情報です。成功は、ベンダー自身の資格情報ストアを独立して確認した後にのみ報告されます。",
+      "loading": "資格情報を確認しています…",
+      "empty": "このホストには再認証の対象が構成されていません。",
+      "sweepEvery": "期限切れの資格情報は {{minutes}} 分ごとに自動で修復されます。",
+      "sweepOff": "自動修復はオフです。必要に応じて再認証してください。",
+      "runAll": "期限切れをすべて再認証",
+      "run": "再認証",
+      "onDemand": "オンデマンドのみ",
+      "refused": "以前に拒否されました。ここで再実行するまで、エージェントと自動スイープは再試行しません。",
+      "showSteps": "手順を表示",
+      "hideSteps": "手順を非表示",
+      "state": {
+        "authenticated": "認証済み",
+        "unauthenticated": "期限切れまたはサインアウト",
+        "unknown": "状態不明",
+        "not_configured": "未構成"
+      },
+      "outcome": {
+        "running": "実行中",
+        "succeeded": "成功",
+        "failed": "失敗",
+        "verification_failed": "完了しましたが検証に失敗しました",
+        "refused": "拒否"
+      },
+      "trigger": {
+        "manual": "設定から",
+        "agent": "エージェントによる",
+        "sweep": "自動スイープによる"
+      },
+      "summary": {
+        "healthy": "サインイン済み",
+        "attention": "要対応",
+        "unknown": "不明",
+        "notConfigured": "未構成"
+      },
+      "kind": {
+        "aws_sso": "AWS SSO",
+        "cli_tool": "CLI ツール",
+        "sgsc": "sgsc-mcp ゲートウェイ"
+      }
+    },
     "aws": {
       "title": "AWS",
-      "description": "このマシンの ~/.aws/config にある AWS SSO プロファイルを管理し、AWS CLI でサインインします。Vibe Kanban が書き込むのはプロファイル設定のみで、認証情報とトークンは AWS CLI 自身のストレージに保存されます。",
+      "description": "選択したホストで AWS SSO プロファイルを管理し、サインインします。状態確認はホストの認証のみが対象です。エージェントは同じ AWS 設定と SSO キャッシュにアクセスする必要があります。AWS_PROFILE でプロファイルを選択してください。トークンは AWS CLI が管理します。",
       "loading": "AWS プロファイルを読み込み中…",
       "empty": "SSO プロファイルはまだ設定されていません。追加すると、このマシンで AWS にアクセスできるようになります。",
       "cliMissing": "このマシンでは AWS CLI を利用できません。CLI ツールセクションからインストールすると、状態確認とサインインができます。",
@@ -829,10 +965,10 @@
         "delete": "プロファイルを削除"
       },
       "auth": {
-        "authenticated": "認証済み",
-        "unauthenticated": "未サインイン",
-        "unknown": "状態不明",
-        "cliMissing": "AWS CLI が利用不可"
+        "authenticated": "ホストで認証済み",
+        "unauthenticated": "ホストで未サインイン",
+        "unknown": "ホストの認証状態は不明",
+        "cliMissing": "ホストで AWS CLI を利用できません"
       },
       "delete": {
         "confirm": "SSO プロファイル「{{name}}」を ~/.aws/config から削除しますか？"
@@ -951,6 +1087,28 @@
         "resetAllTitle": "Reset all bundled defaults?",
         "resetAllMessage": "This recreates or overwrites all bundled default pipeline files.",
         "resetAllDirtyMessage": "This recreates or overwrites all bundled default pipeline files and discards the open draft."
+      },
+      "newIssueDefaults": {
+        "title": "新規課題のデフォルト",
+        "description": "新規課題で既定で有効になるパイプライン。新規課題フォームと、パイプラインを指定しない MCP create_issue 呼び出しに適用されます。プロジェクトの上書きは組織の上書きより、組織の上書きはこのマシンの既定より優先されます。このマシンに保存されます。",
+        "machine": {
+          "label": "このマシン",
+          "helper": "プロジェクトも組織も上書きしていない場合に使用されます。"
+        },
+        "organizations": {
+          "label": "組織ごとの上書き",
+          "helper": "組織内のすべてのプロジェクトでマシンの既定を上書きします。"
+        },
+        "projects": {
+          "label": "プロジェクトごとの上書き",
+          "helper": "1 つのプロジェクトで組織(またはマシン)の既定を上書きします。"
+        },
+        "inheritMachine": "マシンの既定を使用",
+        "inheritOrganization": "組織の既定を使用",
+        "override": "上書き",
+        "noneSelected": "パイプラインなし: 新規課題はパイプラインなしで開始します。",
+        "missing": "{{id}}(見つかりません)",
+        "saveFailed": "新規課題のデフォルトを保存できませんでした。もう一度お試しください。"
       }
     }
   },

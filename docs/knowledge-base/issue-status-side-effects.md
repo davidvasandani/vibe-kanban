@@ -1,6 +1,6 @@
 # Terminal-status side effects on the remote issue-update path
 
-**Contributing tasks:** `2f63-auto-archive-wor`, `f464-vk-workspace-mgm`
+**Contributing tasks:** `2f63-auto-archive-wor`, `f464-vk-workspace-mgm`, `vk/88c5-marking-an-issue`
 
 How the remote/cloud server reacts to an issue changing status — specifically the
 "archive an issue's workspaces when it reaches a terminal status" behaviour — and
@@ -77,6 +77,31 @@ second local mutation mechanism. The reconciliation helper:
 must read `WorkspaceContext` as optional and skip reconciliation when local
 workspace streams are unavailable. Do not replace that with the throwing
 `useWorkspaceContext` hook unless every provider composition is changed first.
+
+## Workspace drawer provider boundary
+
+The workspace route mounts `LinkedIssueProvider` in `WorkspacesLayout`, not
+`ProjectProvider`. A status update from the right drawer therefore used to archive
+the remote record without moving the local workspace out of the active list.
+
+`LinkedIssueProvider` now subscribes to `PROJECT_WORKSPACES_SHAPE` when signed in,
+linked to an issue/project, and supplied with optional `WorkspaceContext`. It filters
+remote rows by the displayed issue UUID, normalises the local active/archive lists,
+and invokes the same `useRemoteLocalArchiveReconciliation` hook. This covers every
+locally available workspace linked to that issue, including archived remote state
+received on initial load or reconnect. It excludes unrelated issues and does not
+add workspace hydration to the issue panel's loading gate.
+
+Do not archive from the optimistically updated issue status: a rejected status
+mutation must leave local workspaces active. Persisted remote workspace archive
+flags are the reconciliation authority. The hook still relies on a subsequent
+snapshot to retry failed local writes. This is UI-mounted reconciliation; it does
+not provide backend convergence when neither relevant provider is mounted.
+
+`LinkedIssueContext.test.tsx` exercises the rendered provider with the real archive
+hook: delayed persisted state, optimistic rollback, initial snapshots, multiple
+links, unrelated/already-archived workspaces, missing context/auth/identifiers,
+in-flight deduplication, retries, and archive-only semantics.
 
 Archived local workspaces enter the accelerated (1h) worktree-cleanup window vs.
 the standard 72h — see `crates/db` cleanup queries.

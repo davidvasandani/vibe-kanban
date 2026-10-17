@@ -8,7 +8,7 @@ pieces that were non-obvious or that an independent review had to force.
 
 The board users see is the **remote** stack (`crates/remote`: Axum +
 Postgres + ElectricSQL) — issues are `Issue` rows streamed via shapes, and
-"Project Settings" is the `settingsRegistry.tsx` dialog in `web-core`. A
+"Project Settings" is the `SettingsRegistry.tsx` dialog in `web-core`. A
 connector implemented against the local SQLite `tasks` model would sync a
 table nobody looks at. Check this first; it decided the entire architecture
 of task d2aa.

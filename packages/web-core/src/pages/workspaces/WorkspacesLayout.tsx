@@ -24,7 +24,7 @@ import {
   consumeCreateModeSeedState,
   getCreateModeSeedVersion,
   subscribeCreateModeSeedState,
-} from '@/features/create-mode/model/createModeSeedStore';
+} from '@/shared/stores/createModeSeedStore';
 import { ReviewProvider } from '@/shared/hooks/ReviewProvider';
 import { ChangesViewProvider } from '@/shared/hooks/ChangesViewProvider';
 import { WorkspacesSidebarContainer } from './WorkspacesSidebarContainer';
@@ -35,7 +35,7 @@ import {
 } from './WorkspacesMainContainer';
 import { RightSidebar } from './RightSidebar';
 import { ChangesPanelContainer } from './ChangesPanelContainer';
-import { CreateChatBoxContainer } from '@/shared/components/CreateChatBoxContainer';
+import { CreateChatBoxContainer } from '@/features/create-mode/ui/CreateChatBoxContainer';
 import { PreviewBrowserContainer } from './PreviewBrowserContainer';
 import { BrowserPanelContainer } from './BrowserPanelContainer';
 import { WorkspacesGuideDialog } from '@/shared/dialogs/shared/WorkspacesGuideDialog';
@@ -46,10 +46,13 @@ import { LinkedIssueProvider } from '@/shared/providers/remote/LinkedIssueContex
 import {
   PERSIST_KEYS,
   usePaneSize,
+  useUiPreferencesStore,
   useWorkspacePanelState,
   RIGHT_MAIN_PANEL_MODES,
 } from '@/shared/stores/useUiPreferencesStore';
 import { useAppNavigation } from '@/shared/hooks/useAppNavigation';
+import { useSettingsDrawerStore } from '@/shared/stores/useSettingsDrawerStore';
+import { leftSidebarFits } from '@/shared/lib/workspaceLayoutFit';
 import { getWorkspaceMobileTabFallback } from '@/shared/components/ui-new/containers/workspaceMobileTabs';
 
 const WORKSPACES_GUIDE_ID = 'workspaces-guide';
@@ -188,6 +191,28 @@ export function WorkspacesLayout() {
   const [mobileTab, setMobileActiveTab] = useMobileActiveTab();
   const mainContainerRef = useRef<WorkspacesMainContainerHandle>(null);
 
+  // Mobile tabs stay mounted once shown, to keep their sockets and scroll
+  // positions across tab switches. Panels with their own sockets are not
+  // mounted before then: on a phone every websocket is a queued handshake,
+  // and the chat must not wait behind panels that cannot be seen.
+  const [visitedMobileTabs, setVisitedMobileTabs] = useState<{
+    workspaceId: string | undefined;
+    tabs: ReadonlySet<string>;
+  }>({ workspaceId, tabs: new Set([mobileTab]) });
+  useEffect(() => {
+    setVisitedMobileTabs((current) => {
+      if (current.workspaceId !== workspaceId) {
+        return { workspaceId, tabs: new Set([mobileTab]) };
+      }
+      if (current.tabs.has(mobileTab)) return current;
+      return { workspaceId, tabs: new Set([...current.tabs, mobileTab]) };
+    });
+  }, [mobileTab, workspaceId]);
+  const hasVisitedMobileTab = (tab: string) =>
+    tab === mobileTab ||
+    (visitedMobileTabs.workspaceId === workspaceId &&
+      visitedMobileTabs.tabs.has(tab));
+
   // On mobile, the workspaces landing (no workspace selected, not creating)
   // should default to the Active list rather than the empty "select a
   // workspace to get started" chat view. Only default when newly entering the
@@ -238,6 +263,9 @@ export function WorkspacesLayout() {
     setLeftSidebarVisible,
     setLeftMainPanelVisible,
   } = useWorkspacePanelState(isCreateMode ? undefined : workspaceId);
+  // The Settings drawer takes the right-drawer slot while it is open, so the
+  // chat keeps its width; the saved sidebar preference is left untouched.
+  const isSettingsDrawerOpen = useSettingsDrawerStore((s) => s.isOpen);
 
   const {
     config,
@@ -275,6 +303,60 @@ export function WorkspacesLayout() {
     setLeftMainPanelVisible,
   ]);
 
+  const isRightSidebarShown =
+    isRightSidebarVisible && !isCreateMode && !isSettingsDrawerOpen;
+
+  // Show the left drawer only while it fits beside what is open. The root is
+  // measured (not the window) so the app rail and the docked Settings inset
+  // are already excluded, and showing the drawer does not change the reading.
+  // Only the boolean reaches the store, so a resize drag re-renders the
+  // layout only when the drawer actually appears or disappears.
+  const setLeftSidebarHasSpace = useUiPreferencesStore(
+    (s) => s.setLeftSidebarHasSpace
+  );
+  const [layoutRoot, setLayoutRoot] = useState<HTMLDivElement | null>(null);
+  const layoutWidthRef = useRef<number | null>(null);
+  const fitPanelsRef = useRef({
+    isChatShown: isLeftMainPanelVisible,
+    isRightMainPanelOpen: rightMainPanelMode !== null,
+    isRightSidebarShown,
+  });
+
+  const publishLeftSidebarSpace = useCallback(() => {
+    const width = layoutWidthRef.current;
+    setLeftSidebarHasSpace(
+      width === null || leftSidebarFits({ width, ...fitPanelsRef.current })
+    );
+  }, [setLeftSidebarHasSpace]);
+
+  useEffect(() => {
+    fitPanelsRef.current = {
+      isChatShown: isLeftMainPanelVisible,
+      isRightMainPanelOpen: rightMainPanelMode !== null,
+      isRightSidebarShown,
+    };
+    publishLeftSidebarSpace();
+  }, [
+    isLeftMainPanelVisible,
+    rightMainPanelMode,
+    isRightSidebarShown,
+    publishLeftSidebarSpace,
+  ]);
+
+  useEffect(() => {
+    if (!layoutRoot) return;
+    const observer = new ResizeObserver(([entry]) => {
+      layoutWidthRef.current = entry.contentRect.width;
+      publishLeftSidebarSpace();
+    });
+    observer.observe(layoutRoot);
+    return () => {
+      observer.disconnect();
+      layoutWidthRef.current = null;
+      publishLeftSidebarSpace();
+    };
+  }, [layoutRoot, publishLeftSidebarSpace]);
+
   const [rightMainPanelSize, setRightMainPanelSize] = usePaneSize(
     PERSIST_KEYS.rightMainPanel,
     50
@@ -310,7 +392,8 @@ export function WorkspacesLayout() {
 
   // ── Mobile layout ──────────────────────────────────────────────────
   // Uses `hidden` CSS class (NOT conditional rendering) to preserve
-  // WebSocket connections and scroll positions across tab switches.
+  // WebSocket connections and scroll positions across tab switches. The
+  // preview and browser panels mount on first visit (see hasVisitedMobileTab).
   if (isMobile) {
     const mobileContent = (
       <ReviewProvider workspaceId={selectedWorkspace?.id}>
@@ -389,7 +472,7 @@ export function WorkspacesLayout() {
                 mobileTab !== 'preview' && 'hidden'
               )}
             >
-              {selectedWorkspace?.id && (
+              {selectedWorkspace?.id && hasVisitedMobileTab('preview') && (
                 <PreviewBrowserContainer
                   workspaceId={selectedWorkspace.id}
                   className=""
@@ -404,7 +487,7 @@ export function WorkspacesLayout() {
                 mobileTab !== 'browser' && 'hidden'
               )}
             >
-              {selectedWorkspace?.id && (
+              {selectedWorkspace?.id && hasVisitedMobileTab('browser') && (
                 <BrowserPanelContainer
                   workspaceId={selectedWorkspace.id}
                   className=""
@@ -430,6 +513,7 @@ export function WorkspacesLayout() {
                     rightMainPanelMode={rightMainPanelMode}
                     selectedWorkspace={selectedWorkspace}
                     repos={repos}
+                    executionProcesses={executionProcesses}
                     linkedIssueForWorkspace={linkedIssueForWorkspace}
                   />
                 </LinkedIssueProvider>
@@ -540,7 +624,7 @@ export function WorkspacesLayout() {
             )}
           </Group>
 
-          {isRightSidebarVisible && !isCreateMode && (
+          {isRightSidebarShown && (
             <div className="w-[300px] shrink-0 h-full overflow-hidden">
               <LinkedIssueProvider
                 issueId={linkedIssueForWorkspace?.issueId ?? undefined}
@@ -552,6 +636,7 @@ export function WorkspacesLayout() {
                   rightMainPanelMode={rightMainPanelMode}
                   selectedWorkspace={selectedWorkspace}
                   repos={repos}
+                  executionProcesses={executionProcesses}
                   linkedIssueForWorkspace={linkedIssueForWorkspace}
                   showDeployStatus
                   deployUpdateAvailable={deployUpdateAvailable}
@@ -566,7 +651,7 @@ export function WorkspacesLayout() {
   );
 
   return (
-    <div className="flex flex-1 min-h-0 h-full">
+    <div ref={setLayoutRoot} className="flex flex-1 min-h-0 h-full">
       {isLeftSidebarVisible && (
         <div className="w-[300px] shrink-0 h-full overflow-hidden">
           <WorkspacesSidebarContainer onScrollToBottom={handleScrollToBottom} />

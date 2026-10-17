@@ -1,6 +1,6 @@
 # Codex rollout transfer across workers
 
-Tags: `c8a9-transfer-codex-r`
+Tags: `c8a9-transfer-codex-r`, `vk/af0d-no-conversation`
 
 ## Transfer artifacts, not executor homes
 
@@ -70,3 +70,96 @@ proof that an idle resumable session no longer references them. A worker may
 delete verified lineage only when coordinator state proves there is no active
 execution, resumable session, or recoverable migration reference; otherwise it
 must retain the file.
+
+## Recover a genuinely absent rollout at the conversation boundary
+
+Even outside an affinity migration, a persisted Vibe Kanban turn can reference
+a Codex thread whose rollout no longer exists. A normal chat follow-up should
+try `thread/fork` first, then start a replacement thread in the same workspace
+only when the structured app-server error proves that exact requested UUID is
+absent. Register the replacement through the ordinary session-ID path before
+starting the turn so later follow-ups naturally continue it.
+
+Preserve JSON-RPC code, message, and data at the client boundary. Match the
+complete, pinned missing-rollout response (plus any exact production-observed
+legacy form) rather than `contains("not found")`; the same invalid-request code
+and similar phrases cover archived sessions, malformed IDs, and operations on
+unloaded live threads. Every nonmatching error remains fail-loud. This recovery
+keeps the Vibe workspace usable but cannot reconstruct lost Codex-private
+context, and context-dependent operations such as review or compaction should
+not silently become fresh conversations.
+
+### Known missing-conversation error formats
+
+The following `thread/fork` error messages (JSON-RPC code `-32600`, null data)
+indicate a genuinely missing conversation where replacement is required:
+
+1. `no rollout found for thread id <uuid>` — the leaf rollout file is absent.
+2. `No conversation found with session ID: <uuid>` — legacy session lookup
+   failed.
+
+All require the `<uuid>` in the message to match the exact thread ID requested
+by Vibe Kanban. A mismatch, wrong JSON-RPC code, or non-null error data means
+the error is not eligible for recovery.
+
+## Resume threads with unusable lineage when the leaf exists
+
+Codex 0.154+ introduced paginated history mode and stricter lineage validation.
+A `thread/fork` request may fail with `invalid paginated history lineage for
+{uuid}: missing source rollout` even when the leaf rollout file is present. This
+occurs when the session metadata has `history_mode=paginated` but no
+`history_base` field, and the expected ancestry rollout was never written.
+
+When a fork fails due to lineage issues:
+
+1. Check whether the leaf rollout file exists locally for the requested thread.
+2. If the leaf exists, read the JSONL rollout file directly and extract the
+   `ResponseItem` entries (the model-visible conversation history).
+3. Call `thread/resume` with the `history` parameter populated from the
+   extracted items. This bypasses Codex's internal disk read, which fails for
+   paginated threads due to `reject_paginated_history_mode()`.
+4. If `thread/resume` succeeds, the resumed thread is used for the turn. The
+   conversation text from the leaf is preserved in the new thread.
+5. If `thread/resume` also fails (e.g., incompatible history format), or if
+   the leaf is absent, fall back to the replacement-thread behavior.
+
+This approach (`thread/fork` → `thread/resume` with extracted history →
+replacement) gives the best chance of preserving conversation context. The
+`history` parameter is experimental (`thread/resume.history`) but is designed
+for exactly this use case: providing history directly instead of loading from
+disk. The replacement-thread fallback remains as the last resort for genuinely
+irrecoverable rollouts.
+
+### Protocol methods tried for lineage-unusable leaves
+
+The following methods were evaluated for loading paginated leaves with no
+`history_base`:
+
+1. **`thread/fork`**: Fails with "invalid paginated history lineage" because it
+   requires full ancestry resolution for paginated history mode.
+2. **`thread/resume` (without history)**: Also fails because Codex's internal
+   disk read calls `reject_paginated_history_mode()`, which blocks reads for
+   paginated threads when `include_history=true`.
+3. **`thread/resume` (with history)**: Works by bypassing the disk read
+   entirely. The `history` parameter (experimental `thread/resume.history`)
+   allows providing history directly, and the app-server wraps it in
+   `InitialHistory::Forked` without touching the problematic rollout file.
+4. **`turn/start` directly**: Does not work; the app-server must have the thread
+   loaded in memory first. Calling `turn/start` on an unloaded thread returns
+   "thread not found".
+5. **Replacement thread via `thread/start`**: Loses Codex-private history but
+   keeps the Vibe workspace usable. Used as last resort.
+
+### Reading history from rollout files
+
+Rollout JSONL files contain `RolloutItem` entries, serialized with
+`#[serde(tag = "type", content = "payload")]`:
+
+- `{"type": "response_item", "payload": {...}}` - Model-visible history items
+- `{"type": "session_meta", "payload": {...}}` - Thread metadata
+- `{"type": "event_msg", "payload": {...}}` - Turn lifecycle events
+- `{"type": "compacted", "payload": {...}}` - Compaction records
+
+Only `response_item` entries are extracted and passed to `thread/resume`. This
+matches the contract of `ThreadResumeParams.history`, which expects
+`Vec<ResponseItem>` representing the model-visible conversation.

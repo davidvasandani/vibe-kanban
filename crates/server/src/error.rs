@@ -91,12 +91,18 @@ pub enum ApiError {
     /// could not be served, which is the whole diagnosis.
     #[error("{0}")]
     ClusterProvisioning(String),
+    /// The workspace's assigned execution server is not live. The message
+    /// names the server and tells the user to move the workspace or wait.
+    #[error("{0}")]
+    WorkerUnavailable(String),
     #[error(transparent)]
     CommandBuilder(#[from] CommandBuildError),
     #[error(transparent)]
     Pty(#[from] PtyError),
     #[error(transparent)]
     WebRtc(#[from] WebRtcError),
+    #[error(transparent)]
+    GitHubOwnerToken(#[from] services::services::github_owner_tokens::GitHubOwnerTokenError),
 }
 
 impl From<&'static str> for ApiError {
@@ -175,6 +181,12 @@ impl From<ContainerError> for ApiError {
             // Must stay above the catch-all: falling into `Container` is what
             // renders a failure as "An internal error occurred".
             ContainerError::SharedStore(msg) => ApiError::ClusterProvisioning(msg),
+            ContainerError::WorkerUnavailable(error) => {
+                ApiError::WorkerUnavailable(error.to_string())
+            }
+            // This typed error contains only curated, secret-free diagnostics.
+            ContainerError::EnvironmentSecret(error) => ApiError::BadRequest(error.to_string()),
+            ContainerError::GitHubOwnerToken(error) => ApiError::GitHubOwnerToken(error),
             other => ApiError::Container(other),
         }
     }
@@ -458,6 +470,11 @@ impl IntoResponse for ApiError {
                     ),
                 )
             }
+            // A configured org token that could not be read; the message names
+            // the owner and the reason.
+            ApiError::GitService(GitServiceError::GitCLI(
+                git::GitCliError::CredentialUnavailable(msg),
+            )) => ErrorInfo::with_status(StatusCode::UNAUTHORIZED, "GitServiceError", msg.clone()),
             ApiError::GitService(e) => ErrorInfo::with_status(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "GitServiceError",
@@ -500,6 +517,8 @@ impl IntoResponse for ApiError {
             }
             ApiError::Pty(_) => ErrorInfo::internal("PtyError"),
 
+            ApiError::GitHubOwnerToken(error) => github_owner_token_error(error),
+
             ApiError::Unauthorized => ErrorInfo::with_status(
                 StatusCode::UNAUTHORIZED,
                 "Unauthorized",
@@ -530,6 +549,11 @@ impl IntoResponse for ApiError {
             ApiError::ClusterProvisioning(msg) => ErrorInfo::with_status(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "ClusterProvisioningError",
+                msg.clone(),
+            ),
+            ApiError::WorkerUnavailable(msg) => ErrorInfo::with_status(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "WorkerUnavailableError",
                 msg.clone(),
             ),
             ApiError::Multipart(_) => ErrorInfo::bad_request(
@@ -674,12 +698,46 @@ impl From<RelayPairingClientError> for ApiError {
     }
 }
 
+fn github_owner_token_error(
+    error: &services::services::github_owner_tokens::GitHubOwnerTokenError,
+) -> ErrorInfo {
+    use services::services::github_owner_tokens::GitHubOwnerTokenError as E;
+    const TYPE: &str = "GitHubOwnerTokenError";
+    // Every variant's message is curated and never contains a token value.
+    match error {
+        E::NotFound => ErrorInfo::not_found(TYPE, error.to_string()),
+        E::DuplicateOwner(_) => ErrorInfo::conflict(TYPE, error.to_string()),
+        E::InvalidOwner | E::InvalidValue | E::Undecryptable(_) | E::Resolve { .. } => {
+            ErrorInfo::bad_request(TYPE, error.to_string())
+        }
+        E::KeyUnavailable => {
+            ErrorInfo::with_status(StatusCode::INTERNAL_SERVER_ERROR, TYPE, error.to_string())
+        }
+        E::Database(_) => ErrorInfo::internal(TYPE),
+    }
+}
+
 #[cfg(test)]
 mod cluster_provisioning_error_tests {
     use axum::{body::to_bytes, http::StatusCode, response::IntoResponse};
     use services::services::container::ContainerError;
 
     use super::ApiError;
+
+    #[tokio::test]
+    async fn environment_secret_error_is_actionable_in_http_response() {
+        use services::services::environment_secrets::EnvironmentSecretError;
+
+        let response = ApiError::from(ContainerError::EnvironmentSecret(
+            EnvironmentSecretError::MissingToken,
+        ))
+        .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("OP_SERVICE_ACCOUNT_TOKEN"));
+        assert!(!body.contains("An internal error occurred"));
+    }
 
     /// The whole point of the shared-store error channel is what reaches the
     /// operator. Two one-line match arms stand between the store and the
@@ -706,6 +764,30 @@ mod cluster_provisioning_error_tests {
             !body.contains("An internal error occurred"),
             "the generic message defeats the purpose of the variant: {body}"
         );
+    }
+
+    /// Same trap as the shared-store arm: falling into `ApiError::Container`
+    /// turns "think5 is offline, move the workspace" back into a generic 500.
+    #[tokio::test]
+    async fn offline_worker_is_a_503_that_names_the_server() {
+        use services::services::cluster::{WorkerUnavailable, WorkerUnavailableReason};
+
+        let response = ApiError::from(ContainerError::WorkerUnavailable(WorkerUnavailable {
+            worker: "think5".into(),
+            last_heartbeat_at: None,
+            reason: WorkerUnavailableReason::Offline,
+        }))
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            body.contains("Execution server think5 is offline (last heartbeat never)"),
+            "{body}"
+        );
+        assert!(body.contains("Move this workspace to another execution server"));
+        assert!(!body.contains("An internal error occurred"), "{body}");
     }
 
     #[tokio::test]

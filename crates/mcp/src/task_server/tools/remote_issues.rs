@@ -1,10 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use api_types::{
     CreateIssueRequest, Issue, IssuePriority, IssueRelationshipType, IssueSortField,
     ListIssueRelationshipsResponse, ListIssueTagsResponse, ListIssuesResponse,
     ListPullRequestsResponse, ListTagsResponse, MutationResponse, PullRequestStatus,
     SearchIssuesRequest, SortDirection, UpdateIssueRequest,
+    pipeline_block::{BlockPipeline, append_pipeline_block, compose_pipeline_block},
 };
 use rmcp::{
     ErrorData, handler::server::wrapper::Parameters, model::CallToolResult, schemars, tool,
@@ -13,7 +14,10 @@ use rmcp::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::{McpServer, ToolError};
+use super::{
+    McpServer, ToolError,
+    pipelines::{McpPipeline, NewIssuePipelineDefaults, select_pipelines},
+};
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct McpCreateIssueRequest {
@@ -33,6 +37,18 @@ struct McpCreateIssueRequest {
         description = "Optional parent issue to create a subissue under. Accepts the issue UUID or its simple ID (e.g. 'VAS-64')."
     )]
     parent_issue_id: Option<String>,
+    #[schemars(
+        description = "Task pipeline id(s) to attach (see `list_pipelines`). Composes a `## Pipeline` block appended to the description, instructing the execution agent which stages to run and in what order. When omitted, the configured new-issue default pipelines apply (the project's override, else its organization's, else the machine default; Settings → Pipelines). Pass `[]` to create the issue without a pipeline."
+    )]
+    pipeline_ids: Option<Vec<String>>,
+    #[schemars(
+        description = "Stage ids to enable across the selected pipelines (explicit or defaulted). Defaults to each pipeline's default-enabled stages (see `list_pipelines`) when omitted."
+    )]
+    pipeline_stage_ids: Option<Vec<String>>,
+    #[schemars(
+        description = "Optional coding agent to pin this task's execution to (a BaseCodingAgent key, e.g. 'CLAUDE_CODE', 'CODEX'). Embedded in the pipeline block so `start_workspace` can be called with a matching `executor` when the task is picked up."
+    )]
+    executor: Option<String>,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -41,6 +57,20 @@ struct McpCreateIssueResponse {
     issue_id: String,
     #[schemars(description = "The human-readable issue key shown on the board (e.g. 'VAS-64')")]
     simple_id: String,
+    #[schemars(
+        description = "Application-relative issue URL; use this exact destination in Markdown issue references."
+    )]
+    issue_url: String,
+}
+
+impl From<&Issue> for McpCreateIssueResponse {
+    fn from(issue: &Issue) -> Self {
+        Self {
+            issue_id: issue.id.to_string(),
+            simple_id: issue.simple_id.clone(),
+            issue_url: McpServer::issue_url(issue.project_id, issue.id),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -89,6 +119,10 @@ struct IssueSummary {
     title: String,
     #[schemars(description = "The human-readable issue simple ID")]
     simple_id: String,
+    #[schemars(
+        description = "Application-relative issue URL; use this exact destination in Markdown issue references."
+    )]
+    issue_url: String,
     #[schemars(description = "Current status of the issue")]
     status: String,
     #[schemars(description = "Current priority of the issue")]
@@ -139,8 +173,14 @@ struct McpRelationshipSummary {
     id: String,
     #[schemars(description = "The related issue ID")]
     related_issue_id: String,
-    #[schemars(description = "The related issue's simple ID (e.g. 'PROJ-42')")]
-    related_simple_id: String,
+    #[schemars(
+        description = "The related issue's simple ID (e.g. 'PROJ-42'), or null when its record lies outside this issue's project. Call get_issue with related_issue_id to resolve it."
+    )]
+    related_simple_id: Option<String>,
+    #[schemars(
+        description = "Application-relative related issue URL, or null when its project is unknown. Use get_issue to retrieve missing metadata."
+    )]
+    related_issue_url: Option<String>,
     #[schemars(description = "Relationship type: blocking, related, or has_duplicate")]
     relationship_type: String,
 }
@@ -151,6 +191,10 @@ struct McpSubIssueSummary {
     id: String,
     #[schemars(description = "Short human-readable identifier (e.g. 'PROJ-43')")]
     simple_id: String,
+    #[schemars(
+        description = "Application-relative issue URL; use this exact destination in Markdown issue references."
+    )]
+    issue_url: String,
     #[schemars(description = "The sub-issue title")]
     title: String,
     #[schemars(description = "Current status of the sub-issue")]
@@ -165,6 +209,10 @@ struct IssueDetails {
     title: String,
     #[schemars(description = "The human-readable issue simple ID")]
     simple_id: String,
+    #[schemars(
+        description = "Application-relative issue URL; use this exact destination in Markdown issue references."
+    )]
+    issue_url: String,
     #[schemars(description = "Optional description of the issue")]
     description: Option<String>,
     #[schemars(description = "Current status of the issue")]
@@ -266,7 +314,7 @@ struct McpListIssuePrioritiesResponse {
 #[tool_router(router = remote_issues_tools_router, vis = "pub")]
 impl McpServer {
     #[tool(
-        description = "Create a new issue in a project. `project_id` is optional if running inside a workspace linked to a remote project."
+        description = "Create a new issue in a project. `project_id` is optional if running inside a workspace linked to a remote project. Returns issue_url: the link destination for this issue in prose read inside Vibe Kanban. It is an app-relative route, so do not write it into fields that sync to an external tracker (title, description)."
     )]
     async fn create_issue(
         &self,
@@ -276,6 +324,9 @@ impl McpServer {
             description,
             priority,
             parent_issue_id,
+            pipeline_ids,
+            pipeline_stage_ids,
+            executor,
         }): Parameters<McpCreateIssueRequest>,
     ) -> Result<CallToolResult, ErrorData> {
         let project_id = match self.resolve_project_id(project_id) {
@@ -283,10 +334,62 @@ impl McpServer {
             Err(e) => return Ok(McpServer::tool_error(e)),
         };
 
+        let executor = match executor.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
+            Some(executor) => match Self::parse_executor_agent(executor) {
+                Ok(agent) => Some(agent.to_string()),
+                Err(_) => {
+                    return Self::err(format!("Unknown executor '{executor}'."), None::<String>);
+                }
+            },
+            None => None,
+        };
+
+        // An omitted `pipeline_ids` gets the configured new-issue defaults
+        // (project → organization → machine); an explicit list, including
+        // `[]`, is the issue-creation override and is used as given.
+        let explicit = pipeline_ids.is_some();
+        let pipeline_ids = match pipeline_ids {
+            Some(ids) => ids,
+            None => self.new_issue_default_pipeline_ids(project_id).await,
+        };
+        let selected_pipelines: Vec<McpPipeline> = if pipeline_ids.is_empty() {
+            Vec::new()
+        } else {
+            let url = self.url("/api/pipelines");
+            let all_pipelines: Vec<McpPipeline> = match self.send_json(self.client.get(&url)).await
+            {
+                Ok(p) => p,
+                Err(e) => return Ok(McpServer::tool_error(e)),
+            };
+            match select_pipelines(&all_pipelines, &pipeline_ids, explicit) {
+                Ok(selected) => selected,
+                Err(message) => return Self::err(message, None::<String>),
+            }
+        };
+
+        let enabled_stage_ids: HashSet<String> = match pipeline_stage_ids {
+            Some(ids) => ids.into_iter().collect(),
+            None => selected_pipelines
+                .iter()
+                .flat_map(|p| {
+                    p.stages
+                        .iter()
+                        .filter(|s| s.default_enabled)
+                        .map(|s| s.id.clone())
+                })
+                .collect(),
+        };
+
+        let block_pipelines: Vec<BlockPipeline> =
+            selected_pipelines.iter().map(BlockPipeline::from).collect();
+        let pipeline_block =
+            compose_pipeline_block(&block_pipelines, &enabled_stage_ids, executor.as_deref());
+
         let expanded_description = match description {
             Some(desc) => Some(self.expand_tags(&desc).await),
             None => None,
         };
+        let expanded_description = append_pipeline_block(expanded_description, &pipeline_block);
 
         let status_id = match self.default_status_id(project_id).await {
             Ok(id) => id,
@@ -332,14 +435,11 @@ impl McpServer {
                 Err(e) => return Ok(McpServer::tool_error(e)),
             };
 
-        McpServer::success(&McpCreateIssueResponse {
-            issue_id: response.data.id.to_string(),
-            simple_id: response.data.simple_id.clone(),
-        })
+        McpServer::success(&McpCreateIssueResponse::from(&response.data))
     }
 
     #[tool(
-        description = "List all the issues in a project. `project_id` is optional if running inside a workspace linked to a remote project."
+        description = "List all the issues in a project. `project_id` is optional if running inside a workspace linked to a remote project. Returns issue_url: the link destination for this issue in prose read inside Vibe Kanban. It is an app-relative route, so do not write it into fields that sync to an external tracker (title, description)."
     )]
     async fn list_issues(
         &self,
@@ -493,7 +593,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Get detailed information about a specific issue. You can use `list_issues` to find issue IDs. `issue_id` is required and accepts the issue UUID or its simple ID (e.g. 'VAS-64')."
+        description = "Get detailed information about a specific issue. Use the returned issue_url as the link destination when naming this issue in prose read inside Vibe Kanban; it is an app-relative route, so keep it out of fields that sync to an external tracker (title, description). You can use `list_issues` to find issue IDs. `issue_id` is required and accepts the issue UUID or its simple ID (e.g. 'VAS-64')."
     )]
     async fn get_issue(
         &self,
@@ -516,7 +616,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Update an existing issue's title, description, or status. `issue_id` is required and accepts the issue UUID or its simple ID (e.g. 'VAS-64'). `title`, `description`, and `status` are optional."
+        description = "Update an existing issue's title, description, or status. `issue_id` is required and accepts the issue UUID or its simple ID (e.g. 'VAS-64'). `title`, `description`, and `status` are optional. Returns issue_url: the link destination for this issue in prose read inside Vibe Kanban. It is an app-relative route, so do not write it into fields that sync to an external tracker (title, description)."
     )]
     async fn update_issue(
         &self,
@@ -638,6 +738,28 @@ impl McpServer {
 }
 
 impl McpServer {
+    /// The configured default pipelines for a new issue in `project_id`.
+    /// Best-effort: if they cannot be resolved the issue is created without
+    /// a pipeline rather than failing.
+    async fn new_issue_default_pipeline_ids(&self, project_id: Uuid) -> Vec<String> {
+        let url = self.url(&format!(
+            "/api/pipelines/new-issue-defaults?project_id={project_id}"
+        ));
+        match self
+            .send_json::<NewIssuePipelineDefaults>(self.client.get(&url))
+            .await
+        {
+            Ok(defaults) => defaults.pipeline_ids,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to resolve new-issue default pipelines for project {project_id}; \
+                     creating the issue without a pipeline: {e:?}"
+                );
+                Vec::new()
+            }
+        }
+    }
+
     fn parse_issue_sort_field(sort_field: Option<&str>) -> Result<IssueSortField, ToolError> {
         match sort_field
             .unwrap_or("sort_order")
@@ -687,6 +809,7 @@ impl McpServer {
             id: issue.id.to_string(),
             title: issue.title.clone(),
             simple_id: issue.simple_id.clone(),
+            issue_url: Self::issue_url(issue.project_id, issue.id),
             status,
             priority: issue
                 .priority
@@ -724,6 +847,7 @@ impl McpServer {
             id: issue.id.to_string(),
             title: issue.title.clone(),
             simple_id: issue.simple_id.clone(),
+            issue_url: Self::issue_url(issue.project_id, issue.id),
             description: issue.description.clone(),
             status,
             status_id: issue.status_id.to_string(),
@@ -831,24 +955,23 @@ impl McpServer {
                 limit: 0,
                 offset: 0,
             });
-        let simple_id_map: HashMap<Uuid, &str> = issues_response
-            .issues
-            .iter()
-            .map(|i| (i.id, i.simple_id.as_str()))
-            .collect();
+        let issue_map: HashMap<Uuid, &Issue> =
+            issues_response.issues.iter().map(|i| (i.id, i)).collect();
 
         response
             .issue_relationships
             .into_iter()
             .map(|r| {
-                let related_simple_id = simple_id_map
-                    .get(&r.related_issue_id)
-                    .unwrap_or(&"")
-                    .to_string();
+                let related_issue = issue_map.get(&r.related_issue_id);
                 McpRelationshipSummary {
                     id: r.id.to_string(),
                     related_issue_id: r.related_issue_id.to_string(),
-                    related_simple_id,
+                    // Null rather than "": a related issue can live in another
+                    // project, and an empty key left the agent with neither a
+                    // name to write nor a signal to look one up.
+                    related_simple_id: related_issue.map(|issue| issue.simple_id.clone()),
+                    related_issue_url: related_issue
+                        .map(|issue| Self::issue_url(issue.project_id, issue.id)),
                     relationship_type: match r.relationship_type {
                         IssueRelationshipType::Blocking => "blocking".to_string(),
                         IssueRelationshipType::Related => "related".to_string(),
@@ -895,6 +1018,7 @@ impl McpServer {
                 McpSubIssueSummary {
                     id: i.id.to_string(),
                     simple_id: i.simple_id.clone(),
+                    issue_url: Self::issue_url(i.project_id, i.id),
                     title: i.title.clone(),
                     status,
                 }
@@ -977,6 +1101,160 @@ impl McpServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn issue_fixture() -> Issue {
+        serde_json::from_value(serde_json::json!({
+            "id": "22222222-2222-2222-2222-222222222222",
+            "project_id": "11111111-1111-1111-1111-111111111111",
+            "issue_number": 646, "simple_id": "VAS-646",
+            "status_id": "33333333-3333-3333-3333-333333333333",
+            "title": "Issue link", "sort_order": 0.0, "extension_metadata": {},
+            "created_at": "2026-09-20T00:00:00Z", "updated_at": "2026-09-20T00:00:00Z"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn created_issue_response_provides_exact_browser_destination() {
+        let issue = issue_fixture();
+        let result = McpServer::success(&McpCreateIssueResponse::from(&issue)).unwrap();
+        let text = result.content[0].as_text().unwrap();
+        let response: serde_json::Value = serde_json::from_str(&text.text).unwrap();
+        assert_eq!(response["issue_id"], issue.id.to_string());
+        assert_eq!(response["simple_id"], "VAS-646");
+        assert_eq!(
+            response["issue_url"],
+            "/projects/11111111-1111-1111-1111-111111111111/issues/22222222-2222-2222-2222-222222222222"
+        );
+    }
+
+    /// A parent may live in another project: `create_issue` resolves
+    /// `parent_issue_id` through `resolve_issue_id`, which searches every
+    /// visible project, and the FK carries no same-project constraint. So the
+    /// child's `project_id` must never be used to build a parent destination.
+    #[test]
+    fn parent_reference_gets_no_guessed_destination() {
+        super::super::tests::install_rustls_provider();
+        let server = McpServer::new_global("http://internal-coordinator:3000");
+        let prs = ListPullRequestsResponse {
+            pull_requests: vec![],
+        };
+        let mut issue = issue_fixture();
+        issue.parent_issue_id = Some(Uuid::from_u128(9));
+
+        let summary = serde_json::to_value(server.issue_to_summary(&issue, None, &prs)).unwrap();
+        assert_eq!(
+            summary["parent_issue_id"],
+            "00000000-0000-0000-0000-000000000009"
+        );
+        assert!(summary.get("parent_issue_url").is_none(), "{summary}");
+        // The parent id must not be spliced into this issue's own project route.
+        assert!(
+            !summary.to_string().contains(
+                "/projects/11111111-1111-1111-1111-111111111111/issues/00000000-0000-0000-0000-000000000009"
+            ),
+            "{summary}"
+        );
+    }
+
+    #[test]
+    fn summary_destination_uses_record_identity_not_transport_or_key() {
+        super::super::tests::install_rustls_provider();
+        let server = McpServer::new_global("http://internal-coordinator:3000");
+        let mut issue = issue_fixture();
+        let prs = ListPullRequestsResponse {
+            pull_requests: vec![],
+        };
+        let original = server.issue_to_summary(&issue, None, &prs);
+        issue.simple_id = "DIFFERENT-999".to_string();
+        let changed = server.issue_to_summary(&issue, None, &prs);
+        assert_eq!(original.issue_url, changed.issue_url);
+        issue.project_id = Uuid::nil();
+        let moved = serde_json::to_value(server.issue_to_summary(&issue, None, &prs)).unwrap();
+        assert_eq!(
+            moved["issue_url"],
+            "/projects/00000000-0000-0000-0000-000000000000/issues/22222222-2222-2222-2222-222222222222"
+        );
+    }
+
+    #[tokio::test]
+    async fn details_link_nested_records_and_leave_unknown_relationships_unresolved() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        super::super::tests::install_rustls_provider();
+        let issue = issue_fixture();
+        let mut child = issue_fixture();
+        child.id = Uuid::from_u128(4);
+        child.project_id = Uuid::from_u128(5);
+        child.parent_issue_id = Some(issue.id);
+        let child_url = McpServer::issue_url(child.project_id, child.id);
+        let relationships = serde_json::json!({"issue_relationships": [
+            {"id": Uuid::from_u128(6), "issue_id": issue.id, "related_issue_id": child.id,
+             "relationship_type": "related", "created_at": "2026-09-20T00:00:00Z"},
+            {"id": Uuid::from_u128(7), "issue_id": issue.id, "related_issue_id": Uuid::nil(),
+             "relationship_type": "blocking", "created_at": "2026-09-20T00:00:00Z"}
+        ]});
+        let issues =
+            serde_json::json!({"issues": [child], "total_count": 1, "limit": 50, "offset": 0});
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let mock = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buf = [0; 1024];
+                while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                    let n = stream.read(&mut buf).await.unwrap();
+                    if n == 0 {
+                        return;
+                    }
+                    request.extend_from_slice(&buf[..n]);
+                }
+                let request = String::from_utf8(request).unwrap();
+                let data = if request.starts_with("GET /api/remote/issue-relationships?") {
+                    relationships.clone()
+                } else if request.starts_with("GET /api/remote/issues?") {
+                    issues.clone()
+                } else if request.starts_with("GET /api/remote/project-statuses?") {
+                    serde_json::json!({"project_statuses": []})
+                } else if request.starts_with("GET /api/remote/issue-tags?") {
+                    serde_json::json!({"issue_tags": []})
+                } else {
+                    serde_json::json!({"tags": []})
+                };
+                let body = serde_json::json!({"success": true, "data": data}).to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let details = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            McpServer::new_global(&base_url).issue_to_details(
+                &issue,
+                ListPullRequestsResponse {
+                    pull_requests: vec![],
+                },
+            ),
+        )
+        .await;
+        mock.abort();
+        let details = serde_json::to_value(details.unwrap()).unwrap();
+        assert_eq!(
+            details["issue_url"],
+            McpServer::issue_url(issue.project_id, issue.id)
+        );
+        assert_eq!(details["sub_issues"][0]["issue_url"], child_url);
+        assert_eq!(details["relationships"][0]["related_issue_url"], child_url);
+        assert_eq!(details["relationships"][0]["related_simple_id"], "VAS-646");
+        // An unresolvable relation reports null for both, so the agent knows to
+        // look the issue up rather than printing an empty key.
+        assert!(details["relationships"][1]["related_issue_url"].is_null());
+        assert!(details["relationships"][1]["related_simple_id"].is_null());
+    }
 
     #[test]
     fn collects_all_matching_status_ids_case_insensitively() {

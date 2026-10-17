@@ -263,7 +263,13 @@ pub async fn list_open_prs(
         None => deployment.git().get_default_remote(&repo.path)?,
     };
 
-    let git_host = match GitHostService::from_url(&remote.url) {
+    let credentials = services::services::github_credentials::resolve_for_repo(
+        &deployment.db().pool,
+        deployment.git(),
+        &repo.path,
+    )
+    .await;
+    let git_host = match GitHostService::from_url_with_credentials(&remote.url, credentials) {
         Ok(host) => host,
         Err(GitHostError::UnsupportedProvider) => {
             return Ok(ResponseJson(ApiResponse::error_with_data(
@@ -300,10 +306,15 @@ pub struct PrInfoQuery {
 }
 
 pub async fn get_pr_info(
-    State(_deployment): State<DeploymentImpl>,
+    State(deployment): State<DeploymentImpl>,
     Query(query): Query<PrInfoQuery>,
 ) -> Result<ResponseJson<ApiResponse<PullRequestDetail, ListPrsError>>, ApiError> {
-    let git_host = match GitHostService::from_url(&query.url) {
+    let credentials = services::services::github_credentials::resolve_for_urls(
+        &deployment.db().pool,
+        [query.url.as_str()],
+    )
+    .await;
+    let git_host = match GitHostService::from_url_with_credentials(&query.url, credentials) {
         Ok(host) => host,
         Err(GitHostError::UnsupportedProvider) => {
             return Ok(ResponseJson(ApiResponse::error_with_data(

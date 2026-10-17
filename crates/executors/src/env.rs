@@ -71,12 +71,30 @@ impl RepoContext {
                 }
             }
 
+            if !all_status.is_empty() && all_status.contains(SPECKIT_COMMAND_PATH_MARKER) {
+                all_status.push_str(SPECKIT_COMMAND_RESTORE_NOTE);
+            }
+
             all_status
         })
         .await
         .unwrap_or_default()
     }
 }
+
+/// Path fragment of the harness-generated SpecKit command files.
+const SPECKIT_COMMAND_PATH_MARKER: &str = ".claude/commands/speckit.";
+
+/// Appended to the uncommitted-changes report when it lists SpecKit command
+/// files. Vibe Kanban now writes them task-agnostic (identical for every task),
+/// so a diff here is a repo whose base branch still carries an older harness's
+/// per-task copy. Committing it once restores the shared version; reverting it
+/// only makes the harness rewrite it and the Stop hook block again.
+const SPECKIT_COMMAND_RESTORE_NOTE: &str = "\nNote: if `.claude/commands/speckit.*.md` \
+    changed without you editing them, Vibe Kanban regenerated them in their task-agnostic \
+    form (the current task's spec dir now lives in the untracked `.specify/feature-dir`). \
+    Commit that change as-is; do not revert it. It is identical for every task, so it will \
+    not recur once merged.\n";
 
 /// Environment variables to inject into executor processes
 #[derive(Debug, Clone)]
@@ -171,12 +189,46 @@ impl ExecutionEnv {
     }
 
     /// Return a new env with profile env from CmdOverrides merged in.
-    pub fn with_profile(self, cmd: &CmdOverrides) -> Self {
+    ///
+    /// Profile values override runtime values except for `PATH`, where profile
+    /// entries take precedence but runtime entries remain available. Runtime
+    /// `PATH` can contain execution-owned directories such as the app-managed
+    /// CLI tools bin directory, which a profile must not erase.
+    pub fn with_profile(mut self, cmd: &CmdOverrides) -> Self {
         if let Some(ref profile_env) = cmd.env {
-            self.with_overrides(profile_env)
-        } else {
-            self
+            let runtime_path = env_path(&self.vars).cloned();
+            let profile_path = env_path(profile_env).cloned();
+            self.merge(profile_env);
+
+            if let Some(profile_path) = profile_path {
+                #[cfg(windows)]
+                self.vars.retain(|key, _| !is_path_key(key));
+
+                let effective_path = if let Some(runtime_path) = runtime_path {
+                    // Profile entries go first, except that GitHub owner routing's `gh`
+                    // shim (runtime-owned) must stay ahead of any profile `gh`.
+                    workspace_utils::github_auth::preserve_shim_precedence(
+                        workspace_utils::shell::merge_paths(profile_path, &runtime_path),
+                        std::ffi::OsStr::new(&runtime_path),
+                    )
+                } else {
+                    profile_path.into()
+                };
+                self.insert("PATH", effective_path.to_string_lossy().into_owned());
+            }
+
+            // A login shell restores VK_AGENT_PATH in place of PATH, so it must
+            // describe the PATH the agent actually got -- after the profile's
+            // entries -- and a profile cannot point it anywhere else.
+            let agent_path = workspace_utils::shell::AGENT_PATH_ENV;
+            if self.vars.contains_key(agent_path)
+                && let Some(path) = env_path(&self.vars).cloned()
+            {
+                self.insert(agent_path, path);
+            }
         }
+
+        self
     }
 
     /// Apply all environment variables to a Command
@@ -193,6 +245,21 @@ impl ExecutionEnv {
     pub fn get(&self, key: &str) -> Option<&String> {
         self.vars.get(key)
     }
+}
+
+fn env_path(env: &HashMap<String, String>) -> Option<&String> {
+    env.iter()
+        .find_map(|(key, value)| is_path_key(key).then_some(value))
+}
+
+#[cfg(not(windows))]
+fn is_path_key(key: &str) -> bool {
+    key == "PATH"
+}
+
+#[cfg(windows)]
+fn is_path_key(key: &str) -> bool {
+    key.eq_ignore_ascii_case("PATH")
 }
 
 #[cfg(test)]
@@ -214,6 +281,145 @@ mod tests {
         assert_eq!(merged.vars.get("VK_PROJECT_NAME").unwrap(), "runtime");
         assert_eq!(merged.vars.get("FOO").unwrap(), "profile"); // overrides
         assert_eq!(merged.vars.get("BAR").unwrap(), "profile");
+    }
+
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    }
+
+    #[tokio::test]
+    async fn uncommitted_report_explains_regenerated_speckit_commands() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("repo");
+        std::fs::create_dir_all(repo.join(".claude/commands")).unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["config", "user.email", "test@example.com"]);
+        git(&repo, &["config", "user.name", "Test"]);
+        git(&repo, &["config", "commit.gpgsign", "false"]);
+        let cmd = repo.join(".claude/commands/speckit.plan.md");
+        std::fs::write(&cmd, "specs/vk/old-task/plan.md\n").unwrap();
+        std::fs::write(repo.join("README.md"), "hi\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "init"]);
+        let ctx = RepoContext::new(root.path().to_path_buf(), vec!["repo".to_string()]);
+
+        std::fs::write(repo.join("README.md"), "changed\n").unwrap();
+        let unrelated = ctx.check_uncommitted_changes().await;
+        assert!(unrelated.contains("README.md"));
+        assert!(!unrelated.contains(SPECKIT_COMMAND_RESTORE_NOTE));
+
+        std::fs::write(&cmd, "<FEATURE_DIR>/plan.md\n").unwrap();
+        let speckit = ctx.check_uncommitted_changes().await;
+        assert!(speckit.contains(".claude/commands/speckit.plan.md"));
+        assert!(speckit.ends_with(SPECKIT_COMMAND_RESTORE_NOTE));
+    }
+
+    #[test]
+    fn agent_path_tracks_the_profile_merged_path() {
+        let agent_path = workspace_utils::shell::AGENT_PATH_ENV;
+        let mut base = ExecutionEnv::new(RepoContext::default(), false, String::new());
+        let runtime_path = std::env::join_paths(["/runtime/bin"]).unwrap();
+        base.insert("PATH", runtime_path.to_string_lossy());
+        base.insert(agent_path, runtime_path.to_string_lossy());
+
+        let mut profile = HashMap::new();
+        profile.insert("PATH".to_string(), "/profile/bin".to_string());
+        // A profile cannot redirect what login shells restore.
+        profile.insert(agent_path.to_string(), "/elsewhere/bin".to_string());
+        let merged = base.with_profile(&CmdOverrides {
+            env: Some(profile),
+            ..Default::default()
+        });
+
+        assert_eq!(merged.vars.get(agent_path), merged.vars.get("PATH"));
+        assert!(merged.vars.get("PATH").unwrap().starts_with("/profile/bin"));
+    }
+
+    #[test]
+    fn profile_path_keeps_runtime_owned_entries() {
+        let mut base = ExecutionEnv::new(RepoContext::default(), false, String::new());
+        let runtime_path =
+            std::env::join_paths(["/runtime/bin", "/managed/cli-tools/bin"]).unwrap();
+        base.insert("PATH", runtime_path.to_string_lossy());
+
+        let mut profile = HashMap::new();
+        let profile_path = std::env::join_paths(["/profile/bin", "/runtime/bin"]).unwrap();
+        profile.insert(
+            "PATH".to_string(),
+            profile_path.to_string_lossy().into_owned(),
+        );
+
+        let merged = base.with_profile(&CmdOverrides {
+            env: Some(profile),
+            ..Default::default()
+        });
+        let paths: Vec<_> = std::env::split_paths(merged.vars.get("PATH").unwrap()).collect();
+
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("/profile/bin"),
+                PathBuf::from("/runtime/bin"),
+                PathBuf::from("/managed/cli-tools/bin"),
+            ]
+        );
+    }
+
+    #[test]
+    fn profile_path_cannot_shadow_the_github_routing_shim() {
+        let shim = workspace_utils::assets::github_auth_bin_dir();
+        let mut base = ExecutionEnv::new(RepoContext::default(), false, String::new());
+        let runtime_path =
+            std::env::join_paths([shim.clone(), PathBuf::from("/runtime/bin")]).unwrap();
+        base.insert("PATH", runtime_path.to_string_lossy());
+        let profile = HashMap::from([("PATH".to_string(), "/profile/gh/bin".to_string())]);
+        let merged = base.with_profile(&CmdOverrides {
+            env: Some(profile),
+            ..Default::default()
+        });
+        let paths: Vec<_> = std::env::split_paths(merged.vars.get("PATH").unwrap()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                shim,
+                PathBuf::from("/profile/gh/bin"),
+                PathBuf::from("/runtime/bin"),
+            ]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn profile_path_casing_is_normalized_on_windows() {
+        let mut base = ExecutionEnv::new(RepoContext::default(), false, String::new());
+        base.insert("PATH", r"C:\runtime");
+
+        let mut profile = HashMap::new();
+        profile.insert("Path".to_string(), r"C:\profile".to_string());
+
+        let merged = base.with_profile(&CmdOverrides {
+            env: Some(profile),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            merged
+                .vars
+                .keys()
+                .filter(|key| key.eq_ignore_ascii_case("PATH"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            std::env::split_paths(merged.vars.get("PATH").unwrap()).collect::<Vec<_>>(),
+            vec![PathBuf::from(r"C:\profile"), PathBuf::from(r"C:\runtime")]
+        );
     }
 
     use crate::executors::BaseCodingAgent;
@@ -241,6 +447,8 @@ mod tests {
             .expect("the embedded defaults always define DEFAULT");
         ExecutorProfile {
             recently_used_models: None,
+            disabled_models: Vec::new(),
+            disabled: false,
             configurations: HashMap::from([(variant.to_string(), agent)]),
         }
     }

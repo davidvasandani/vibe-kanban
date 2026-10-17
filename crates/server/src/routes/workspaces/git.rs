@@ -18,7 +18,9 @@ use db::models::{
 use deployment::Deployment;
 use git::{ConflictOp, GitCliError, GitServiceError};
 use serde::{Deserialize, Serialize};
-use services::services::{container::ContainerService, diff_stream, remote_sync};
+use services::services::{
+    container::ContainerService, diff_stream, github_credentials, remote_sync,
+};
 use ts_rs::TS;
 use utils::response::ApiResponse;
 use uuid::Uuid;
@@ -288,9 +290,11 @@ pub async fn push_workspace_branch(
     let workspace_path = Path::new(&container_ref);
     let worktree_path = workspace_path.join(&repo.name);
 
+    let credentials =
+        github_credentials::resolve_for_repo(pool, deployment.git(), &repo.path).await;
     match deployment
         .git()
-        .push_to_remote(&worktree_path, &workspace.branch, false)
+        .push_to_remote(&worktree_path, &workspace.branch, false, &credentials)
     {
         Ok(_) => {
             if let Ok(client) = deployment.remote_client() {
@@ -342,9 +346,11 @@ pub async fn force_push_workspace_branch(
     let workspace_path = Path::new(&container_ref);
     let worktree_path = workspace_path.join(&repo.name);
 
+    let credentials =
+        github_credentials::resolve_for_repo(pool, deployment.git(), &repo.path).await;
     deployment
         .git()
-        .push_to_remote(&worktree_path, &workspace.branch, true)?;
+        .push_to_remote(&worktree_path, &workspace.branch, true, &credentials)?;
 
     if let Ok(client) = deployment.remote_client() {
         let pool = deployment.db().pool.clone();
@@ -440,11 +446,29 @@ pub async fn get_workspace_branch_status(
             .git()
             .is_remote_branch(&repo.path, &target_branch)?;
 
+        let has_open_pr = matches!(
+            repo_merges.first(),
+            Some(Merge::Pr(PrMerge {
+                pr_info: PullRequestInfo {
+                    status: MergeStatus::Open,
+                    ..
+                },
+                ..
+            }))
+        );
+        // Only fetching needs credentials; skip the lookup otherwise.
+        let credentials = if is_target_remote || has_open_pr {
+            github_credentials::resolve_for_repo(pool, deployment.git(), &repo.path).await
+        } else {
+            Default::default()
+        };
+
         let (commits_ahead, commits_behind) = if is_target_remote {
             let (ahead, behind) = deployment.git().get_remote_branch_status(
                 &repo.path,
                 &workspace.branch,
                 Some(&target_branch),
+                &credentials,
             )?;
             (Some(ahead), Some(behind))
         } else {
@@ -456,19 +480,13 @@ pub async fn get_workspace_branch_status(
             (Some(a), Some(b))
         };
 
-        let (remote_ahead, remote_behind) = if let Some(Merge::Pr(PrMerge {
-            pr_info:
-                PullRequestInfo {
-                    status: MergeStatus::Open,
-                    ..
-                },
-            ..
-        })) = repo_merges.first()
-        {
-            match deployment
-                .git()
-                .get_remote_branch_status(&repo.path, &workspace.branch, None)
-            {
+        let (remote_ahead, remote_behind) = if has_open_pr {
+            match deployment.git().get_remote_branch_status(
+                &repo.path,
+                &workspace.branch,
+                None,
+                &credentials,
+            ) {
                 Ok((ahead, behind)) => (Some(ahead), Some(behind)),
                 Err(_) => (None, None),
             }
@@ -746,12 +764,15 @@ pub async fn rebase_workspace(
     let workspace_path = Path::new(&container_ref);
     let worktree_path = workspace_path.join(&repo.name);
 
+    let credentials =
+        github_credentials::resolve_for_repo(pool, deployment.git(), &repo.path).await;
     let result = deployment.git().rebase_branch(
         &repo.path,
         &worktree_path,
         &new_base_branch,
         &old_base_branch,
         &workspace.branch.clone(),
+        &credentials,
     );
     if let Err(e) = result {
         return match e {

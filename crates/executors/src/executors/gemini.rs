@@ -203,6 +203,7 @@ impl StandardCodingAgentExecutor for Gemini {
     ) -> Result<futures::stream::BoxStream<'static, json_patch::Patch>, ExecutorError> {
         let options = ExecutorDiscoveredOptions {
             model_selector: ModelSelectorConfig {
+                model_aliases: Default::default(),
                 models: vec![
                     ModelInfo {
                         id: "gemini-3.1-pro-preview".to_string(),

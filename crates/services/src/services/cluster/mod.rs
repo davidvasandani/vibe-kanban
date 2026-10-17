@@ -17,4 +17,7 @@ pub use registry::{
     MountChallenge, MountEvidenceError, WorkerRegistry, WorkerRegistryError,
     validate_mount_evidence,
 };
-pub use scheduler::{IneligibleReason, SchedulingError, WorkerScheduler, eligibility};
+pub use scheduler::{
+    IneligibleReason, SchedulingError, WorkerScheduler, WorkerUnavailable, WorkerUnavailableReason,
+    dispatch_liveness, eligibility,
+};

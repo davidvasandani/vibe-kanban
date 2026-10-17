@@ -64,6 +64,12 @@ display-only paths may be loose.
   React Query cache, seed + mount runs share one effect flush, so
   "skip-once ref" workarounds mis-fire). State adjustments belong in the
   event handler (`togglePipeline`), where the cause is known.
+- Create-mode seeding comes from the resolved new-issue defaults
+  (`defaultPipelineIds`; `null` = wait, `undefined` = legacy `basic`), not
+  a hard-coded id. Controls stay disabled until seeded. See
+  [new-issue-pipeline-defaults.md](new-issue-pipeline-defaults.md).
+- The card starts **collapsed**, and its header names the selection. It
+  stays mounted while collapsed because it owns the selection.
 - Pipeline toggles adjust ticks **incrementally**: adding a pipeline
   enables only that pipeline's default stages on top of current ticks;
   removing one drops only stages no longer declared by any selected
@@ -81,5 +87,20 @@ mirror into local edit state + the ref. Dirty = composed block vs
 `extractPipelineBlock(live description)`, both trimmed; the Update Issue
 button is disabled-when-clean rather than hidden.
 
+## The Rust composer is shared, in `api-types`
+
+The backend's mirror of `composePipelineBlock` lives in
+`crates/api-types/src/pipeline_block.rs` and takes minimal
+`BlockPipeline { name, stages: [BlockStage { id, prompt_fragment }] }` values.
+Before `vk/7e4f-auto-error-remed` it was private to `crates/mcp`. Callers map
+their own pipeline types into it: MCP `McpPipeline` and services
+`pipelines::Pipeline` both have `From` impls. Every backend path that writes
+a block, whether MCP `create_issue` or auto error remediation
+([[auto-error-remediation]]), must go through it. A second Rust composer
+would reopen the round-trip hazards described above. Keep it byte-identical
+to the TS composer.
+
 ## Contributed by
 - vk/77eb-vk-pipeline
+- vk/7e4f-auto-error-remed
+- vk/16dc-default-pipeline

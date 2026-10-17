@@ -87,6 +87,7 @@ import {
   Session,
   Workspace,
   WorkspacePlacement,
+  WorkspaceCreationProgress,
   UpdateWorkspaceAffinityRequest,
   WorkspaceAffinityUpdateResponse,
   WorkerNode,
@@ -116,6 +117,7 @@ import {
   OpenRemoteEditorResponse,
   ProfileResponse,
   Pipeline,
+  NewIssuePipelineDefaultsResponse,
   SpecKitTaskStatus,
   SpecKitArtifacts,
   SpecKitArtifact,
@@ -143,6 +145,8 @@ import type {
   SlackConfigResponse,
   SlackTestConnectionResponse,
   UpsertSlackConfigRequest,
+  ResolveLowDiskIssueRequest,
+  ResolveLowDiskIssueResponse,
 } from 'shared/remote-types';
 import type { WorkspaceWithSession } from '@/shared/types/attempt';
 import { createWorkspaceWithSession } from '@/shared/types/attempt';
@@ -485,6 +489,15 @@ export const workspacesApi = {
   get: async (workspaceId: string): Promise<Workspace> => {
     const response = await makeRequest(`/api/workspaces/${workspaceId}`);
     return handleApiResponse<Workspace>(response);
+  },
+
+  getCreationProgress: async (
+    workspaceId: string
+  ): Promise<WorkspaceCreationProgress> => {
+    const response = await makeRequest(
+      `/api/workspaces/${encodeURIComponent(workspaceId)}/creation-progress`
+    );
+    return handleApiResponse<WorkspaceCreationProgress>(response);
   },
 
   getPlacement: async (workspaceId: string): Promise<WorkspacePlacement> => {
@@ -1268,9 +1281,26 @@ export const tagsApi = {
 
 // Pipelines APIs (file-based task pipelines; see GET /api/pipelines)
 export const pipelinesApi = {
-  list: async (): Promise<Pipeline[]> => {
-    const response = await makeRequest('/api/pipelines', { cache: 'no-store' });
+  list: async (hostId?: string | null): Promise<Pipeline[]> => {
+    const response = await makeHostAwareRequest('/api/pipelines', hostId, {
+      cache: 'no-store',
+    });
     return handleApiResponse<Pipeline[]>(response);
+  },
+  /** Default pipelines for a new issue in `projectId` (project → org → machine). */
+  newIssueDefaults: async (
+    projectId?: string,
+    hostId?: string | null
+  ): Promise<NewIssuePipelineDefaultsResponse> => {
+    const query = projectId
+      ? `?project_id=${encodeURIComponent(projectId)}`
+      : '';
+    const response = await makeHostAwareRequest(
+      `/api/pipelines/new-issue-defaults${query}`,
+      hostId,
+      { cache: 'no-store' }
+    );
+    return handleApiResponse<NewIssuePipelineDefaultsResponse>(response);
   },
 };
 
@@ -1955,12 +1985,12 @@ export const scratchApi = {
     scratchType: ScratchType,
     id: string,
     data: UpdateScratch
-  ): Promise<void> => {
+  ): Promise<Scratch> => {
     const response = await makeRequest(`/api/scratch/${scratchType}/${id}`, {
       method: 'PUT',
       body: JSON.stringify(data),
     });
-    return handleApiResponse<void>(response);
+    return handleApiResponse<Scratch>(response);
   },
 
   delete: async (scratchType: ScratchType, id: string): Promise<void> => {
@@ -1982,9 +2012,16 @@ export const agentsApi = {
   ): string => {
     const params = new URLSearchParams();
     params.set('executor', agent);
-    if (opts?.workspaceId) params.set('workspace_id', opts.workspaceId);
-    if (opts?.sessionId) params.set('session_id', opts.sessionId);
-    if (opts?.repoId) params.set('repo_id', opts.repoId);
+    if (opts?.sessionId) {
+      // A session fixes the workspace and working directory on the server,
+      // which then only uses workspace_id as a consistency check and ignores
+      // repo_id. Leaving them out makes every caller for this session share
+      // one discovery socket.
+      params.set('session_id', opts.sessionId);
+    } else {
+      if (opts?.workspaceId) params.set('workspace_id', opts.workspaceId);
+      if (opts?.repoId) params.set('repo_id', opts.repoId);
+    }
 
     return `/api/agents/discovered-options/ws?${params.toString()}`;
   },
@@ -2185,6 +2222,20 @@ export const clusterMetricsApi = {
       options
     );
     return handleApiResponse<ClusterMetricsSnapshot>(response);
+  },
+  resolveLowDiskIssue: async (
+    request: ResolveLowDiskIssueRequest,
+    hostId?: string | null
+  ): Promise<ResolveLowDiskIssueResponse> => {
+    const response = await makeHostAwareRequest(
+      '/api/remote/issues/low-disk',
+      hostId,
+      {
+        method: 'POST',
+        body: JSON.stringify(request),
+      }
+    );
+    return handleApiResponse<ResolveLowDiskIssueResponse>(response);
   },
 };
 

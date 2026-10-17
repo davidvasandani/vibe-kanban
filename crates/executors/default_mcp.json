@@ -48,7 +48,7 @@
     "command": "npx",
     "args": [
       "-y",
-      "https://github.com/davidvasandani/slack-mcp-server/releases/download/v1.3.0-vk.2/slack-mcp-server-vk-1.3.0-vk.2.tgz",
+      "https://github.com/davidvasandani/slack-mcp-server/releases/download/v1.3.0-vk.3/slack-mcp-server-vk-1.3.0-vk.3.tgz",
       "--transport",
       "stdio"
     ],
@@ -66,6 +66,21 @@
     "env": {
       "GMAIL_CREDENTIALS_PATH": "/absolute/path/to/credentials.json"
     }
+  },
+  "brink": {
+    "command": "npx",
+    "args": [
+      "-y",
+      "brink-pos-mcp-server"
+    ],
+    "env": {
+      "BRINK_ACCESS_TOKEN": "YOUR_TOKEN",
+      "BRINK_LOCATION_TOKEN": "YOUR_TOKEN"
+    }
+  },
+  "personal_servicenow": {
+    "type": "http",
+    "url": "https://snow.vasandani.dev/mcp"
   },
   "meta": {
     "vibe_kanban": {
@@ -113,6 +128,15 @@
       "name": "Gmail",
       "description": "Read, search, draft and send Gmail from your agent",
       "url": "https://github.com/davidvasandani/Gmail-MCP-Server"
+    },
+    "brink": {
+      "name": "Brink POS",
+      "description": "Send test orders and check OLO connectivity on Brink POS registers",
+      "url": "https://github.com/davidvasandani/mcp-brink"
+    },
+    "personal_servicenow": {
+      "name": "Personal ServiceNow",
+      "description": "Query and manage ServiceNow incidents, requests, changes, knowledge, CMDB and catalog records"
     }
   }
 }

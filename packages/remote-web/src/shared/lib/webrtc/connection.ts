@@ -373,6 +373,10 @@ export class WebRtcConnection {
         }
         break;
       }
+      case "http_request":
+      case "ws_open":
+        // Requests this side sends; the peer never sends them back.
+        break;
     }
   }
 

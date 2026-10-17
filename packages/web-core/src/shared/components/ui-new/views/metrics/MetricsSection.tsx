@@ -83,10 +83,13 @@ export function MetricsRow({
   label,
   value,
   className,
+  valueClassName,
 }: {
   label: string;
   value: string;
   className?: string;
+  /** Overrides the value's tone, e.g. `text-error` for a flagged reading. */
+  valueClassName?: string;
 }) {
   return (
     <div
@@ -98,7 +101,10 @@ export function MetricsRow({
       </span>
       <span
         aria-hidden="true"
-        className="font-ibm-plex-mono text-sm text-normal tabular-nums shrink-0"
+        className={cn(
+          'font-ibm-plex-mono text-sm text-normal tabular-nums shrink-0',
+          valueClassName
+        )}
       >
         {value}
       </span>

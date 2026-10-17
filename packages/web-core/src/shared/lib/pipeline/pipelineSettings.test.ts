@@ -1,7 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import type { PipelineFileStatus } from 'shared/types';
+import type {
+  NewIssuePipelineDefaults,
+  PipelineFileStatus,
+} from 'shared/types';
 import {
+  clearScopeOverride,
   createPipelineStarterToml,
+  getScopeOverride,
+  setScopeOverride,
+  toggleMachineDefault,
+  togglePipelineId,
+  toggleScopePipeline,
   formatPipelineErrorLocation,
   isBundledPipelineId,
   isValidPipelineId,
@@ -93,5 +102,73 @@ prompt = "Describe what this stage should do."
     expect(selectPipelineAfterRefresh(statuses, null)).toBe('basic');
     expect(selectPipelineAfterRefresh([], 'basic')).toBeNull();
     expect(selectPipelineAfterRefresh(null, 'basic')).toBeNull();
+  });
+});
+
+describe('new-issue pipeline default updaters', () => {
+  const order = ['basic', 'wikillm', 'speckit'];
+  const base: NewIssuePipelineDefaults = {
+    pipeline_ids: ['basic'],
+    organizations: {},
+    projects: {},
+  };
+
+  it('keeps toggled ids in catalog order, missing ids last', () => {
+    expect(togglePipelineId(['speckit'], 'basic', true, order)).toEqual([
+      'basic',
+      'speckit',
+    ]);
+    expect(togglePipelineId(['gone', 'basic'], 'wikillm', true, order)).toEqual(
+      ['basic', 'wikillm', 'gone']
+    );
+    expect(togglePipelineId(['gone', 'basic'], 'gone', false, order)).toEqual([
+      'basic',
+    ]);
+  });
+
+  it('toggles the machine default without touching overrides', () => {
+    const next = toggleMachineDefault(base, 'basic', false, order);
+    expect(next.pipeline_ids).toEqual([]);
+    expect(next.projects).toBe(base.projects);
+    expect(base.pipeline_ids).toEqual(['basic']);
+  });
+
+  it('distinguishes an empty override from inheriting', () => {
+    expect(getScopeOverride(base, 'projects', 'p1')).toBeUndefined();
+    const none = setScopeOverride(base, 'projects', 'p1', []);
+    expect(getScopeOverride(none, 'projects', 'p1')).toEqual([]);
+    const inherit = clearScopeOverride(none, 'projects', 'p1');
+    expect(getScopeOverride(inherit, 'projects', 'p1')).toBeUndefined();
+    expect('p1' in inherit.projects).toBe(false);
+  });
+
+  it('toggles pipelines inside an override, creating it if needed', () => {
+    const one = toggleScopePipeline(
+      base,
+      'organizations',
+      'o1',
+      'speckit',
+      true,
+      order
+    );
+    const two = toggleScopePipeline(
+      one,
+      'organizations',
+      'o1',
+      'wikillm',
+      true,
+      order
+    );
+    expect(two.organizations.o1).toEqual(['wikillm', 'speckit']);
+    const emptied = toggleScopePipeline(
+      toggleScopePipeline(two, 'organizations', 'o1', 'wikillm', false, order),
+      'organizations',
+      'o1',
+      'speckit',
+      false,
+      order
+    );
+    // Unticking everything leaves an explicit "none", not an inherit.
+    expect(emptied.organizations.o1).toEqual([]);
   });
 });

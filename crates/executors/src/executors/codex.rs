@@ -1,3 +1,4 @@
+pub mod auth_refresh;
 pub mod client;
 pub mod jsonrpc;
 pub mod normalize_logs;
@@ -25,6 +26,531 @@ pub fn codex_home() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(".codex"))
 }
 
+#[cfg(test)]
+mod tests {
+    use futures::StreamExt;
+
+    use super::{
+        Codex, ForkRejection, POLLER_DEVELOPER_INSTRUCTIONS, classify_fork_rejection,
+        compose_developer_instructions, is_missing_conversation_error, is_turn_thread_not_found,
+    };
+    use crate::executors::{ExecutorError, StandardCodingAgentExecutor};
+
+    #[tokio::test]
+    async fn discovered_models_match_current_chatgpt_catalog() {
+        let codex: Codex =
+            serde_json::from_value(serde_json::json!({})).expect("default Codex config");
+        let patches: Vec<_> = codex
+            .discover_options(None, None)
+            .await
+            .expect("Codex model discovery succeeds")
+            .collect()
+            .await;
+        let value = serde_json::to_value(patches.first().expect("one discovery patch"))
+            .expect("discovery patch serializes");
+        let models = value
+            .pointer("/0/value/model_selector/models")
+            .and_then(serde_json::Value::as_array)
+            .expect("discovery patch contains models");
+
+        let actual: Vec<_> = models
+            .iter()
+            .map(|model| {
+                let efforts = model["reasoning_options"]
+                    .as_array()
+                    .expect("model reasoning options")
+                    .iter()
+                    .map(|option| option["id"].as_str().expect("reasoning option id"))
+                    .collect::<Vec<_>>();
+                (
+                    model["id"].as_str().expect("model id"),
+                    model["name"].as_str().expect("model name"),
+                    efforts,
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            actual,
+            vec![
+                (
+                    "gpt-6-astra",
+                    "GPT-6 Astra",
+                    vec!["low", "medium", "high", "xhigh", "max"],
+                ),
+                (
+                    "gpt-5.6-sol",
+                    "GPT-5.6 Sol",
+                    vec!["low", "medium", "high", "xhigh", "max", "ultra"],
+                ),
+                (
+                    "gpt-5.6-terra",
+                    "GPT-5.6 Terra",
+                    vec!["low", "medium", "high", "xhigh", "max", "ultra"],
+                ),
+                (
+                    "gpt-5.6-luna",
+                    "GPT-5.6 Luna",
+                    vec!["low", "medium", "high", "xhigh", "max"],
+                ),
+                ("gpt-5.5", "GPT-5.5", vec!["low", "medium", "high", "xhigh"],),
+                (
+                    "gpt-5.3-codex-spark",
+                    "GPT-5.3 Codex Spark",
+                    vec!["low", "medium", "high", "xhigh"],
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn deployment_codex_command_is_fail_closed_and_blank_values_fall_back() {
+        assert_eq!(
+            Codex::base_command_from_deployment(Some(
+                "/nix/store/test-vibe-kanban-codex/bin/codex".to_string()
+            )),
+            (
+                "/nix/store/test-vibe-kanban-codex/bin/codex".to_string(),
+                true
+            )
+        );
+        assert_eq!(
+            Codex::base_command_from_deployment(Some("  ".to_string())),
+            (Codex::base_command().to_string(), false)
+        );
+    }
+
+    #[test]
+    fn app_server_always_uses_strict_config() {
+        let codex: Codex = serde_json::from_value(serde_json::json!({}))
+            .expect("default Codex config deserializes");
+        let builder = codex.build_command_builder().expect("valid Codex command");
+
+        assert_eq!(
+            builder.params,
+            Some(vec![
+                "app-server".to_string(),
+                "--strict-config".to_string()
+            ]),
+            "the pinned app-server must reject unknown configuration fields"
+        );
+    }
+
+    /// Pins the *exact* config key that disables Codex's persistent-PTY
+    /// background execution.
+    ///
+    /// This is not redundant with reading the code: upstream's `ConfigToml` has
+    /// no `serde(deny_unknown_fields)`, so the `--strict-config` launch flag is
+    /// what makes an unknown key fail loudly. The literal remains written out
+    /// here rather than referenced through a constant so this test also pins
+    /// the vendor-facing spelling.
+    #[test]
+    fn unified_exec_feature_key_is_pinned_and_disabled() {
+        let codex: Codex =
+            serde_json::from_value(serde_json::json!({})).expect("default Codex config");
+        let params = codex.build_thread_start_params(std::path::Path::new("/tmp"));
+        let config = params.config.expect("config overrides present");
+
+        assert_eq!(
+            config.get("features.unified_exec"),
+            Some(&serde_json::Value::Bool(false)),
+            "exact key `features.unified_exec` must be set to false; got {config:?}"
+        );
+        assert!(
+            !config.contains_key("include_apply_patch_tool"),
+            "removed V1 field must never be emitted as an inert config key"
+        );
+
+        // `features.shell_tool` would disable ordinary execution entirely and
+        // must never be touched here.
+        assert!(
+            !config.keys().any(|key| key.contains("shell_tool")),
+            "shell_tool must not be configured; got {config:?}"
+        );
+    }
+
+    /// The key is unconditional — it must not depend on approval policy,
+    /// sandbox, or any other user-facing setting.
+    #[test]
+    fn unified_exec_disabled_regardless_of_other_settings() {
+        for settings in [
+            serde_json::json!({}),
+            serde_json::json!({"sandbox": "danger-full-access"}),
+            serde_json::json!({"ask_for_approval": "never"}),
+            serde_json::json!({"ask_for_approval": "on-request", "profile": "custom"}),
+        ] {
+            let codex: Codex =
+                serde_json::from_value(settings.clone()).expect("Codex config deserializes");
+            let params = codex.build_thread_start_params(std::path::Path::new("/tmp"));
+            let config = params.config.expect("config overrides present");
+            assert_eq!(
+                config.get("features.unified_exec"),
+                Some(&serde_json::Value::Bool(false)),
+                "settings {settings} must still disable unified_exec"
+            );
+        }
+    }
+
+    /// Disabling `unified_exec` is silent — Codex is told nothing. Without a
+    /// notice the block lands and the redirect never does, which is how "Codex
+    /// isn't using the poller" happens even though the config key is correct.
+    #[test]
+    fn every_thread_start_tells_codex_about_spawn_poller() {
+        let codex: Codex =
+            serde_json::from_value(serde_json::json!({})).expect("default Codex config");
+        let params = codex.build_thread_start_params(std::path::Path::new("/tmp"));
+
+        let instructions = params
+            .developer_instructions
+            .expect("developer instructions must be set even with none configured");
+
+        assert!(
+            instructions.contains("spawn_poller"),
+            "the notice must name the replacement tool; got {instructions:?}"
+        );
+    }
+
+    /// `developer_instructions` belongs to the operator. VK composes into it and
+    /// must never clobber a configured value.
+    #[test]
+    fn configured_developer_instructions_are_preserved() {
+        let configured = "Always write commit messages in haiku.";
+        let codex: Codex =
+            serde_json::from_value(serde_json::json!({"developer_instructions": configured}))
+                .expect("Codex config with developer instructions");
+        let params = codex.build_thread_start_params(std::path::Path::new("/tmp"));
+
+        let instructions = params.developer_instructions.expect("instructions present");
+
+        assert!(
+            instructions.contains(configured),
+            "the operator's text must survive; got {instructions:?}"
+        );
+        assert!(
+            instructions.contains("spawn_poller"),
+            "the poller notice must still be present; got {instructions:?}"
+        );
+        // The operator's text goes last so it can override VK's guidance.
+        assert!(
+            instructions.find("spawn_poller") < instructions.find(configured),
+            "the operator's text should come after VK's; got {instructions:?}"
+        );
+    }
+
+    /// A blank configured value must not produce a dangling separator.
+    #[test]
+    fn blank_configured_instructions_collapse_to_the_notice() {
+        assert_eq!(
+            compose_developer_instructions(Some("   ")),
+            Some(POLLER_DEVELOPER_INSTRUCTIONS.to_string())
+        );
+        assert_eq!(
+            compose_developer_instructions(None),
+            Some(POLLER_DEVELOPER_INSTRUCTIONS.to_string())
+        );
+    }
+
+    #[test]
+    fn identifies_only_known_missing_conversation_errors_for_requested_thread() {
+        let session_id = "27254d1c-bde6-48aa-a980-3e136b9d35bf";
+        // Only leaf-absent errors classify as "missing conversation".
+        // Lineage errors are classified separately as LineageUnusable.
+        for message in [
+            format!("no rollout found for thread id {session_id}"),
+            format!("No conversation found with session ID: {session_id}"),
+        ] {
+            let error = rpc_error(-32600, &message, None);
+            assert!(is_missing_conversation_error(&error, session_id));
+        }
+
+        for error in [
+            rpc_error(
+                -32603,
+                &format!("no rollout found for thread id {session_id}"),
+                None,
+            ),
+            rpc_error(-32600, "thread not found", None),
+            rpc_error(
+                -32600,
+                "No conversation found with session ID: 11111111-1111-4111-8111-111111111111",
+                None,
+            ),
+            rpc_error(
+                -32600,
+                &format!("no rollout found for thread id {session_id}"),
+                Some(serde_json::json!({"reason": "permission_denied"})),
+            ),
+            // Lineage errors are LineageUnusable, not ConversationMissing
+            rpc_error(
+                -32600,
+                &format!(
+                    "invalid paginated history lineage for {session_id}: missing source rollout"
+                ),
+                None,
+            ),
+            // Paginated lineage error with wrong UUID must not match
+            rpc_error(
+                -32600,
+                "invalid paginated history lineage for 11111111-1111-4111-8111-111111111111: missing source rollout",
+                None,
+            ),
+            // Different suffix on paginated lineage error must not match
+            rpc_error(
+                -32600,
+                &format!("invalid paginated history lineage for {session_id}: corrupt rollout"),
+                None,
+            ),
+        ] {
+            assert!(!is_missing_conversation_error(&error, session_id));
+        }
+    }
+
+    #[test]
+    fn rejects_missing_conversation_error_for_invalid_requested_id() {
+        let error = rpc_error(
+            -32600,
+            "No conversation found with session ID: not-a-uuid",
+            None,
+        );
+        assert!(!is_missing_conversation_error(&error, "not-a-uuid"));
+    }
+
+    #[test]
+    fn classifies_lineage_errors_as_lineage_unusable() {
+        let session_id = "01a09307-156d-79f2-8973-ffb067b84274";
+        let error = rpc_error(
+            -32600,
+            &format!("invalid paginated history lineage for {session_id}: missing source rollout"),
+            None,
+        );
+        assert_eq!(
+            classify_fork_rejection(&error, session_id),
+            Some(ForkRejection::LineageUnusable)
+        );
+        // Lineage errors should NOT classify as missing conversation
+        assert!(!is_missing_conversation_error(&error, session_id));
+    }
+
+    #[test]
+    fn lineage_error_requires_matching_thread_id() {
+        let session_id = "01a09307-156d-79f2-8973-ffb067b84274";
+        let other_id = "99999999-9999-9999-9999-999999999999";
+        let error = rpc_error(
+            -32600,
+            &format!("invalid paginated history lineage for {other_id}: missing source rollout"),
+            None,
+        );
+        // Should not match when the UUID in the message differs
+        assert_eq!(classify_fork_rejection(&error, session_id), None);
+    }
+
+    #[test]
+    fn lineage_error_requires_exact_suffix() {
+        let session_id = "01a09307-156d-79f2-8973-ffb067b84274";
+        // Wrong suffix
+        let error = rpc_error(
+            -32600,
+            &format!("invalid paginated history lineage for {session_id}: other reason"),
+            None,
+        );
+        assert_eq!(classify_fork_rejection(&error, session_id), None);
+    }
+
+    #[test]
+    fn lineage_error_requires_invalid_request_code() {
+        let session_id = "01a09307-156d-79f2-8973-ffb067b84274";
+        // Wrong error code
+        let error = rpc_error(
+            -32603,
+            &format!("invalid paginated history lineage for {session_id}: missing source rollout"),
+            None,
+        );
+        assert_eq!(classify_fork_rejection(&error, session_id), None);
+    }
+
+    fn rpc_error(code: i64, message: &str, data: Option<serde_json::Value>) -> ExecutorError {
+        ExecutorError::JsonRpc {
+            label: "thread/fork".to_string(),
+            code,
+            message: message.to_string(),
+            data: data.map(Box::new),
+        }
+    }
+
+    fn turn_start_error(
+        code: i64,
+        message: &str,
+        data: Option<serde_json::Value>,
+    ) -> ExecutorError {
+        ExecutorError::JsonRpc {
+            label: "turn/start".to_string(),
+            code,
+            message: message.to_string(),
+            data: data.map(Box::new),
+        }
+    }
+
+    #[test]
+    fn detects_turn_start_thread_not_found() {
+        let thread_id = "01a0942f-1f36-7621-ba7d-9b546ceea3d5";
+        let error = turn_start_error(-32600, &format!("thread not found: {thread_id}"), None);
+        assert!(is_turn_thread_not_found(&error, thread_id));
+    }
+
+    #[test]
+    fn turn_thread_not_found_requires_matching_thread_id() {
+        let thread_id = "01a0942f-1f36-7621-ba7d-9b546ceea3d5";
+        let other_id = "99999999-9999-9999-9999-999999999999";
+        let error = turn_start_error(-32600, &format!("thread not found: {other_id}"), None);
+        assert!(!is_turn_thread_not_found(&error, thread_id));
+    }
+
+    #[test]
+    fn turn_thread_not_found_requires_turn_start_label() {
+        let thread_id = "01a0942f-1f36-7621-ba7d-9b546ceea3d5";
+        // Using thread/fork label instead of turn/start
+        let error = rpc_error(-32600, &format!("thread not found: {thread_id}"), None);
+        assert!(!is_turn_thread_not_found(&error, thread_id));
+    }
+
+    #[test]
+    fn turn_thread_not_found_requires_invalid_request_code() {
+        let thread_id = "01a0942f-1f36-7621-ba7d-9b546ceea3d5";
+        // Wrong error code (-32603 instead of -32600)
+        let error = turn_start_error(-32603, &format!("thread not found: {thread_id}"), None);
+        assert!(!is_turn_thread_not_found(&error, thread_id));
+    }
+
+    #[test]
+    fn turn_thread_not_found_rejects_invalid_uuid() {
+        let error = turn_start_error(-32600, "thread not found: not-a-uuid", None);
+        assert!(!is_turn_thread_not_found(&error, "not-a-uuid"));
+    }
+
+    #[test]
+    fn turn_thread_not_found_requires_exact_message_format() {
+        let thread_id = "01a0942f-1f36-7621-ba7d-9b546ceea3d5";
+        // Different message format
+        for message in [
+            "Thread not found",
+            &format!("Thread not found: {thread_id}"),
+            &format!("thread not found {thread_id}"),
+            &format!("thread not found: {thread_id} extra"),
+        ] {
+            let error = turn_start_error(-32600, message, None);
+            assert!(
+                !is_turn_thread_not_found(&error, thread_id),
+                "should not match message: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn continuation_requests_exclude_response_turns_on_the_wire() {
+        use codex_app_server_protocol::{ClientRequest, RequestId, ThreadStartParams};
+
+        let params = ThreadStartParams {
+            model: Some("gpt-6-astra".into()),
+            cwd: Some("/workspace".into()),
+            developer_instructions: Some("Keep working".into()),
+            ..Default::default()
+        };
+        let fork = super::fork_params_from("original-thread".into(), params.clone());
+        let resume = super::resume_params_from("original-thread".into(), params, None);
+        for request in [
+            ClientRequest::ThreadFork {
+                request_id: RequestId::Integer(1),
+                params: fork,
+            },
+            ClientRequest::ThreadResume {
+                request_id: RequestId::Integer(2),
+                params: resume,
+            },
+        ] {
+            let wire = serde_json::to_value(request).unwrap();
+            assert_eq!(wire["params"]["excludeTurns"], true);
+            assert_eq!(wire["params"]["threadId"], "original-thread");
+            assert_eq!(wire["params"]["model"], "gpt-6-astra");
+            assert_eq!(wire["params"]["cwd"], "/workspace");
+            assert_eq!(wire["params"]["developerInstructions"], "Keep working");
+        }
+    }
+
+    #[test]
+    fn resume_params_from_preserves_thread_start_params() {
+        use std::collections::HashMap;
+
+        use codex_app_server_protocol::{
+            AskForApproval as V2AskForApproval, SandboxMode as V2SandboxMode, ThreadStartParams,
+        };
+
+        use super::resume_params_from;
+
+        let params = ThreadStartParams {
+            model: Some("gpt-5.6-sol".to_string()),
+            model_provider: Some("chatgpt".to_string()),
+            cwd: Some("/workspace".to_string()),
+            approval_policy: Some(V2AskForApproval::Never),
+            sandbox: Some(V2SandboxMode::WorkspaceWrite),
+            config: Some(HashMap::from([(
+                "test_key".to_string(),
+                serde_json::json!("test_value"),
+            )])),
+            base_instructions: Some("base instructions".to_string()),
+            developer_instructions: Some("developer instructions".to_string()),
+            service_tier: Some(Some("fast".to_string())),
+            ..Default::default()
+        };
+
+        let thread_id = "01a09307-156d-79f2-8973-ffb067b84274".to_string();
+        let resume = resume_params_from(thread_id.clone(), params.clone(), None);
+
+        assert_eq!(resume.thread_id, thread_id);
+        assert_eq!(resume.model, params.model);
+        assert_eq!(resume.model_provider, params.model_provider);
+        assert_eq!(resume.cwd, params.cwd);
+        assert_eq!(resume.approval_policy, params.approval_policy);
+        assert_eq!(resume.sandbox, params.sandbox);
+        assert_eq!(resume.config, params.config);
+        assert_eq!(resume.base_instructions, params.base_instructions);
+        assert_eq!(resume.developer_instructions, params.developer_instructions);
+        assert_eq!(resume.service_tier, params.service_tier);
+        assert_eq!(resume.history, None);
+    }
+
+    #[test]
+    fn resume_params_from_includes_history_when_provided() {
+        use codex_app_server_protocol::ThreadStartParams;
+        use codex_protocol::models::{ContentItem, ResponseItem};
+
+        use super::resume_params_from;
+
+        let params = ThreadStartParams {
+            model: Some("gpt-5.6-sol".to_string()),
+            ..Default::default()
+        };
+
+        let history = vec![ResponseItem::Message {
+            id: Some("msg_001".to_string()),
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "Hello, Codex!".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }];
+
+        let thread_id = "01a09307-156d-79f2-8973-ffb067b84274".to_string();
+        let resume = resume_params_from(thread_id.clone(), params, Some(history.clone()));
+
+        assert_eq!(resume.thread_id, thread_id);
+        assert_eq!(resume.history, Some(history.clone()));
+        let wire = serde_json::to_value(&resume).unwrap();
+        assert_eq!(wire["excludeTurns"], true);
+        assert_eq!(wire["history"], serde_json::to_value(history).unwrap());
+    }
+}
+
 pub(crate) fn resolve_model(model: Option<&str>) -> (Option<&str>, bool) {
     match model.and_then(|m| m.strip_suffix("-fast")) {
         Some(base) => (Some(base), true),
@@ -32,9 +558,58 @@ pub(crate) fn resolve_model(model: Option<&str>) -> (Option<&str>, bool) {
     }
 }
 
+/// Told to Codex whenever a thread starts, because closing its in-turn
+/// background path is otherwise **silent**.
+///
+/// Claude gets a `PreToolUse` deny whose reason names `spawn_poller`, so the
+/// redirect is delivered at the moment the agent reaches for the wrong tool.
+/// Codex has no equivalent hook: `features.unified_exec=false` just swaps the
+/// persistent-PTY `exec_command`/`write_stdin` pair for one-shot
+/// `shell_command`, with no error and no explanation. Without this notice Codex
+/// sees a command that returns immediately, has no idea a poller exists, and
+/// carries on — so the block lands but the redirect never does.
+///
+/// Constitution IX: "A denial that removes a capability names the supported
+/// replacement, so the agent redirects instead of stalling."
+pub(crate) const POLLER_DEVELOPER_INSTRUCTIONS: &str = "\
+Background execution inside a turn is disabled in Vibe Kanban. A turn is one OS \
+process group and it is terminated when the turn ends, so anything you background \
+inside it is killed with it — the persistent-session behaviour of `exec_command` \
+is switched off for this reason, and `shell_command` runs one-shot.
+
+If you need something to keep running after this turn — a watcher, a log tail, a \
+build or test loop, polling for a condition — use the `spawn_poller` MCP tool \
+from the `vibe_kanban` server. It takes a `command` and an `interval_secs` \
+(5-86400), runs in its own process group, survives the end of this turn and Vibe \
+Kanban restarts, and is visible and stoppable in the workspace UI. Companion \
+tools: `list_pollers`, `stop_poller`. Every poller must supply `stop_command` \
+(a completion predicate: exit zero stops) or a positive `timeout_secs` (total \
+lifetime including hung commands), or both. Manual stopping alone is insufficient.
+
+Do not try to work around this with `nohup`, `setsid`, `&`, `disown`, or a \
+detached subshell: those are reaped with the turn just the same. Prefer running \
+the command in the foreground when you only need its result now, and reach for \
+`spawn_poller` when the work genuinely has to outlive this turn.";
+
+/// Prepend the poller notice to any operator-configured `developer_instructions`.
+///
+/// `developer_instructions` is a **user-facing config field**, so this composes
+/// rather than replaces: VK is a guest in that field. The user's text goes last
+/// so it is the most recent thing Codex reads and can override the guidance
+/// above it.
+pub(crate) fn compose_developer_instructions(configured: Option<&str>) -> Option<String> {
+    match configured.map(str::trim).filter(|text| !text.is_empty()) {
+        Some(text) => Some(format!("{POLLER_DEVELOPER_INSTRUCTIONS}\n\n{text}")),
+        None => Some(POLLER_DEVELOPER_INSTRUCTIONS.to_string()),
+    }
+}
+
 pub(crate) fn fork_params_from(thread_id: String, params: ThreadStartParams) -> ThreadForkParams {
     ThreadForkParams {
         thread_id,
+        // Only omit response hydration; Codex still retains the model history.
+        // Full histories can overflow the remote worker output journal.
+        exclude_turns: true,
         model: params.model,
         model_provider: params.model_provider,
         cwd: params.cwd,
@@ -48,10 +623,168 @@ pub(crate) fn fork_params_from(thread_id: String, params: ThreadStartParams) -> 
     }
 }
 
+pub(crate) fn resume_params_from(
+    thread_id: String,
+    params: ThreadStartParams,
+    history: Option<Vec<codex_protocol::models::ResponseItem>>,
+) -> ThreadResumeParams {
+    ThreadResumeParams {
+        thread_id,
+        // Only omit response hydration; Codex still retains the model history.
+        // Full histories can overflow the remote worker output journal.
+        exclude_turns: true,
+        model: params.model,
+        model_provider: params.model_provider,
+        cwd: params.cwd,
+        approval_policy: params.approval_policy,
+        sandbox: params.sandbox,
+        config: params.config,
+        base_instructions: params.base_instructions,
+        developer_instructions: params.developer_instructions,
+        service_tier: params.service_tier,
+        history,
+        ..Default::default()
+    }
+}
+
+const INVALID_REQUEST_ERROR_CODE: i64 = -32600;
+
+/// Describes why a thread/fork request was rejected.
+#[derive(Debug, Clone, PartialEq)]
+enum ForkRejection {
+    /// The requested thread's rollout file is entirely absent.
+    ConversationMissing,
+    /// The rollout exists but has lineage/ancestry problems that Codex cannot
+    /// resolve (e.g. `history_mode=paginated` with no `history_base`). The
+    /// conversation text is present in the leaf.
+    LineageUnusable,
+}
+
+fn classify_fork_rejection(
+    error: &ExecutorError,
+    requested_thread_id: &str,
+) -> Option<ForkRejection> {
+    if uuid::Uuid::parse_str(requested_thread_id).is_err() {
+        return None;
+    }
+
+    let ExecutorError::JsonRpc {
+        label,
+        code,
+        message,
+        data,
+    } = error
+    else {
+        return None;
+    };
+
+    if label != "thread/fork"
+        || *code != INVALID_REQUEST_ERROR_CODE
+        || data.as_ref().is_some_and(|value| !value.is_null())
+    {
+        return None;
+    }
+
+    // Leaf-absent errors: the rollout file itself is missing.
+    if message == &format!("no rollout found for thread id {requested_thread_id}")
+        || message == &format!("No conversation found with session ID: {requested_thread_id}")
+    {
+        return Some(ForkRejection::ConversationMissing);
+    }
+
+    // Lineage errors: the leaf exists but Codex cannot resolve its ancestry.
+    // Codex 0.154+ rejects paginated-history rollouts that lack a `history_base`
+    // field with "invalid paginated history lineage for {uuid}: missing source rollout".
+    if message.starts_with("invalid paginated history lineage for ")
+        && message.contains(requested_thread_id)
+        && message.ends_with(": missing source rollout")
+    {
+        return Some(ForkRejection::LineageUnusable);
+    }
+
+    None
+}
+
+/// Returns true if the error indicates the conversation is completely missing.
+/// Used by tests and as a compatibility wrapper.
+#[allow(dead_code)]
+fn is_missing_conversation_error(error: &ExecutorError, requested_thread_id: &str) -> bool {
+    classify_fork_rejection(error, requested_thread_id) == Some(ForkRejection::ConversationMissing)
+}
+
+/// Returns `true` if the error is a `turn/start` "thread not found" error for
+/// the given thread ID. This happens when a thread's rollout exists on disk
+/// but the Codex app-server doesn't have the thread loaded in memory.
+#[cfg(test)]
+fn is_turn_thread_not_found(error: &ExecutorError, thread_id: &str) -> bool {
+    if uuid::Uuid::parse_str(thread_id).is_err() {
+        return false;
+    }
+
+    let ExecutorError::JsonRpc {
+        label,
+        code,
+        message,
+        ..
+    } = error
+    else {
+        return false;
+    };
+
+    label == "turn/start"
+        && *code == INVALID_REQUEST_ERROR_CODE
+        && message == &format!("thread not found: {thread_id}")
+}
+
+/// Check whether a rollout file exists locally for the given thread ID.
+fn rollout_exists_locally(thread_id: &str) -> bool {
+    let Ok(uuid) = uuid::Uuid::parse_str(thread_id) else {
+        return false;
+    };
+    let Some(codex_home) = codex_home() else {
+        return false;
+    };
+    let Ok(store) = rollout_transfer::CodexRolloutStore::new(&codex_home) else {
+        return false;
+    };
+    store.thread_rollout_exists(uuid)
+}
+
+/// Read the model-visible history from a local rollout file for the given thread ID.
+/// Returns None if the thread ID is invalid, CODEX_HOME is unavailable, or reading fails.
+/// The history can be passed to thread/resume's history parameter to bypass Codex's
+/// internal disk read, which fails for paginated threads without a history_base.
+fn read_rollout_history_for_thread(
+    thread_id: &str,
+) -> Option<Vec<codex_protocol::models::ResponseItem>> {
+    let uuid = uuid::Uuid::parse_str(thread_id).ok()?;
+    let codex_home = codex_home()?;
+    let store = rollout_transfer::CodexRolloutStore::new(&codex_home).ok()?;
+    match store.read_rollout_history(uuid) {
+        Ok(history) => {
+            if history.is_empty() {
+                tracing::debug!(
+                    thread_id = %thread_id,
+                    "rollout contains no ResponseItem entries"
+                );
+            }
+            Some(history)
+        }
+        Err(err) => {
+            tracing::warn!(
+                thread_id = %thread_id,
+                error = %err,
+                "failed to read rollout history for thread"
+            );
+            None
+        }
+    }
+}
+
 use async_trait::async_trait;
 use codex_app_server_protocol::{
     AskForApproval as V2AskForApproval, ReviewTarget, SandboxMode as V2SandboxMode,
-    ThreadForkParams, ThreadStartParams, UserInput,
+    ThreadForkParams, ThreadResumeParams, ThreadStartParams, UserInput,
 };
 use derivative::Derivative;
 use schemars::JsonSchema;
@@ -174,8 +907,6 @@ pub struct Codex {
     pub profile: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_instructions: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub include_apply_patch_tool: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -350,16 +1081,17 @@ impl StandardCodingAgentExecutor for Codex {
 
         let options = ExecutorDiscoveredOptions {
             model_selector: ModelSelectorConfig {
+                model_aliases: Default::default(),
                 models: vec![
+                    ModelInfo {
+                        id: "gpt-6-astra".to_string(),
+                        name: "GPT-6 Astra".to_string(),
+                        provider_id: None,
+                        reasoning_options: max_reasoning_options.clone(),
+                    },
                     ModelInfo {
                         id: "gpt-5.6-sol".to_string(),
                         name: "GPT-5.6 Sol".to_string(),
-                        provider_id: None,
-                        reasoning_options: ultra_reasoning_options.clone(),
-                    },
-                    ModelInfo {
-                        id: "gpt-5.6-sol-fast".to_string(),
-                        name: "GPT-5.6 Sol Fast".to_string(),
                         provider_id: None,
                         reasoning_options: ultra_reasoning_options.clone(),
                     },
@@ -376,38 +1108,14 @@ impl StandardCodingAgentExecutor for Codex {
                         reasoning_options: max_reasoning_options,
                     },
                     ModelInfo {
-                        id: "gpt-5.4".to_string(),
-                        name: "GPT-5.4".to_string(),
+                        id: "gpt-5.5".to_string(),
+                        name: "GPT-5.5".to_string(),
                         provider_id: None,
                         reasoning_options: xhigh_reasoning_options.clone(),
                     },
                     ModelInfo {
-                        id: "gpt-5.4-fast".to_string(),
-                        name: "GPT-5.4 Fast".to_string(),
-                        provider_id: None,
-                        reasoning_options: xhigh_reasoning_options.clone(),
-                    },
-                    ModelInfo {
-                        id: "gpt-5.3-codex".to_string(),
-                        name: "GPT-5.3 Codex".to_string(),
-                        provider_id: None,
-                        reasoning_options: xhigh_reasoning_options.clone(),
-                    },
-                    ModelInfo {
-                        id: "gpt-5.2-codex".to_string(),
-                        name: "GPT-5.2 Codex".to_string(),
-                        provider_id: None,
-                        reasoning_options: xhigh_reasoning_options.clone(),
-                    },
-                    ModelInfo {
-                        id: "gpt-5.2".to_string(),
-                        name: "GPT-5.2".to_string(),
-                        provider_id: None,
-                        reasoning_options: xhigh_reasoning_options.clone(),
-                    },
-                    ModelInfo {
-                        id: "gpt-5.1-codex-max".to_string(),
-                        name: "GPT-5.1 Codex Max".to_string(),
+                        id: "gpt-5.3-codex-spark".to_string(),
+                        name: "GPT-5.3 Codex Spark".to_string(),
                         provider_id: None,
                         reasoning_options: xhigh_reasoning_options,
                     },
@@ -480,14 +1188,38 @@ impl Codex {
         "npx -y @openai/codex@0.144.1"
     }
 
+    fn configured_base_command() -> (String, bool) {
+        Self::base_command_from_deployment(env::var("VIBE_CODEX_COMMAND").ok())
+    }
+
+    fn base_command_from_deployment(deployment_command: Option<String>) -> (String, bool) {
+        deployment_command
+            .filter(|command| !command.trim().is_empty())
+            .map_or_else(
+                || (Self::base_command().to_string(), false),
+                |command| (command, true),
+            )
+    }
+
     fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
-        let mut builder = CommandBuilder::new(Self::base_command());
-        builder = builder.extend_params(["app-server"]);
+        let (base_command, deployment_managed) = Self::configured_base_command();
+        let mut builder = CommandBuilder::new(base_command);
+        // Pinned Codex 0.144.1 accepts this app-server flag and propagates it
+        // through thread config loading. Unknown config must fail visibly rather
+        // than leave a reviewed control silently inert (Constitution IX).
+        builder = builder.extend_params(["app-server", "--strict-config"]);
         if self.oss.unwrap_or(false) {
             builder = builder.extend_params(["--oss"]);
         }
 
-        apply_overrides(builder, &self.cmd)
+        let mut overrides = self.cmd.clone();
+        if deployment_managed {
+            // A supervised deployment may require a security-patched Codex
+            // build. A settings-level base command must not bypass it; other
+            // parameters and environment overrides remain supported.
+            overrides.base_command_override = None;
+        }
+        apply_overrides(builder, &overrides)
     }
 
     fn build_thread_start_params(&self, cwd: &Path) -> ThreadStartParams {
@@ -518,16 +1250,66 @@ impl Codex {
                 .get_or_insert_with(HashMap::new)
                 .insert("profile".to_string(), Value::String(profile.clone()));
         }
-        if let Some(include) = self.include_apply_patch_tool {
-            config
-                .get_or_insert_with(HashMap::new)
-                .insert("include_apply_patch_tool".to_string(), Value::Bool(include));
-        }
         if let Some(compact) = &self.compact_prompt {
             config
                 .get_or_insert_with(HashMap::new)
                 .insert("compact_prompt".to_string(), Value::String(compact.clone()));
         }
+        // Close Codex's in-turn background path. `features.unified_exec`
+        // (default **true** on Linux/macOS) swaps the one-shot `shell_command`
+        // tool for the persistent-PTY `exec_command` / `write_stdin` pair:
+        // `exec_command` returns a `session_id` while the process is still
+        // running and `write_stdin` with empty `chars` polls it without
+        // writing. That is a hand-rolled in-turn poller, and a VK turn is one
+        // OS process group that is reaped at turn end
+        // (`wiki/agent-process-lifecycle.md`), so it cannot outlive the turn
+        // that created it. Disabling the feature falls back to `shell_command`;
+        // the supported way to keep something running is the `spawn_poller`
+        // MCP tool.
+        //
+        // `features.shell_tool` is deliberately left alone — turning that off
+        // would disable ordinary command execution.
+        //
+        // Verified against the upstream source Cargo vendored for the
+        // `codex-app-server-protocol` git pin `rust-v0.144.1` (see
+        // `crates/executors/Cargo.toml`): `ThreadStartParams` /
+        // `TurnStartParams` expose no tools allow/deny field, so this `config`
+        // map is the only lever. `ConfigToml` itself has no
+        // `serde(deny_unknown_fields)`, so `app-server --strict-config` is the
+        // fail-loud boundary for a misspelling. The exact spelling is also
+        // pinned by `unified_exec_feature_key_is_pinned_and_disabled`.
+        //
+        // No per-command *deadline* is set here, unlike the
+        // `BASH_DEFAULT_TIMEOUT_MS` / `BASH_MAX_TIMEOUT_MS` pair VK sets for
+        // Claude (`vk/603d-prevent-stuck-jo`). That is a **verified absence**,
+        // not an oversight, and it must not be "fixed" with a guessed config
+        // key. From the same vendored `rust-v0.144.1` source
+        // (`44918ea10c0f99151c6710411b4322c2f5c96bea`):
+        //
+        // - `core/src/exec.rs:58` —
+        //   `pub const DEFAULT_EXEC_COMMAND_TIMEOUT_MS: u64 = 10_000;`
+        // - `core/src/tools/handlers/shell_spec.rs:171` — the `shell` tool's
+        //   `timeout_ms` parameter, described to the model as "Maximum command
+        //   runtime. Defaults to 10000 ms."
+        // - `core/src/exec.rs:163` — `impl From<Option<u64>> for ExecExpiration`
+        //   maps absent to `DefaultTimeout` and a supplied value straight to
+        //   `Timeout(..)`.
+        //
+        // The default is a hard-coded `const`: `codex-rs/config.md` documents no
+        // execution timeout and the only timeout keys under `codex-rs/config/src`
+        // are MCP ones (`startup_timeout_sec`, `tool_timeout_sec`). There is no
+        // identifier for VK to set, so per Constitution IX no rule ships.
+        //
+        // Codex is also much less exposed than Claude was: every exec carries an
+        // expiration, the default is ten seconds rather than two minutes, and
+        // there is no auto-background path that outlives the deadline. The
+        // residual risk — a model-supplied `timeout_ms` is **not** clamped — is
+        // one explicitly bounded call, not the open-ended block that caused the
+        // incident. Re-verify when the pin moves; a release that adds a config
+        // key would make a real control possible.
+        config
+            .get_or_insert_with(HashMap::new)
+            .insert("features.unified_exec".to_string(), Value::Bool(false));
         if !matches!(approval_policy, None | Some(V2AskForApproval::Never)) {
             let map = config.get_or_insert_with(HashMap::new);
             map.insert(
@@ -555,7 +1337,9 @@ impl Codex {
             config,
             base_instructions: self.base_instructions.clone(),
             model_provider: self.model_provider.clone(),
-            developer_instructions: self.developer_instructions.clone(),
+            developer_instructions: compose_developer_instructions(
+                self.developer_instructions.as_deref(),
+            ),
             service_tier,
             ..Default::default()
         }
@@ -629,7 +1413,15 @@ impl Codex {
         combined_prompt: String,
         client: Arc<AppServerClient>,
     ) -> Result<(), ExecutorError> {
-        let account = client.get_account().await?;
+        // Serialize an up-front credential refresh across concurrent Codex
+        // processes so a near-expired ChatGPT token is rotated exactly once,
+        // before the turn, instead of racing (VAS-490). No-op for healthy
+        // tokens and non-ChatGPT auth.
+        if let Some(home) = codex_home() {
+            auth_refresh::refresh_credentials_if_stale(&home, &client).await;
+        }
+
+        let account = client.get_account(false).await?;
         if account.requires_openai_auth && account.account.is_none() {
             return Err(ExecutorError::AuthRequired(
                 "Codex authentication required".to_string(),
@@ -638,29 +1430,115 @@ impl Codex {
 
         let (thread_id, resolved_model) = match resume_session {
             None => {
-                let response = client.thread_start(thread_start_params).await?;
+                let response = client.thread_start(thread_start_params.clone()).await?;
                 (response.thread.id, response.model)
             }
             Some(session_id) => {
-                let response = client
-                    .thread_fork(fork_params_from(session_id, thread_start_params))
-                    .await?;
-                tracing::debug!("forked thread, new thread_id={}", response.thread.id);
-                (response.thread.id, response.model)
+                match client
+                    .thread_fork(fork_params_from(
+                        session_id.clone(),
+                        thread_start_params.clone(),
+                    ))
+                    .await
+                {
+                    Ok(response) => {
+                        tracing::debug!("forked thread, new thread_id={}", response.thread.id);
+                        (response.thread.id, response.model)
+                    }
+                    Err(error) => {
+                        match classify_fork_rejection(&error, &session_id) {
+                            Some(ForkRejection::LineageUnusable)
+                                if rollout_exists_locally(&session_id) =>
+                            {
+                                // The leaf rollout exists but has lineage problems
+                                // (e.g. paginated history without history_base).
+                                // Read the history directly from the JSONL rollout
+                                // and pass it to thread/resume, bypassing Codex's
+                                // internal disk read that fails for paginated threads.
+                                tracing::info!(
+                                    thread_id = %session_id,
+                                    "Codex thread has unusable lineage but leaf exists; reading history from rollout"
+                                );
+
+                                // Try to read history from the rollout file
+                                let history = read_rollout_history_for_thread(&session_id);
+                                let history_item_count = history.as_ref().map(|h| h.len());
+
+                                tracing::info!(
+                                    thread_id = %session_id,
+                                    history_items = ?history_item_count,
+                                    "Attempting thread/resume with history from local rollout"
+                                );
+
+                                match client
+                                    .thread_resume(resume_params_from(
+                                        session_id.clone(),
+                                        thread_start_params.clone(),
+                                        history,
+                                    ))
+                                    .await
+                                {
+                                    Ok(response) => {
+                                        tracing::info!(
+                                            thread_id = %response.thread.id,
+                                            "Successfully resumed thread from local rollout history"
+                                        );
+                                        (response.thread.id, response.model)
+                                    }
+                                    Err(resume_error) => {
+                                        // Resume also failed (e.g., same lineage error
+                                        // or other issue). Fall back to replacement thread.
+                                        tracing::warn!(
+                                            thread_id = %session_id,
+                                            resume_error = %resume_error,
+                                            "thread/resume failed for thread with unusable lineage; falling back to replacement thread"
+                                        );
+                                        let response =
+                                            client.thread_start(thread_start_params).await?;
+                                        tracing::warn!(
+                                            missing_thread_id = %session_id,
+                                            replacement_thread_id = %response.thread.id,
+                                            "Started replacement thread after thread/resume failure"
+                                        );
+                                        (response.thread.id, response.model)
+                                    }
+                                }
+                            }
+                            Some(ForkRejection::ConversationMissing)
+                            | Some(ForkRejection::LineageUnusable) => {
+                                // Either the rollout is genuinely missing, or lineage
+                                // is unusable and the leaf is also absent. Start a
+                                // replacement thread.
+                                let response =
+                                    client.thread_start(thread_start_params.clone()).await?;
+                                tracing::warn!(
+                                    missing_thread_id = %session_id,
+                                    replacement_thread_id = %response.thread.id,
+                                    "Codex conversation was missing; started a replacement in the same workspace"
+                                );
+                                (response.thread.id, response.model)
+                            }
+                            None => return Err(error),
+                        }
+                    }
+                }
             }
         };
 
-        client.set_resolved_model(resolved_model);
+        client.set_resolved_model(resolved_model.clone());
         client.register_session(&thread_id).await?;
         let collaboration_mode = client.initial_collaboration_mode()?;
+
+        let turn_input = vec![UserInput::Text {
+            text: combined_prompt,
+            text_elements: vec![],
+        }];
+
         client
             .turn_start_with_mode(
-                thread_id,
-                vec![UserInput::Text {
-                    text: combined_prompt,
-                    text_elements: vec![],
-                }],
-                Some(collaboration_mode),
+                thread_id.clone(),
+                turn_input.clone(),
+                Some(collaboration_mode.clone()),
             )
             .await?;
 

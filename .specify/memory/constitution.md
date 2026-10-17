@@ -75,11 +75,56 @@ session identity, cancellation, failures, and credential redaction must remain
 correct. Extend the shared executor, log-normalization, profile, and MCP
 abstractions before introducing agent-specific parallel machinery.
 
+The agent's output stream carries only what the agent wrote. Vibe Kanban's own
+control and transport metadata — worker lifecycle phases, stream or dispatch
+errors — travels in its own typed channel and is consumed by the code that owns
+it. It is never re-injected as agent stdout, where the vendor parser would
+misclassify it as an unknown agent event. Metadata that a user needs to see is
+rendered as a Vibe Kanban diagnostic naming what happened; bookkeeping that
+carries no user-facing fact is not rendered at all.
+
 Normalized-log compaction must preserve protocol lifecycle identity and patch
 ordering. Repeated events may share a visible entry only when semantic equality,
 adjacency, and completion state are proven; failures stay visible, stale event
 updates cannot overwrite newer occurrences, and compact indicators remain
 bounded under arbitrarily long streams.
+
+Controls we impose on a vendor CLI are held to the same standard as data we
+receive from it. A deny rule, permission matcher, or configuration key that
+disables a vendor capability MUST be built from an identifier verified against
+the **pinned artifact that actually executes** — not vendor documentation, not a
+shipped type-definition or schema file, and not recollection. Type declarations
+and schema titles are not wire identifiers. The verification source and the
+version it was read from are recorded next to the rule, because a dependency bump
+can rename the identifier and silently reopen the gap.
+
+A control must fail loud, not inert. Where the vendor silently ignores unknown
+keys or unmatched names, the spelling is pinned by a test, and the control is
+treated as unproven until a live run shows it took effect. Where the enforcement
+point is a parameter rather than a tool name, the rule is placed at the parameter
+— a tool-granular rule that leaves the real path open is a control that looks
+complete and is not. A denial that removes a capability names the supported
+replacement, so the agent redirects instead of stalling.
+
+A control removes an *effect*, not a name. Where a capability is denied because
+it can hang a turn, the property being enforced is **boundedness**, and the
+agent will reach for the next mechanism that produces the same effect — a denied
+watch tool becomes a foreground `until`/`while` loop, which no tool-name or
+parameter rule matches. Enumerate the reachable paths to the effect and bound or
+deny each one; a rule that removes the ergonomic path and leaves an equivalent
+unbounded path open has displaced the incident, not fixed it, and the next
+occurrence looks unrelated to the control that shipped.
+
+Waiting inside a turn is therefore bounded by construction. A wait that cannot
+state its own deadline is denied and redirected to the VK-owned mechanism that
+carries one, whose stop rules are mandatory rather than advisory. Bounds are
+enforced where VK can still observe them — inside the command VK compiles, or at
+the admission point VK controls — never left to the vendor's own timeout, which
+VK neither sets nor can prove fired.
+
+Where no identifier can be verified, shipping no rule is the correct outcome. The
+absence is recorded as a decision with its evidence, so a later reader does not
+mistake it for an oversight and does not "fix" it with a guess.
 
 ### X. Dialogs hold provisional state; containers hold confirmed state
 Settings dialogs and edit modals own a private snapshot of the data they mutate.
@@ -187,6 +232,14 @@ identifies failures by stable configured identifier. Configuration comparisons,
 logs, diagnostics, and API results never expose environment values, tokens,
 authorization material, authenticated URLs, or secret-bearing command arguments.
 
+Discovery is bounded per server and generation. Repeated transient connection
+events do not extend the deadline indefinitely; every configured server reaches
+either a usable state or a named terminal failure. Transport connectivity and
+the live executor registry are separate facts: user-facing status treats the
+registry as authoritative, reports registered tool counts including zero, and
+never presents a settings probe or transport handshake as proof that tools are
+callable in the active session.
+
 If a restart is requested while a turn is running, the product must obtain an
 explicit user confirmation before queueing the handoff. The current turn is not
 interrupted unless the dialog says so. Exactly one lifecycle consumer owns the
@@ -203,7 +256,11 @@ Remote liveness and terminal state require worker evidence. A timeout,
 disconnect, missing handle, or expired lease is not proof that a process
 completed or was killed; expose interruption or indeterminacy and preserve the
 workspace until reconciliation establishes safety. Ordered event streams carry
-monotonic cursors and make replay gaps visible. Shared Git worktree
+monotonic cursors and make replay gaps visible. A producer whose latest
+sequence is behind the consumer's cursor has lost the stream the cursor came
+from: that regression is a discontinuity like a gap, and MUST be resolved from
+matching terminal evidence or classified indeterminate, never polled as "no new
+events". Shared Git worktree
 administration remains single-owner and serialized even when ordinary commands
 run on several nodes.
 
@@ -229,9 +286,28 @@ member set forces a resnapshot rather than interpolation. Every streamed
 collection is keyed by stable identity — never by array position — so that
 membership changing mid-stream cannot make a `replace` land on the wrong row.
 
+### XX. User-visible time preserves event provenance
+User-visible timestamps come from the authoritative record of when an event
+occurred, never from when a client rendered, received, replayed, or grouped it.
+When a derived UI row represents a persisted parent event, it inherits that
+parent's timestamp. Missing or malformed time remains visibly absent rather than
+being replaced with the current clock. Formatting may follow the user's locale,
+but storage values, ordering, stable row identity, and replay semantics remain
+unchanged. Compact time labels expose an accessible full date and time whenever
+the abbreviated display is ambiguous.
+
 Sampling tasks terminate. A background sampler holds only a weak reference to
 its owner, re-checks each tick that a consumer still exists, exits when none
 does, and never holds a lock across an await.
+
+An explicit operator action may turn displayed evidence into a durable
+remediation issue, but sampling itself remains side-effect free. The action
+MUST preserve the concrete observation and timestamp, use an explicit project
+context, and resolve-or-create transactionally against a stable incident
+identity so retries and concurrent clicks cannot create duplicate open issues.
+Closing the prior issue may permit a later observation to create a new one.
+Alerts derived from metrics are presentation state only: they never become
+scheduler, lease, liveness, or lifecycle authority.
 
 Host introspection is secret-hostile by default. Process environments are never
 read. Anything derived from a process command line is redacted at the point of
@@ -416,56 +492,387 @@ only positively active executions remain cancellable. Regression coverage MUST
 exercise a missed terminal event followed by snapshot rehydration and preserve
 the active-execution Stop behavior.
 
-### XXXI. Snapshot-plus-live streams never conceal lost authority
-Any stream that combines an authoritative snapshot with live mutations MUST
-acquire its live subscription before awaiting the snapshot, emit the snapshot
-and readiness boundary first, then drain mutations buffered during snapshot
-construction in publication order. The implementation and tests must exercise
-that actual handoff boundary; an error-string test or a pure helper alone is not
-evidence that subscription ordering is correct.
+### XXXI. Historical views are materialized once and shared
+CPU-intensive reconstruction of immutable execution history MUST be keyed by
+the durable source identity and single-flight within a service process.
+Concurrent readers of one cache miss join the same computation; they do not
+independently parse or normalize the same source. A valid completed
+materialization bypasses both coordination and capacity queues.
 
-A dropped or lagged live mutation invalidates the stream's authority. The stream
-MUST surface the loss as an error and terminate through a retryable transport
-close so the consumer obtains another complete snapshot. It must never log and
-continue from a sequence known to be incomplete. Same-endpoint consumers retain
-their last valid snapshot while reconnecting, but distinguish allocated
-placeholder data from receipt of an authoritative readiness boundary.
+Only an atomically complete artifact is reusable evidence. Partial output,
+reader cancellation, worker failure, or an in-memory in-flight marker never
+becomes a completed history view, and failure clears coordination so a later
+reader can retry. Input, output, concurrency, and retained coordination state
+are bounded. Expensive synchronous work does not monopolize the async request
+runtime, and structured diagnostics distinguish cache hits, leaders, joined
+waiters, queueing, completion, cancellation, failure, and truncation.
 
-### XXXII. Final output starts bounded reconciliation, not assumed success
-A normalized final assistant response is positive evidence that a turn reached
-an answer, but it is not process-exit or worker-finalization evidence. If the
-expected terminal event does not follow, the execution owner MUST begin bounded
-reconciliation using the authoritative worker/process liveness channel. While
-positive liveness exists the row may remain active; once the bound expires with
-no positive liveness, required work preservation runs and the row transitions
-to the most truthful terminal outcome, using `indeterminate` when success or
-failure cannot be proven.
+Historical reads do not implicitly migrate workspace affinity. Using another
+node requires an explicit authenticated, affinity-safe reconstruction contract;
+idle-node telemetry alone is never scheduling authority.
 
-No accepted execution may remain `running` indefinitely because a completion
-future, event, handle, or database write disappeared. Terminal writes are
-observable and boundedly retried or handed to a durable reconciliation path.
-Tests cover delayed and missing finalization without equating final text with a
-successful exit.
+### XXXIV. Partial projections degrade deterministically
+When a UI projection joins an authoritative record with asynchronously loaded
+summary or enrichment data, the base record MUST remain immediately usable.
+Ordering and grouping use a persisted base-record fallback until enrichment is
+available; missing or malformed enrichment never outranks known values merely
+because it is absent. Arrival of richer data may refine the projection, but ties
+and incomplete records remain deterministic through stable identity-based
+fallbacks. Regression coverage exercises both the base-only and enriched states.
 
-### XXXIII. Task artifacts have validated ownership
-SpecKit, WikiLLM, review, and implementation records belong to one explicit task
-identity and live under that task's directory. Generators MUST reject a target
-already owned by a different task before modifying any file. Renaming or copying
-a record preserves its history and updates internal references; it must not
-overwrite or silently reattribute an earlier task's artifacts. Root convenience
-documents may mirror the current task only when the pipeline explicitly
-requires them and must not be treated as the durable multi-task archive.
+### XXXV. Entity projections require matching identity
+Aggregate or parent-level summaries MUST NOT be projected onto a child entity
+unless the data carries an identity that matches that child. In multi-entity
+views, a fact established for one repository, workspace, issue, worker, or
+execution remains scoped to that entity; convenience fallbacks may not broadcast
+it to siblings. While identity-scoped enrichment is loading or absent, render
+the fact as unknown rather than borrowing a plausible aggregate. Regression
+coverage includes mixed sibling state and the base-only loading state.
 
-### XXXIV. Browser titles identify one thing
-Browser-tab titles MUST contain one meaningful label, selected from an ordered
-fallback chain. They do not concatenate project names, application branding,
-ticket identifiers, or other context onto a page-specific label. When no
-page-specific label is available, the product name is the fallback.
+### XXXVI. Dynamic viewports have one scroll authority
+Live, virtualized, or incrementally paged views MUST assign scroll correction to
+one explicit policy at a time: follow the live tail, preserve a reader-selected
+anchor, or execute a named navigation command. Layout measurement and estimated
+size changes are evidence for that policy, not competing scroll owners. A
+render-boundary transition must be monotonic for the lifetime of a live update;
+rows cannot oscillate between layout strategies as derived loading markers
+appear and disappear. Regression coverage exercises continuous updates both at
+the live tail and after the reader scrolls away.
 
-This rule is limited to browser metadata. Visible navigation retains the
-context it needs: in particular, the workspace-breadcrumb issue-ID requirement
-remains authoritative. Shared title selection belongs in the existing web-core
-hook and is covered by focused update and fallback tests.
+### XXXVII. Committing controls stay inside the host's height
+When a surface is rendered into a host that supplies a definite, clipped height,
+the controls that configure and commit the action MUST remain inside that height
+at every supported viewport size. The flexible content yields; the controls do
+not. Declare the whole contract rather than one half of it: the shell owns
+overflow so none escapes unreachably, the heading, header and control rows are
+`shrink-0`, every intermediate flex item on the path carries a zero minimum, and
+exactly one element is the working scroll owner. Owning overflow means scrolling
+it, not discarding it, wherever discarding would put a committing control beyond
+reach; the terminal shrink target keeps a usable floor for the same reason.
+Height that the host already makes definite MUST NOT be duplicated with viewport
+units or JavaScript measurement, and asynchronous state — errors, spinners,
+loading rows — may not change the height budget the controls depend on.
+Sticky/fixed repositioning and page-level scrolling are not substitutes for the
+contract. Height behaviour that only one consumer needs is opt-in at the shared
+component so siblings keep intrinsic sizing. Because JSDOM computes no layout,
+regression coverage asserts the structural relationship — growth, zero minimum,
+overflow ownership, and that the controls are not inside the scrolling region —
+not pixel geometry.
+
+### XXXVIII. Explicit lookups are not hidden by view defaults
+A view-level visibility default (hiding sub-issues, collapsed groups, a
+personal/team scope) curates the unfiltered view. It MUST NOT silently remove
+records from the answer to an explicit lookup the user typed, such as a search
+query or a simple ID. Filters the user chose deliberately (priority, assignee,
+tags, blocked) still apply. A record revealed this way keeps the marker that
+explains why the default hides it, and the lookup never mutates the saved
+preference. Regression coverage asserts that the hidden-by-default record is
+absent without the lookup and present with it.
+
+### XXXIX. Request-scoped reads terminate independently of liveness
+A read that must return a value to a waiting caller — an HTTP handler, an MCP
+tool, any request-scoped projection — MUST derive from a source that terminates
+on its own. A live tail is not such a source: a stream that ends only when the
+observed subject ends makes response latency equal to the remaining lifetime of
+that subject, which is unbounded for anything still running.
+
+Where one pipeline serves both a live subscriber and a one-shot reader, the
+shared stage is the normalization, not the termination condition. The one-shot
+reader takes a snapshot of what has settled so far; the subscriber keeps
+following. Reusing the subscriber's stream for the snapshot — and recovering
+termination from a sentinel, a dropped sender, or a timeout — is the defect this
+principle forbids, not an acceptable shortcut. A sentinel that a downstream
+filter can discard is not a termination guarantee at all.
+
+Returning the partial-but-settled state of a running subject is correct, not
+premature; it is distinguished from a completed read by the subject's own
+authoritative status field, which the response already carries. Retained history
+may be capped, and a capped answer is still preferable to no answer. Regression
+coverage exercises the still-running case under an assertable deadline, so a
+reintroduced unbounded wait fails as a timeout rather than hanging the suite.
+
+### XL. Every awaited client stream settles
+Where client code awaits a stream to complete — a promise that resolves on a
+terminal sentinel such as `finished` — every way that stream can end MUST
+settle the wait exactly once: the sentinel resolves it, and a transport close
+without the sentinel, a transport error, or a silence longer than a stated idle
+deadline rejects it. A close frame is never evidence of completion; the server
+may close cleanly after an internal failure, and proxies and mobile operating
+systems drop sockets without warning. The idle deadline applies only to reads of
+settled history — a live tail of a running subject may be legitimately silent
+and is instead recovered by reconnection.
+
+A loading state gated on such a wait therefore always ends. A settled failure
+degrades the view (the item is skipped, counted, and left retryable) rather than
+holding the whole surface behind a spinner. Regression coverage drives each
+terminal path — sentinel, close without sentinel, error, idle deadline — and
+asserts a single settlement.
+
+### XLI. Self-spawned agent work is opt-in, marked, and bounded
+Any path that files an issue or starts a workspace without a human in the loop
+(for example, remediating a failed agent turn) ships disabled behind an explicit
+config flag and reads that flag at the moment it acts. The work it spawns
+carries a durable mark (a name prefix and a description marker), and anything
+so marked never triggers further self-spawned work. Each source is acted on at
+most once per dedupe window, and all launches share a global per-hour cap. Only
+genuine failures trigger it; user stops, restarts and indeterminate exits never
+do. The finalization hot path only emits an event; network I/O happens in a
+background consumer. A failed launch is logged and not retried, and every guard
+fails closed to not spawning. Before filing, it reuses an active item already
+tracking the same failure evidence (a normalized fingerprint or near-identical
+text; no evidence never matches) by recording the occurrence there, and a
+lookup that cannot answer spawns nothing. Project selection obeys the diagnostic-issue
+constraint below: configured, or the source workspace's own project, else skip.
+
+### XLII. Auxiliary surfaces do not block primary work
+A configuration or inspection surface that users keep open while they work
+(Settings, for example) is non-modal. It docks beside the app shell, and the
+shell gives up space to it, so it never overlays or dims the chat. It opens and
+closes from the same control, which shows its open state. Every close path goes
+through the same unsaved-changes guard. Keyboard dismissal applies only while
+focus is inside the surface. It stacks below modal dialogs and popovers, so
+anything it opens still appears on top. Deep links that arrive while it is
+already open retarget it rather than being dropped. Existing imperative entry
+points keep their signatures.
+
+### XLIII. Bulk enrichment answers within a budget; polled requests carry deadlines
+An endpoint that enriches many records in one response (per-workspace diff
+stats, for example) MUST answer within a stated request-wide budget. It MUST
+NOT wait for the slowest item. Cheap fields never wait on expensive ones. An
+item whose fresh value misses the budget reports its last known value, or none
+if it has never been computed. It never reports a fabricated default. The
+expensive work that was already requested still finishes and is published for
+the next read. Missing the budget does not start any extra work.
+
+Every client request that is polled or refetched MUST carry its own deadline
+and forward the query library's cancellation signal. A request that never
+settles would otherwise capture every later poll that is deduplicated onto it.
+A timeout rejects, so the last successful snapshot is kept. It never resolves
+to an empty result. Returning to a hidden page refreshes the data. Regression
+coverage drives a request that never settles past its deadline, then shows
+recovery on the next poll. It also drives a slow item past the server budget
+and shows the last-known fallback and later publication.
+
+### XLIV. A WebSocket is a handshake; finite reads go over HTTP
+Every WebSocket opens a new TCP and TLS connection through the edge proxy, and
+iOS Safari connects them one at a time. A socket is therefore a queued cost of
+0.5 s to 10 s on a phone, even when the server answers in milliseconds.
+- A finite or settled read (a completed turn's log, a snapshot that will not
+  change) MUST use a plain request through `makeLocalApiRequest`, which keeps
+  host scoping and the relay transport. It MUST NOT use a socket that is opened
+  only to wait for `finished`. XL applies to that request: it settles once,
+  has an `AbortController` deadline, and treats a timeout or abort as failure.
+- A snapshot response states whether it is settled. A partial answer (live
+  store still present, subject still running) is never cached or shown as
+  final. The caller falls back to the live path.
+- Sockets are reserved for live data. Consumers of the same stream identity
+  (endpoint plus host scope) MUST share one socket, which lingers briefly
+  after its last consumer so that mount and unmount churn does not reconnect.
+  Equivalent URLs are canonicalized so they share. Filtering that one
+  consumer needs (soft-deleted rows, for example) happens on the client over
+  the shared superset.
+- A primary view MUST NOT queue behind sockets for panels that are not
+  visible. Hidden mobile panels mount or subscribe on first show, or after the
+  primary view settles.
+- Each settled item is fetched at most once per scope. Speculative responses
+  are kept for the next page, not discarded and refetched.
+Regression coverage counts sockets (one per identity for N consumers) and
+requests (one per settled item per scope).
+
+### XLV. Credentials follow the target resource, never ambient identity
+When Vibe Kanban itself (not an agent) calls an external service on a user's
+behalf, it MUST choose the credential from the settings authority that owns
+it, keyed by the resource the call targets (for GitHub, the owner of the target
+repository). It is resolved per request, so a settings edit applies to the next
+call. Ambient process credentials (environment tokens, CLI logins, host
+credential helpers) are used only when the settings authority has no entry for
+that target, and that fallback is logged. A configured entry that cannot be
+read fails closed. It never falls through to another identity. Credentials
+reach only the one child process or request that needs them, through
+command-scoped mechanisms. They are never written to global config or the
+server environment, and never logged. Every authentication or permission
+failure names the target and the credential source that was used, so the
+operator knows which credential to fix.
+
+### XLVI. A lost continuation is a visible fresh start, never a stuck session
+An executor's vendor-private continuation artifact (a Claude transcript, a
+Codex rollout) can disappear: vendor retention cleanup, a host move without a
+transfer, or manual deletion. VK's session record outlives it.
+- Before resuming, an executor that can cheaply prove the artifact is absent
+  (an existence check in the directory the child will actually read,
+  resolved from the execution env, not the server's own env) MUST start a
+  fresh vendor session in the same workspace. Repeating a resume that is
+  certain to fail strands the workspace on every follow-up.
+- The proof fails open. An unreadable or unresolvable location, or an id
+  that is not one safe path segment, resumes as before, so a broken probe
+  never discards a valid conversation.
+- The fresh start is never silent. The agent's prompt says the earlier
+  conversation could not be restored and points to the workspace's files
+  and git history. The user sees a Vibe Kanban diagnostic on the execution's
+  stderr (never agent stdout, per IX) naming the missing session id. A
+  `warn!` log records it.
+- VK never fabricates vendor-private history from its normalized logs to
+  imitate the lost conversation.
+
+### XLVII. Rendered links are detected everywhere and allow-listed by scheme
+Read-only markdown is where users act on what agents report, so every URL
+shown there MUST be clickable, whether it is written as `[text](url)` or bare.
+- Clickability is decided by an explicit allow-list: `http`/`https` open in a
+  new tab with `noopener noreferrer`, and named in-app routes open in place.
+  Every other scheme (`javascript:`, `data:`, and so on) is rendered inert.
+- Bare-URL detection runs only in read-only rendering. It never rewrites what
+  the user is composing, and serialising back to markdown MUST reproduce the
+  source text.
+- Detection skips fenced code blocks and text already inside a link. Inline
+  code keeps its code styling and still becomes a link. Trailing sentence
+  punctuation and unbalanced closing brackets are not part of the URL.
+Regression coverage renders real markdown through the editor, not just the
+regex.
+### XLVIII. Every shipped frontend package is linted, by the same rules
+A package whose source ships in a frontend bundle (`packages/local-web`,
+`packages/web-core`, `packages/remote-web`, `packages/ui`) MUST be covered by
+`pnpm run lint` and by CI, with zero warnings tolerated. A package that only
+gets linted when someone points another package's config at it is not linted.
+- Shared rules live in one place and every package consumes them. A package
+  supplies only what is its own: its tsconfig and its package-specific
+  ignores. Copying a rule set into a second package forks it.
+- Type-aware linting resolves each file against a tsconfig that includes it,
+  test files too. A parse error caused by tsconfig scoping is a gap in
+  coverage, not a lint result.
+- Findings are fixed in code. A rule is never disabled package-wide to get
+  green. A justified exception is scoped to the named file in the shared
+  config and says why, because inline `eslint-disable` comments are banned.
+- `react-hooks/exhaustive-deps` findings are judged one by one. Adding a
+  missing dependency mechanically can turn a mount-only effect into a
+  resubscribe loop. Each fix keeps the hook's current firing behaviour.
+
+### XLIX. A remote MCP client is admitted only by a credential VK issued
+A network client that cannot use the deployment's service credentials (for
+example a ChatGPT connector, which supports only OAuth) is admitted through
+an opt-in OAuth 2.1 authorization server inside VK. VK issues the client's
+token and VK verifies it. VK does not reuse a gateway credential or a header
+an edge may not have set.
+- The feature is inert (every route `404`) until deployment names a public
+  issuer. Local installs gain no new surface.
+- Registration validates and bounds its input. Unclaimed clients are pruned
+  and the total is capped.
+- Consent is a human step behind the host's own login. It is bound to a
+  one-time server-side token, never cached, and never framed. Redirect
+  targets are checked against the registration before anything redirects.
+- Codes need PKCE S256 and are single use. Tokens are opaque and
+  high-entropy, and only their hashes are stored. They are bound to client,
+  resource and expiry. A refresh rotates the token. A replayed code or
+  refresh token revokes the grant.
+- Grants are listable and revocable through the authenticated API.
+  Plaintext tokens and secrets never reach logs, errors or responses beyond
+  the one response that issues them.
+
+### L. Hiding a choice never strands a selection or empties a picker
+A user preference that hides options from a picker (disabled agents,
+disabled models) is a display filter. It is not access control and it never
+deletes configuration.
+- The filter is applied to the list handed to the menu, never to selection
+  resolution. The current value always stays visible, so a trigger never
+  names an option its own menu lacks.
+- An implicit fallback (last used, default) skips hidden options. An explicit
+  choice the user already made is honoured.
+- The last visible option cannot be hidden. An option that something else
+  depends on (the default agent) cannot be hidden until that dependency
+  moves, and the UI says why.
+- Per-host agent preferences live on `ExecutorProfile` in `profiles.json`,
+  next to the configuration they qualify. They go through the same save,
+  override and merge path, and they are never kept as a second copy in the
+  user config.
+
+### LI. Creation defaults resolve once, for every creation path
+A setting that pre-fills a new entity (pipelines on a new issue) is resolved
+by one backend resolver. The UI and every programmatic creation path (MCP,
+integrations that opt in) call that resolver, and none of them hard-codes a
+default of its own.
+- Precedence is most specific first: an explicit choice at creation, then
+  project, then organization, then machine. An override that is present but
+  empty means "none". It never means "inherit".
+- An explicit empty choice at creation (MCP `pipeline_ids: []`, or the
+  operator unticking everything) is honoured. Only an *omitted* choice
+  defaults.
+- Defaults that name something which no longer exists are skipped. They
+  never fail the creation. An explicit choice naming something missing is
+  still an error.
+- If the defaults cannot be resolved, the entity is created without them and
+  a warning is logged. The UI never seeds from a guess while resolution is
+  pending.
+- Defaults live in the same store as the things they name. Pipelines are
+  per-machine files, so their defaults and the org/project overrides are
+  per-machine config and are not synced to the cloud.
+
+### LII. Session-wide history reads are scoped, pruned, paged and budgeted
+A read that spans many turns of one conversation (searching a session's chat
+history, for example) reuses the per-turn normalized projection. It never
+replays raw logs or keeps a second store. It checks the caller's MCP scope
+before reading. Turns that a filter can rule out from execution metadata alone
+(a time window that misses the turn) are never loaded. The rest load one at a
+time, because a cold turn competes for the shared historical-normalization
+capacity. Results are ordered deterministically, paged with a server-enforced
+maximum, and report the total count and whether more remain. Filters see the
+untruncated text, while the per-message output cap stays in force. A missing
+entry timestamp falls back to the turn's start and is never replaced by "now".
+The read answers within a stated budget. A budget miss stops loading further
+turns and says which turns went unscanned. It never reports a partial result
+as complete.
+
+### LIII. Dense rows degrade by priority, never by overlap
+A row that packs an identifier, a primary label and secondary metadata into a
+narrow viewport has a declared priority order: identifier, state and primary
+label (title) first, then age, then secondary metadata (tags, relationships,
+assignees). When space runs out, lower-priority content moves to a second line,
+truncates, or collapses into a count. It never overlaps higher-priority
+content, and it never pushes the row wider than its scroller. Each row cluster
+needs an explicit shrink or clip boundary, and the scroller that hosts the rows
+clips horizontally (see XXXVI). Mobile layout variants are selected by the
+layout signal (`useIsMobile()`) passed down as a prop. The desktop markup stays
+untouched unless the spec says otherwise.
+
+### LIV. Desktop chrome yields to measured space, never rewriting intent
+Sidebars, drawers and other fixed-width desktop chrome decide whether they fit
+from the measured width of the area that hosts them (a `ResizeObserver` on the
+layout root), not from a fixed `window.innerWidth` breakpoint read once. The
+fit is computed from the panels that are actually rendered, using named width
+constants, in a pure tested helper, and it is re-evaluated live on resize and
+on every panel change. Hiding chrome for lack of space is a derived,
+non-persisted state. It never writes the user's saved visibility preference,
+so the chrome comes back by itself once space returns. Everything that reacts
+to the chrome being on screen (reopen affordances, action labels and active
+states) reads the same derived "shown" value. An explicit user toggle acts on
+what is on screen, and may override a lack of space only transiently.
+
+### LV. Secret-provider failures name the input and the cause, never the output
+When resolving a secret reference (for example `op read`) fails, the error
+names the configuration input that failed (the env var name or the owner) and
+a fixed cause category: rate-limited, token rejected, not found or not shared,
+or unknown. Each category comes with its own remedy. The category is derived
+from the provider's diagnostics inside the process. Those diagnostics are
+read under a size bound and dropped. The reference, the token, the value and
+the provider's raw text are never returned, logged or persisted. A
+quota-limited shared credential is treated as a scarce resource, so its
+exhaustion must be recognisable from the error alone.
+
+### LVI. Worker executions are bounded, and a silent start is reaped on worker evidence
+Each worker-owned execution runs under its own resource bounds (a
+per-execution cgroup with memory limits inside the aggregate jobs budget), so
+one runaway build cannot push co-resident agents or the worker's control
+plane into reclaim. A worker refuses new admissions while node pressure is
+over a configured threshold. The refusal is a distinct, retryable error and
+is visible in health and heartbeat. Replays of already-accepted work are
+still honoured. An execution that has produced no output for a bounded
+window after it started is reaped by the worker that owns it. The worker
+kills its process group and cgroup, and records a named diagnostic before
+the terminal state. Reaping is decided from worker evidence (no output ever
+observed, and the kill sent), never from a coordinator-side timeout (XVIII).
+Executions that have produced output are never reaped for being silent. A
+process that is still alive keeps counting toward drain safety until it
+exits. Every terminal path, including indeterminate ones, runs the same
+finalization, so session recovery can never be stranded behind a row that
+never finalized.
 
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
@@ -488,10 +895,55 @@ hook and is covered by focused update and fallback tests.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.31.0 (adds single-label browser-title selection while preserving
-visible navigation context; 0.30.0 requires lossless subscribe-before-snapshot handoffs with
-lag-fatal resnapshot, bounded evidence-backed reconciliation after final output,
-and validated per-task artifact ownership; 0.27.0 required execution activity UI to derive from authoritative,
+**Version**: 0.53.0 (adds LVI, bounding each worker execution in its own cgroup, refusing admission under node pressure with a distinct visible error, reaping executions that never produced output on worker evidence, and finalizing every terminal path including indeterminate ones; 0.52.0 added LV, making secret-reference resolution failures name the failing input and a fixed cause category, rate-limited, token rejected, not found or not shared, or unknown, classified in-process from bounded provider diagnostics that are never surfaced; 0.51.0 added LIV, making fixed-width desktop chrome decide visibility from the measured host width of the rendered panels instead of a one-shot window breakpoint, keep space-driven hiding derived and unpersisted so it never overwrites the saved preference, share one derived "shown" value with every dependent affordance, and let an explicit toggle override lack of space only transiently; 0.50.0 added LIII, making dense rows on narrow viewports declare a content priority, move lower-priority metadata to a second line, truncate or count it rather than overlap the title or widen the scroller, and keep desktop markup unchanged; 0.49.0 added LII, making session-wide history reads reuse the per-turn projection, check scope, prune turns by metadata before loading, load sequentially, page with totals, filter on untruncated text, fall back to turn start for missing timestamps, and answer within a budget that names unscanned turns; 0.48.0 added LI, making creation defaults resolve once in a backend resolver shared by the UI and MCP, with explicit > project > organization > machine precedence, present-but-empty overrides meaning none, explicit empty choices honoured, missing defaults skipped, and unresolvable defaults degrading to none; 0.47.0 added L, making picker-hiding preferences display filters that keep the current selection visible, skip hidden options only in implicit fallbacks, refuse to hide the last or a depended-on option, and store per-host agent preferences on `ExecutorProfile`; 0.46.0 added XLIX, admitting remote MCP clients that cannot hold deployment credentials only through an opt-in VK-issued OAuth 2.1 grant with PKCE, hashed opaque rotating tokens, SSO-gated non-framable consent, bounded registration and replay revocation; 0.45.0 added XLVIII, requiring every shipped frontend package to be linted by `pnpm run lint` and CI from one shared rule set, with tsconfig coverage for tests, fixes in code instead of package-wide disables, and per-case judgement on hook dependencies; 0.44.0 added XLVII, requiring every rendered URL, bare or written as a markdown link, to be clickable through a scheme allow-list, with read-only detection that skips code blocks and never reaches stored markdown; 0.43.0 added XLVI: before resuming, an executor that can prove its vendor continuation artifact is missing starts a visible fresh session in the same workspace, with a fail-open probe, an agent notice, a stderr diagnostic and no fabricated history; 0.42.1 refines XVIII: a producer journal that regressed below the consumer cursor is a discontinuity resolved from matching terminal evidence or classified indeterminate; 0.42.0 added XLV, selecting server-side credentials per request from the settings authority by target resource, with ambient credentials only as a logged fallback, fail-closed unreadable entries, command-scoped delivery, and source-attributed auth errors; 0.41.0 added XLIV, treating each WebSocket as a queued handshake: finite reads go over HTTP with a settled flag and deadline, sockets are shared per identity with a linger, hidden panels defer their sockets, and settled items load once per scope; 0.40.0 added XLIII, bounding bulk enrichment responses by a
+request-wide budget with last-known fallback and requiring deadlines plus
+cancellation on polled client requests; 0.39.0 added XLII, making auxiliary surfaces such as Settings
+non-modal docked drawers that toggle, guard unsaved changes on every close path,
+scope Escape to focus, stack below dialogs, and retarget on deep links;
+0.38.1 refines XLI to reuse active items with matching failure
+evidence before filing new work; 0.38.0 added XLI, making self-spawned agent work opt-in, marked
+against recursion, deduped per source, globally rate-capped, and triggered only
+by genuine failures; 0.37.0 extended IX so Vibe Kanban's own worker control and
+transport metadata never enters the agent's output stream, where it would be
+parsed as an unknown agent event; 0.36.0 added XL, requiring every awaited client stream to
+settle exactly once on sentinel, close-without-sentinel, error, or an idle
+deadline for settled-history reads, so a loading state gated on it always ends
+and a failed item degrades the view instead of blocking it; 0.35.0 added XXXIX, requiring a request-scoped read to derive
+from a self-terminating source rather than a live tail, to share normalization
+but not the termination condition with a live subscriber, to treat a
+filter-discardable sentinel as no guarantee, to return settled partial state for
+a running subject alongside its authoritative status, and to cover the
+still-running case under an assertable deadline; 0.34.0 added XXXVIII, so view-level visibility defaults never
+silently remove records from an explicit user lookup while deliberate filters
+still apply; 0.33.0 added XXXVII, requiring configuring/committing controls to
+stay inside a host-supplied definite height via a fully declared shrink and
+overflow-ownership contract — the shell owning overflow by scrolling rather than
+discarding it where discarding would put a control beyond reach, a zero minimum
+on every intermediate item, a usable floor on the terminal shrink target, no
+viewport-unit duplication of an already definite height, and structural rather
+than pixel regression coverage; 0.32.0 extended IX so a control that removes a hang-capable
+capability bounds the effect rather than a name: enumerate the reachable paths
+to the same effect and bound or deny each, treat an unbounded foreground wait
+loop as one of those paths, require a wait to state its own deadline or be
+redirected to the VK-owned bounded mechanism, and enforce the bound where VK can
+observe it instead of trusting a vendor timeout; 0.31.0 added a single-authority,
+monotonic-boundary contract for
+dynamic viewport scroll correction; 0.30.0 extended IX so controls imposed on a vendor CLI — deny rules,
+permission matchers, capability-disabling config keys — are built from
+identifiers verified against the pinned executing artifact rather than docs or
+type declarations, record that source and version, pin the spelling by test where
+the vendor ignores unknown keys, sit at the parameter when that is the real
+enforcement point, name the supported replacement when denying, and record a
+verified-absence as an evidenced decision instead of guessing a rule; 0.29.0
+required UI/entity projections to preserve identity and
+render unknown rather than broadcasting aggregate facts across siblings; 0.28.0
+requires immutable historical reconstruction to be
+single-flight by durable identity, atomically materialized, bounded,
+cancellation-safe, observable, and kept off implicit affinity migration; also
+allows explicit metrics-to-remediation issue actions only with preserved
+evidence, explicit project context, transactional open-incident deduplication,
+and no promotion of alert state into scheduling authority; 0.27.0 required
+execution activity UI to derive from authoritative,
 rehydratable process snapshots, reconnects to recover missed terminal events,
 and shutdown/recovery to classify executions that are no longer provably active;
 0.26.0 required executor-neutral, execution-scoped materialization
@@ -515,3 +967,364 @@ paths, structural rather than textual assertions, no same-named-local fallback,
 two-sided pointer repair, level-triggered enforcement, and re-derived blast
 radius for consolidated namespaces; 0.17.0 added observability as a read-only
 surface; 0.16.0 added affinity-bound, evidence-backed distributed execution)
+
+## Task applicability review — 2026-09-12
+
+`vk/40fb-workspace-creati`: reaffirm II (regression evidence), XV/XVIII/XX
+(preserve work and coordinator-owned shared Git administration), XXI (safe,
+identifying failures), and XXVIII (request-independent creation with no replay of
+partially committed startup). No new principle or version change is required.
+
+`vk/4aeb-app-urls-for-mad`: reaffirm II (test the observable URL persistence
+contract), III/VI (extend existing preview settings and navigation machinery),
+IV (implement shared behavior in `web-core` for both frontends), and XXI (reuse
+the existing proxy/development URL normalization convention). No new principle
+or version change is required.
+
+## Task applicability review — 2026-09-16
+
+`vk/8a08-frontend-not-ref`: reaffirm II (test both HTTP/WebSocket race
+orderings), III/VI (extend the existing execution-process projection rather
+than create a parallel optimistic message store), IV (keep the fix in shared
+`web-core`), XII (make the asynchronous creation handoff idempotent), XXX
+(retain snapshot authority and rehydration), and XXXV (enforce session identity
+when reconciling the returned process). No new principle or version change is
+required.
+
+`vk/b1df-searching-by-iss`: reaffirm II (test authorization, matching, display,
+and routing), III/VI (extend the existing global-search result envelope and
+route builder), IV (keep shared dialog behavior in `web-core`), VII (display
+the human-readable `simple_id` while routing by UUID), and XXXV (scope issue
+results to their own organization and project identities). No new principle or
+version change is required.
+
+`vk/24ed-remote-machine-m`: reaffirm II (observable UI regressions), III/VI
+(reuse relay queries and mutations), IV (both frontend runtimes), and XXXIV/XXXV
+(paired identity survives absent discovery; unknown connectivity is explicit).
+No new principle or version change is required.
+
+`vk/fe2d-warn-when-starti`: reaffirm II (observable regression coverage),
+III/VI (reuse creation and synced workspace data), IV (shared UI/container
+boundaries), and XXXV (issue and workspace identity for all evidence).
+Duplicate-start advice remains dismissible and never a uniqueness constraint.
+No new principle or version change is required.
+
+`vk/1d23-vk-worker-output`: reaffirm II (regressions), XVI (evidence-backed
+distributed execution), and XXX (authoritative execution state). Resume replay
+from durable execution-scoped evidence and retain uncertainty for real gaps.
+No new principle or version change is required.
+
+## Task applicability review — 2026-09-17
+
+`vk/e464-issue-and-worksp`: reaffirm II (transition regressions), III/VI
+(reuse archive and workspace synchronization paths), V (atomic remote workspace
+and issue mutations), XII (queued acceptance), and XXI (project-scoped,
+case-insensitive status naming). No new principle or version change is required.
+
+`vk/e89d-debug-atlassian`: reaffirm II (OAuth reconnect regressions), III/VI
+(reuse existing gateway persistence), and identity-preserving projections:
+renaming a configured MCP identifier must not silently replace its bound OAuth
+connection. No principle or version change is required.
+
+## Review: vk/c817-aws-sso-sign-in
+
+Applied `/speckit.constitution`: existing principles II, VI, VIII, and XI cover regression checks, reuse of worker home overlays, explicit credential sharing, and evidence-based availability. Credential files remain vendor-managed and must never enter logs or artifacts. No new principle is required.
+
+## Review: vk/669e-mcp-blocks-progr
+
+Applied `/speckit.constitution`: reaffirm II (regression evidence), VI (reuse existing lifecycle machinery), IX/XI (retain diagnostics without confusing their scope), XVIII/XXX (worker-backed terminal state and explicit indeterminacy), and XXIV (settings own MCP definitions). No new principle is required.
+
+## Review: vk/603d-prevent-stuck-jo
+
+Applied `/speckit.constitution`: this task is the evidence for the 0.32.0
+extension of IX. The shipped `Monitor` denial and the `run_in_background`
+parameter deny were both correct and both held; the agent reached the same
+unbounded-wait effect through a plain foreground `until` loop and hung a turn
+for roughly an hour. Reaffirm II (the contract is what the agent receives, so
+regressions assert the delivered denial, not an internal predicate's variant),
+III/VI (extend the existing `PreToolUse` chokepoint and the existing
+`spawn_poller` replacement rather than adding a supervisor), and IX as extended:
+the predicate must stay conservative — an unrecognised or ambiguous command
+allows — because an over-broad deny breaks every Bash call.
+
+## Review: vk/7b85-new-workspace-co
+
+Applied `/speckit.constitution`: added principle XXXVII. Existing principles
+cover part of this task — II (rendered-DOM regression coverage for a UI
+surface), III/VI (smallest change, reuse the existing composer rather than new
+plumbing), and IV (`packages/ui` owns the chat box's internal layout, so both
+frontends are the blast radius) — but none of them stated the layout obligation
+the report is about: a create-workspace config row that falls below the fold
+inside a host that clips overflow. XXXVI governs which policy corrects scroll
+position in a live view; it does not say the committing controls must be inside
+the viewport at all. XXXVII fills that gap and gives the knowledge base's
+`nested-flex-scroll-containment` and `responsive-flex-toolbars` findings an
+enforceable home. Numeral XXXVII was unused before this change, on this branch and on `main`;
+the pre-existing duplicate `XX` is untouched. At merge time `main` had also
+claimed 0.32.0 for its extension of IX, so this change was restacked as 0.33.0
+above it rather than replacing it.
+
+## Review: vk/eaef-missing-issues
+
+Applied `/speckit.constitution` and added principle XXXVIII. SWE-190 could not
+be found from the Team board's search. The default "hide sub-issues" view filter
+ran before the text search, so the lookup could never match it. II (test the
+contract) and III (smallest change) apply as written. No existing principle said
+that a view default must yield to an explicit lookup. Numeral XXXVIII was unused
+on this branch and on `main`.
+
+## Review: vk/3fb0-debug-why-vk-mes
+
+Applied `/speckit.constitution`: added principle XXXIX. The task is a hang in
+`GET /api/execution-processes/{id}/messages`, whose handler drains a normalized
+log stream that only terminates when the execution does. Existing principles
+touch the neighbourhood without covering it. XXXI governs reconstruction of
+*immutable completed* history — single-flight, atomically materialized, bounded
+— and explicitly reasons about finished executions; the endpoint hangs precisely
+for running ones, which XXXI never addresses. XII requires one authoritative
+owner for asynchronous handoffs, but this is a synchronous read, not a
+producer/consumer claim. XXX requires execution UI to derive from authoritative
+rehydratable snapshots, and XXXIV requires partial projections to degrade
+deterministically — both describe what a consumer does with data that has
+arrived, not the obligation of the read itself to return. IX's 0.32.0 extension
+is the closest in spirit — it treats an unbounded foreground wait as a
+hang-capable path to be bounded — but it is scoped to controls imposed on vendor
+CLIs, not to this codebase's own request handlers.
+
+XXXIX fills that gap and names the specific mechanism found here: a shared
+pipeline whose live-subscriber stream was reused for a one-shot read, where the
+`Finished` sentinel was discarded by a downstream filter, leaving termination to
+depend on the broadcast sender being dropped at turn end. This principle was drafted as XXXVIII / 0.34.0; before merge `main` claimed
+both for "Explicit lookups are not hidden by view defaults" (#322), so it was
+restacked as XXXIX / 0.35.0 above it rather than replacing it. Numeral XXXIX was
+unused on this branch and on `main` at that point; the pre-existing duplicate
+`XX` is untouched.
+
+## Review: vk/5f70-not-loading-chat
+
+Applied `/speckit.constitution`: added principle XL. The chat panel spun forever
+on mobile because `streamJsonPatchEntries` only settles on a `finished`
+sentinel or a transport `error` event. The server closes cleanly (code 1000)
+without `finished` when the log stream errors, and that close was ignored. The
+initial history load awaits that promise, so its loading flag never cleared.
+XXXIX already requires server reads to terminate; it does not cover the client
+side, where a stream that has ended can still leave its waiter pending. XIX's
+"live streams are bounded and self-correcting" governs retention and
+resnapshotting, not settlement of a one-shot awaited read. XL fills that gap.
+Numeral XL was unused on this branch and on `main`.
+
+## Review: vk/5276-debug-unrecogniz
+
+Applied `/speckit.constitution`: extended IX (0.37.0). The chat showed
+`Unrecognized JSON message: {"cancellation_phase":"requested"}` because the
+coordinator wrote worker `Structured` events that are not `LogMsg` values into
+the execution's stdout, where the Claude parser classified them as unknown agent
+events. IX already required unknown vendor events to degrade safely. It did not
+say that the product's own metadata must stay out of the vendor stream. XI
+(diagnostics are evidence) applies to the worker error variants, which must stay
+visible as diagnostics rather than being dropped.
+
+## Review: vk/4643-move-settings-to
+
+Applied `/speckit.constitution`: added principle XLII (0.39.0). Settings was a
+centered modal with a full-screen overlay that blocked the chat. No existing
+principle covered whether an auxiliary surface may be modal. XXXVI and XXXVII
+govern scroll and height inside a host, not whether a surface may cover its
+neighbours. Numeral XLII was unused on this branch.
+
+## Review: vk/4dac-filter-workspace
+
+Applied `/speckit.constitution`: no amendment (version stays 0.39.0). The task
+adds a user-set sidebar filter that hides workspaces by their linked issue's
+status. The existing principles cover it:
+- XXXIV: a workspace whose issue or status hasn't loaded stays visible. Hiding
+  requires positive evidence.
+- XXXV: status comes only from the workspace's own `issue_id`, joined via
+  `local_workspace_id`.
+- XXXVIII: this is a deliberate filter, so it still applies during search.
+- III: it reuses the existing filter dialog, preference scratch and cached
+  Electric shapes.
+Status names rather than ids key the global preference, following the existing
+`list_view_status_filter_name` convention. That is an established repository
+pattern, not a new principle.
+
+## Review: vk/b923-workspaces-loadi
+
+Applied `/speckit.constitution`: added principle XLIII (0.40.0). On mobile the
+Workspaces sidebar showed names but no metadata. The summaries endpoint waited
+for diff stats on every workspace, which took up to 16.6 s over NFS. The client
+fetch had no deadline, and React Query deduplicated each later poll onto a
+request that never settled. XL covers awaited *streams* only, and XXXIX covers
+reads that follow a live subject. Neither bounds a bulk request/response
+enrichment endpoint, and neither requires deadlines on polled queries. XXXIV
+(partial projections) still governs how the rows render while enrichment is
+missing. Numeral XLIII was unused on this branch and on `main`.
+
+## Review: vk/45a2-make-workspace-c
+
+Applied `/speckit.constitution`: added principle XLIV (0.41.0). Phone chat
+loads took 40 s to 2 min while every stream finished in under 120 ms on the
+server. A workspace page opened about 29 WebSockets, including 10 history
+sockets (each completed turn twice) and three copies of the session process
+stream. Behind Cloudflare, each socket is a new handshake, and Safari connects
+them one at a time. XL makes each awaited stream settle but says nothing about
+how many there are or which transport a settled read should use. XLIII bounds
+request/response enrichment, not sockets. XLIV fills that gap. Numeral XLIV was
+unused on this branch and on `main`. The homelab constitution named by the
+command template was not changed, because this project only manages the Vibe
+Kanban repository.
+
+## Review: vk/8b57-use-settings-git
+
+Applied `/speckit.constitution`: added principle XLV (0.42.0). The VK
+server's own `git push` and `gh` calls used the server process's ambient GitHub
+credential, while agents used the per-owner org token from Settings. The
+result was a 403 on `create_pr` for a repository the configured token could
+write to. Some neighbouring principles touch this but none cover it:
+- XXI requires errors to say *what* failed, but not which credential source
+  was used.
+- XXIV/XXIX make Settings the authority for MCP definitions only.
+- XVII/XXIII cover redaction and snapshots for agent execution, not the
+  server's own outbound calls.
+Numeral XLV was unused on this branch and on `main` (which took XLIV for vk/45a2).
+
+## Review: vk/9c15-stopped-job-look
+
+Applied `/speckit.constitution`: refined XVIII (0.42.1, patch). A worker
+restarted without a drain recovered its job as `interrupted`, but its
+recovered journal restarted at the stale persisted `last_sequence + 1`, below
+the coordinator's cursor. The tracker read each empty batch as "nothing new"
+and the row stayed `Running` until a manual Stop. XVIII (replay gaps visible)
+and XXX (recovery classifies every execution) already forbid the outcome. Only
+the regression case was unnamed, so a clarifying sentence was enough and no
+new principle was added. The homelab constitution named by the command
+template was not changed, because this project only manages the Vibe Kanban
+repository.
+
+## Review: vk/9f5d-no-conversation
+
+Applied `/speckit.constitution`: added principle XLVI (0.43.0). Workspace
+`vk/d97a-build-daily-repo` failed every follow-up with `No conversation found
+with session ID`, because Claude's default 30-day cleanup deleted its
+transcript before homelab raised retention. XXV covers moving continuation
+artifacts between nodes, and IX covers which stream VK may write to. Neither
+says what an executor does once the artifact is gone. Codex already starts a
+replacement thread, while Claude kept repeating a resume that could only
+fail. XLVI makes the fallback a rule, keeps it fail-open and visible, and
+keeps the `vk/6026-no-conversation` boundary against fabricating history.
+Numeral XLVI was unused on this branch and on `main`. The homelab
+constitution named by the command template was not changed, because this
+project only manages the Vibe Kanban repository.
+
+## Review: vk/e4ef-urls-always-clic
+
+Applied `/speckit.constitution` and added principle XLVII (0.44.0). Agent
+replies showed bare PR URLs as plain text, because the read-only Lexical
+renderer only linked `[text](url)`, and `http://` links were disabled. No
+principle covered link rendering. XLVII puts the scheme allow-list, read-only
+detection and the round-trip into one rule. Main took XLV and XLVI while this
+branch was open (vk/8b57, vk/9f5d), so the rule was renumbered on merge. The
+homelab constitution named by the command template was not changed, because
+this project only manages the Vibe Kanban repository.
+
+## Review: vk/50df-chatgpt-custom-m
+
+Applied `/speckit.constitution` and added principle XLIX (0.46.0). ChatGPT
+custom connectors can authenticate only with OAuth, and no principle covered
+VK acting as an authorization server. The homelab constitution got the
+matching edge principle (148), because this task also changes the
+`vibe.vasandani.dev` edge and Caddy routes, with the user's approval.
+
+## Review: vk/2e22-disable-agent
+
+Applied `/speckit.constitution` and added principle L (0.47.0). The user
+wants unused agents gone from every agent picker. Built-in executors cannot
+be deleted, and no principle said how hiding a choice should interact with
+the current selection or with defaults. `disabled_models` already followed
+these rules informally (wiki `model-picker-preferences`). L makes them
+binding for agents and for any later picker preference. The homelab
+constitution named by the command template was not changed, because this
+project only manages the Vibe Kanban repository.
+
+## Review: vk/16dc-default-pipeline
+
+Applied `/speckit.constitution` and added principle LI (0.48.0). The New
+Issue UI hard-coded the `basic` pipeline, and MCP `create_issue` attached
+none, so the two paths disagreed and neither could be configured. LI makes
+one resolver and its precedence binding for this and later creation
+defaults. Collapsing the Pipeline card is governed by XXVI: the collapsed
+header names the selected pipelines from the list the card already loads.
+The card stays mounted because it owns the selection, not to label its
+header. The homelab constitution named by the command template was not
+changed, because this project only manages the Vibe Kanban repository.
+
+## Review: vk/5b8a-vk-mcp-chat-logs
+
+Applied `/speckit.constitution` and added principle LII (0.49.0). The user
+wants any part of a session's chat log to be retrievable through the VK MCP,
+filtered by date/time or keyword, and the existing readers only see the latest
+turn. XXXI, XXXIX and XLIII already cover single-turn materialization,
+termination and bulk budgets. No principle said how a read across many turns
+must bound its cost or report a partial scan. The homelab constitution named
+by the command template was not changed, because this project only manages
+the Vibe Kanban repository.
+
+## Review: vk/2b39-fix-mobile-ui
+
+Applied `/speckit.constitution` and added principle LIII (0.50.0). On a phone,
+the project list view let tag and relationship badges paint over the issue id
+and clipped the age column. Titles shrank to an ellipsis because the metadata
+cluster could not shrink. XXVI covers constrained header rows and XXXVI covers
+scroll authority, but no principle said what a dense row gives up first. The
+homelab constitution named by the command template was not changed, because
+this project only manages the Vibe Kanban repository.
+
+## Review: vk/dc99-show-left-drawer
+
+Applied `/speckit.constitution` and added principle LIV (0.51.0). The left
+workspaces drawer hid whenever a right panel opened on any window up to 2048px
+wide. The width was read once, and the result was written into the persisted
+`is_left_sidebar_visible` preference, so the drawer stayed hidden even after
+the window grew. XLII and the Settings drawer page already do space math for
+one surface, but no principle said that layout-driven hiding must be derived
+from measured space and must not overwrite user intent. The homelab
+constitution named by the command template was not changed, because this
+project only manages the Vibe Kanban repository.
+
+## Review: vk/76ab-debug-1password
+
+Applied `/speckit.constitution` and added principle LV (0.52.0). An
+execution start failed with "1Password lookup failed; check the reference,
+service-account token, and vault permissions", which named neither the
+variable nor the cause. The reference and token both read fine afterwards,
+and the service account's shared 24-hour quota was the likely culprit. That
+could not be confirmed, because `op`'s stderr was discarded. XLV covers
+attributing *which credential* was used, but no principle said that resolver
+failures must carry a classified cause. The homelab constitution named by the
+command template was not changed, because this project only manages the
+Vibe Kanban repository.
+
+## Review: vk/f268-harden-cluster-w
+
+Applied `/speckit.constitution` and added principle LVI (0.53.0). On think3, a
+runaway `go build` inside the shared `jobs` cgroup drove the node, which has
+no swap, into page-cache thrash. The next agent stuck in D-state before it
+wrote any output, and its session could only be recovered with root access.
+XVIII already requires worker evidence for terminal state, and XLI bounds
+self-spawned work. No principle bounded a single execution's resources, said
+that a thrashing node should stop admitting work, or said that an execution
+which never started is reaped by its owner. The homelab constitution named
+by the command template was not changed, because this project only manages
+the Vibe Kanban repository. The worker unit's cgroup delegation in homelab
+is deployment configuration for this service.
+
+## Review: vk/77a2-session-step-tim
+
+Applied `/speckit.constitution`: existing II, III, IX and XI govern this fix.
+Event timestamps must remain evidence: process start and historical replay time
+are not step occurrence time. Preserve source timestamps and stable entry
+identity; test both live updates and historical reads. No new principle needed.
+
+## Review: vk/e831-remember-filter
+
+Applied `/speckit.constitution`: existing II (test the contract), III (reuse existing persistence), IV (both shared frontend consumers), and LI (one default resolver with explicit override precedence) govern this change. Remembered user choices must not become implicit site-wide defaults. No new principle or version amendment required.

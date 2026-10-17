@@ -44,6 +44,7 @@ jobs:
               - 'packages/web-core/**'
               - 'packages/remote-web/**'
               - 'packages/ui/**'
+              - 'eslint.frontend.cjs'
               - 'shared/**'
               - 'scripts/check-i18n.sh'
               - 'scripts/check-legacy-frontend-paths.sh'
@@ -56,26 +57,12 @@ jobs:
               - '.github/workflows/test.yml'
               - '.github/actions/**'
             backend:
-              - 'crates/api-types/**'
-              # cluster-protocol, node-metrics and worker are workspace members
-              # whose tests run in backend-test; without them here a change
-              # touching only those crates skips the job entirely and reads as
-              # a pass.
-              - 'crates/cluster-protocol/**'
-              - 'crates/db/**'
-              - 'crates/deployment/**'
-              - 'crates/executors/**'
-              - 'crates/git/**'
-              - 'crates/local-deployment/**'
-              - 'crates/node-metrics/**'
-              - 'crates/remote/**'
-              - 'crates/review/**'
-              - 'crates/server/**'
-              - 'crates/services/**'
-              - 'crates/utils/**'
-              - 'crates/worker/**'
-              - 'crates/workspace-manager/**'
-              - 'crates/worktree-manager/**'
+              # Every crate, not an enumeration. backend-test/clippy operate on
+              # the whole workspace, so a crate missing from a hand-kept list
+              # skips the job entirely and reads as a pass — this list had
+              # drifted to 15 of 33 workspace members (`crates/mcp` among the
+              # omissions), which is the exact trap its own comment warned about.
+              - 'crates/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'shared/**'
@@ -108,11 +95,12 @@ jobs:
           pnpm run test:format-prerequisites
           npx concurrently \
             --kill-others-on-fail \
-            --names "local:lint,local:fmt,local:build,remote:fmt,remote:build,remote:test,ui:check,ui:lint,ui:fmt,core:check,core:fmt,i18n,legacy" \
+            --names "local:lint,local:fmt,local:build,remote:lint,remote:fmt,remote:build,remote:test,ui:check,ui:lint,ui:fmt,core:check,core:lint,core:fmt,core:test,i18n,legacy" \
             --timings \
             "cd packages/local-web && npm run lint" \
             "cd packages/local-web && npm run format:check" \
             "cd packages/local-web && npm run build" \
+            "cd packages/remote-web && npm run lint" \
             "cd packages/remote-web && npm run format:check" \
             "cd packages/remote-web && npm run build" \
             "cd packages/remote-web && npm run test" \
@@ -120,7 +108,9 @@ jobs:
             "cd packages/ui && npm run lint" \
             "cd packages/ui && npm run format:check" \
             "cd packages/web-core && npm run check" \
+            "cd packages/web-core && npm run lint" \
             "cd packages/web-core && npm run format:check" \
+            "cd packages/web-core && npm run test" \
             "GITHUB_BASE_REF=${{ github.base_ref || 'main' }} ./scripts/check-i18n.sh" \
             "./scripts/check-legacy-frontend-paths.sh"
 

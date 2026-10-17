@@ -3,6 +3,7 @@ import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useJsonPatchWsStream } from './useJsonPatchWsStream';
+import { resetSharedJsonPatchStreamsForTests } from '@/shared/lib/sharedJsonPatchStream';
 
 vi.hoisted(() => {
   process.env.NODE_ENV = 'test';
@@ -51,6 +52,7 @@ describe('useJsonPatchWsStream restart recovery', () => {
 
   afterEach(() => {
     act(() => root.unmount());
+    resetSharedJsonPatchStreamsForTests();
     container.remove();
     vi.useRealTimers();
   });

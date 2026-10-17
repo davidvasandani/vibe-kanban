@@ -464,8 +464,10 @@ export function McpSettingsSection() {
     void loadShared();
   }, [loadShared]);
 
-  const profiles =
-    readModel?.profiles.filter((profile) => profile.supports_mcp) ?? [];
+  const profiles = useMemo(
+    () => readModel?.profiles.filter((profile) => profile.supports_mcp) ?? [],
+    [readModel?.profiles]
+  );
   const serverByName = useMemo(() => {
     const map = new Map<string, SharedMcpServer>();
     for (const server of readModel?.servers ?? []) map.set(server.name, server);

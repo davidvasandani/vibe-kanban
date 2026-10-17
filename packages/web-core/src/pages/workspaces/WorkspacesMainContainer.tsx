@@ -137,7 +137,6 @@ export const WorkspacesMainContainer = forwardRef<
     repos,
     onSelectSession,
     isLoading,
-    isSessionsLoading: _isSessionsLoading,
     isNewSessionMode,
     onStartNewSession,
     onClearContextAndAcceptPlan,

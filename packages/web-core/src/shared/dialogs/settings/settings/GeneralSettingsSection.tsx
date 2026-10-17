@@ -8,6 +8,7 @@ import {
 } from '@phosphor-icons/react';
 import { FolderPickerDialog } from '@/shared/dialogs/shared/FolderPickerDialog';
 import {
+  type AutoErrorRemediationConfig,
   type BaseCodingAgent,
   DEFAULT_COMMIT_REMINDER_PROMPT,
   DEFAULT_PR_DESCRIPTION_PROMPT,
@@ -25,6 +26,7 @@ import {
   getExecutorVariantKeys,
   getSortedExecutorVariantKeys,
 } from '@/shared/lib/executor';
+import { filterEnabledAgents } from '@/shared/lib/disabledAgents';
 import { useTheme } from '@/shared/hooks/useTheme';
 import { useUserSystem } from '@/shared/hooks/useUserSystem';
 import { TagManager } from '@/shared/components/TagManager';
@@ -53,6 +55,7 @@ import {
   SettingsTextarea,
 } from './SettingsComponents';
 import { useSettingsDirty } from './SettingsDirtyContext';
+import { AutoErrorRemediationSettingsCard } from './AutoErrorRemediationSettingsCard';
 
 export function GeneralSettingsSection() {
   const { t } = useTranslation(['settings', 'common']);
@@ -78,12 +81,15 @@ export function GeneralSettingsSection() {
   );
   const { setTheme } = useTheme();
 
-  // Executor options for the default coding agent dropdown
-  const executorOptions = profiles
-    ? Object.keys(profiles)
-        .sort()
-        .map((key) => ({ value: key, label: toPrettyCase(key) }))
-    : [];
+  // Agent options for the default coding agent dropdown and remediation.
+  // Disabled agents are hidden, but each picker keeps its current value.
+  const sortedAgents = profiles ? Object.keys(profiles).sort() : [];
+  const executorOptions = filterEnabledAgents(sortedAgents, profiles, [
+    draft?.executor_profile?.executor,
+  ]).map((key) => ({ value: key, label: toPrettyCase(key) }));
+  const remediationExecutors = filterEnabledAgents(sortedAgents, profiles, [
+    draft?.auto_error_remediation?.executor,
+  ]);
 
   const selectedAgentProfile =
     profiles?.[draft?.executor_profile?.executor || ''];
@@ -153,6 +159,22 @@ export function GeneralSettingsSection() {
           setDirty(true);
         }
         return next;
+      });
+    },
+    [config]
+  );
+
+  // Replaces the whole remediation config: `updateDraft` deep-merges, which
+  // would keep array entries (repo ids) that the user just removed.
+  const updateAutoErrorRemediation = useCallback(
+    (next: AutoErrorRemediationConfig) => {
+      setDraft((prev: typeof config) => {
+        if (!prev) return prev;
+        const updated = { ...prev, auto_error_remediation: next };
+        if (!isEqual(updated, config)) {
+          setDirty(true);
+        }
+        return updated;
       });
     },
     [config]
@@ -534,6 +556,14 @@ export function GeneralSettingsSection() {
           }
         />
       </SettingsCard>
+
+      {draft?.auto_error_remediation && (
+        <AutoErrorRemediationSettingsCard
+          value={draft.auto_error_remediation}
+          executors={remediationExecutors}
+          onChange={updateAutoErrorRemediation}
+        />
+      )}
 
       {/* Git */}
       <SettingsCard

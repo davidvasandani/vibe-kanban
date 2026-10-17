@@ -32,6 +32,10 @@ pub struct McpContext {
     pub project_id: Option<Uuid>,
     #[schemars(description = "The remote issue ID (if workspace is linked to a remote issue)")]
     pub issue_id: Option<Uuid>,
+    #[schemars(
+        description = "Application-relative issue URL. Use it in Markdown links when referencing this issue in Vibe Kanban."
+    )]
+    pub issue_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(description = "The orchestrator session ID when running in orchestrator mode")]
     pub orchestrator_session_id: Option<Uuid>,
@@ -89,6 +93,11 @@ impl McpServer {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
+    }
+
+    /// Browser route shared by the local and remote apps; never use the API host.
+    fn issue_url(project_id: Uuid, issue_id: Uuid) -> String {
+        format!("/projects/{project_id}/issues/{issue_id}")
     }
 
     fn url(&self, path: &str) -> String {
@@ -217,6 +226,9 @@ impl McpServer {
             organization_id,
             project_id,
             issue_id,
+            issue_url: project_id
+                .zip(issue_id)
+                .map(|(project, issue)| Self::issue_url(project, issue)),
             orchestrator_session_id,
             workspace_id,
             workspace_branch,

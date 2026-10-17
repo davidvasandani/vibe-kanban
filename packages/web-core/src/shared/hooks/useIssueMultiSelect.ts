@@ -30,7 +30,7 @@ export function useIssueMultiSelect() {
   );
 
   const handleCheckboxChange = useCallback(
-    (issueId: string, _checked?: boolean) => {
+    (issueId: string) => {
       toggleIssue(issueId);
     },
     [toggleIssue]

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use codex_app_server_protocol::{ReviewTarget, ThreadStartParams};
 
-use super::{client::AppServerClient, fork_params_from};
+use super::{auth_refresh, client::AppServerClient, codex_home, fork_params_from};
 use crate::executors::ExecutorError;
 
 pub async fn launch_codex_review(
@@ -11,7 +11,12 @@ pub async fn launch_codex_review(
     review_target: ReviewTarget,
     client: Arc<AppServerClient>,
 ) -> Result<(), ExecutorError> {
-    let account = client.get_account().await?;
+    // Up-front, serialized credential refresh (see codex::auth_refresh, VAS-490).
+    if let Some(home) = codex_home() {
+        auth_refresh::refresh_credentials_if_stale(&home, &client).await;
+    }
+
+    let account = client.get_account(false).await?;
     if account.requires_openai_auth && account.account.is_none() {
         return Err(ExecutorError::AuthRequired(
             "Codex authentication required".to_string(),

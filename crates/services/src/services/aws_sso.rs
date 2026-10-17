@@ -9,6 +9,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    future::Future,
     path::PathBuf,
     sync::{Arc, Mutex as StdMutex, OnceLock},
     time::Duration,
@@ -16,13 +17,17 @@ use std::{
 
 use futures::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex, OwnedMutexGuard};
+use tokio::sync::{Mutex, OnceCell, OwnedMutexGuard, Semaphore};
 use ts_rs::TS;
 
 use super::cli_tools::{self, CliToolId};
 
-/// How long an `aws sts get-caller-identity` auth probe may run.
-const AUTH_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+// AWS CLI startup is expensive: starting one process for every profile at
+// once makes healthy sessions time out. Share capacity across all requests,
+// including post-login verification, rather than limiting each list alone.
+const AUTH_PROBE_CONCURRENCY: usize = 4;
+const AUTH_PROBE_QUEUE_TIMEOUT: Duration = Duration::from_secs(30);
+const AUTH_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Registration scope that enables SSO token refresh for sso-session profiles.
 const DEFAULT_REGISTRATION_SCOPES: &str = "sso:account:access";
@@ -1014,36 +1019,93 @@ fn classify_probe_failure(stderr: &str) -> AwsAuthStatus {
     }
 }
 
-async fn probe_profile_auth(profile_name: &str) -> AwsAuthStatus {
-    let Some(executable) = cli_tools::effective_binary_for(CliToolId::Aws).await else {
-        return AwsAuthStatus::CliMissing;
-    };
-    let mut command = tokio::process::Command::new(executable);
-    command
-        .args([
-            "sts",
-            "get-caller-identity",
-            "--profile",
-            profile_name,
-            "--output",
-            "json",
-        ])
-        .env_clear();
-    for key in PROBE_ENV_KEYS {
-        if let Some(value) = std::env::var_os(key) {
-            command.env(key, value);
+async fn run_auth_probe(
+    capacity: &Semaphore,
+    queue_timeout: Duration,
+    execution_timeout: Duration,
+    probe: impl Future<Output = AwsAuthStatus>,
+) -> AwsAuthStatus {
+    let _permit = match tokio::time::timeout(queue_timeout, capacity.acquire()).await {
+        Ok(Ok(permit)) => permit,
+        Ok(Err(_)) => {
+            return AwsAuthStatus::Unknown {
+                message: "auth check capacity unavailable".to_string(),
+            };
         }
-    }
-    match tokio::time::timeout(AUTH_PROBE_TIMEOUT, command.kill_on_drop(true).output()).await {
-        Ok(Ok(output)) if output.status.success() => classify_probe_success(&output.stdout),
-        Ok(Ok(output)) => classify_probe_failure(&String::from_utf8_lossy(&output.stderr)),
-        Ok(Err(err)) => AwsAuthStatus::Unknown {
-            message: format!("could not run auth check: {err}"),
-        },
+        Err(_) => {
+            return AwsAuthStatus::Unknown {
+                message: "auth checks are busy; retry after current checks finish".to_string(),
+            };
+        }
+    };
+    // Queued work gets its full execution budget only after admission. Dropping
+    // this future releases the permit and the CLI's kill_on_drop guard.
+    match tokio::time::timeout(execution_timeout, probe).await {
+        Ok(status) => status,
         Err(_) => AwsAuthStatus::Unknown {
-            message: "auth check timed out".to_string(),
+            message: format!(
+                "auth check timed out after {} seconds",
+                execution_timeout.as_secs()
+            ),
         },
     }
+}
+
+// Do not start every profile's admission deadline at the beginning of a large
+// refresh: later profiles would time out behind their own batch's healthy work.
+async fn collect_auth_probes(
+    probes: impl IntoIterator<Item = impl Future<Output = AwsAuthStatus>>,
+) -> Vec<AwsAuthStatus> {
+    stream::iter(probes)
+        .buffered(AUTH_PROBE_CONCURRENCY)
+        .collect()
+        .await
+}
+
+async fn probe_profile_auth(
+    profile_name: &str,
+    executable: &OnceCell<Option<PathBuf>>,
+) -> AwsAuthStatus {
+    static CAPACITY: OnceLock<Semaphore> = OnceLock::new();
+    run_auth_probe(
+        CAPACITY.get_or_init(|| Semaphore::new(AUTH_PROBE_CONCURRENCY)),
+        AUTH_PROBE_QUEUE_TIMEOUT,
+        AUTH_PROBE_TIMEOUT,
+        async {
+            // Discovery runs `aws --version`. Share it within a refresh, but never
+            // across refreshes where an installed tool may have changed.
+            let Some(executable) = executable
+                .get_or_init(|| cli_tools::effective_binary_for(CliToolId::Aws))
+                .await
+            else {
+                return AwsAuthStatus::CliMissing;
+            };
+            let mut command = tokio::process::Command::new(executable);
+            command
+                .args([
+                    "sts",
+                    "get-caller-identity",
+                    "--profile",
+                    profile_name,
+                    "--output",
+                    "json",
+                ])
+                .env_clear();
+            for key in PROBE_ENV_KEYS {
+                if let Some(value) = std::env::var_os(key) {
+                    command.env(key, value);
+                }
+            }
+            match command.kill_on_drop(true).output().await {
+                Ok(output) if output.status.success() => classify_probe_success(&output.stdout),
+                Ok(output) => classify_probe_failure(&String::from_utf8_lossy(&output.stderr)),
+                Err(err) => AwsAuthStatus::Unknown {
+                    message: format!("could not run auth check: {err}"),
+                },
+            }
+        },
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -1418,10 +1480,12 @@ async fn discover_with(
 pub async fn list_profile_statuses() -> Result<Vec<AwsSsoProfileStatus>, AwsSsoError> {
     let content = read_config(&aws_config_path())?;
     let profiles = list_profile_entries_in(&content)?;
-    let statuses = futures::future::join_all(
+    let executable = OnceCell::new();
+    let statuses = collect_auth_probes(
         profiles
             .iter()
-            .map(|(profile, _, _)| async { probe_profile_auth(&profile.name).await }),
+            .map(|(profile, _, _)| probe_profile_auth(&profile.name, &executable))
+            .collect::<Vec<_>>(),
     )
     .await;
     Ok(profiles
@@ -1436,6 +1500,21 @@ pub async fn list_profile_statuses() -> Result<Vec<AwsSsoProfileStatus>, AwsSsoE
             },
         )
         .collect())
+}
+
+/// Every configured profile name with its auth scope, without probing. Cheap
+/// enough to resolve a re-auth target before any work starts.
+pub fn profile_scopes() -> Result<Vec<(String, AwsSsoAuthScope)>, AwsSsoError> {
+    let content = read_config(&aws_config_path())?;
+    Ok(list_profile_entries_in(&content)?
+        .into_iter()
+        .map(|(profile, _, scope)| (profile.name, scope))
+        .collect())
+}
+
+/// The charset `login_command_for_session` accepts for a session name.
+pub fn validate_session_name(name: &str) -> Result<(), AwsSsoError> {
+    validate_charset("session name", name, 128, "_.@-")
 }
 
 pub fn list_sessions() -> Result<Vec<AwsSsoSession>, AwsSsoError> {
@@ -1480,7 +1559,7 @@ pub async fn profile_status(name: &str) -> Result<AwsSsoProfileStatus, AwsSsoErr
         .into_iter()
         .find(|(profile, _, _)| profile.name == name)
         .ok_or_else(|| AwsSsoError::NotFound(name.to_string()))?;
-    let auth = probe_profile_auth(name).await;
+    let auth = probe_profile_auth(name, &OnceCell::new()).await;
     Ok(AwsSsoProfileStatus {
         profile,
         auth,
@@ -1823,6 +1902,154 @@ sso_registration_scopes = sso:account:access codewhisperer:analysis
     fn default_is_a_valid_login_reference_but_not_writable() {
         assert!(validate_profile_name("default", true).is_ok());
         assert!(validate_profile_name("default", false).is_err());
+    }
+
+    #[test]
+    fn profile_status_future_is_send() {
+        // Axum handlers require Send. Keep borrowed iterator closures out of
+        // the buffered stream's state, without polling any futures eagerly.
+        fn assert_send<T: Send>(_: T) {}
+        assert_send(list_profile_statuses());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn auth_probe_capacity_is_shared_across_overlapping_batches() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let capacity = Semaphore::new(AUTH_PROBE_CONCURRENCY);
+        let active = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+        let started = tokio::time::Instant::now();
+        let batch = |offset| {
+            let capacity = &capacity;
+            let active = &active;
+            let peak = &peak;
+            collect_auth_probes((0..31).map(move |index| {
+                async move {
+                    run_auth_probe(
+                        capacity,
+                        AUTH_PROBE_QUEUE_TIMEOUT,
+                        AUTH_PROBE_TIMEOUT,
+                        async {
+                            let count = active.fetch_add(1, Ordering::SeqCst) + 1;
+                            peak.fetch_max(count, Ordering::SeqCst);
+                            // Finish out of order to catch profile/result mismatches.
+                            tokio::time::sleep(Duration::from_millis(10_000 + (index % 3) * 20))
+                                .await;
+                            active.fetch_sub(1, Ordering::SeqCst);
+                            AwsAuthStatus::Authenticated {
+                                identity: format!("profile-{}", offset + index),
+                            }
+                        },
+                    )
+                    .await
+                }
+            }))
+        };
+        let (first, second) = tokio::join!(batch(0), batch(31));
+        // Total batch time exceeds the admission deadline. Every profile must
+        // still get checked, even when another refresh competes for capacity.
+        assert!(started.elapsed() > AUTH_PROBE_QUEUE_TIMEOUT);
+        for (index, status) in first.into_iter().chain(second).enumerate() {
+            assert_eq!(
+                status,
+                AwsAuthStatus::Authenticated {
+                    identity: format!("profile-{index}"),
+                }
+            );
+        }
+        assert_eq!(peak.load(Ordering::SeqCst), AUTH_PROBE_CONCURRENCY);
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert_eq!(capacity.available_permits(), AUTH_PROBE_CONCURRENCY);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn auth_probe_execution_budget_starts_after_admission() {
+        let capacity = Semaphore::new(0);
+        let probe = run_auth_probe(
+            &capacity,
+            AUTH_PROBE_QUEUE_TIMEOUT,
+            AUTH_PROBE_TIMEOUT,
+            async {
+                tokio::time::sleep(Duration::from_secs(14)).await;
+                AwsAuthStatus::Unauthenticated
+            },
+        );
+        let release = async {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            capacity.add_permits(1);
+        };
+        let (status, ()) = tokio::join!(probe, release);
+        assert_eq!(status, AwsAuthStatus::Unauthenticated);
+        assert_eq!(capacity.available_permits(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn auth_probe_queue_timeout_does_not_start_work() {
+        let capacity = Semaphore::new(0);
+        let status = run_auth_probe(
+            &capacity,
+            AUTH_PROBE_QUEUE_TIMEOUT,
+            AUTH_PROBE_TIMEOUT,
+            async { panic!("queued probe must not start without capacity") },
+        )
+        .await;
+        assert!(matches!(status, AwsAuthStatus::Unknown { message } if message.contains("busy")));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn auth_probe_execution_timeout_releases_capacity() {
+        let capacity = Semaphore::new(1);
+        let status = run_auth_probe(
+            &capacity,
+            AUTH_PROBE_QUEUE_TIMEOUT,
+            AUTH_PROBE_TIMEOUT,
+            std::future::pending(),
+        )
+        .await;
+        assert!(
+            matches!(status, AwsAuthStatus::Unknown { message } if message == "auth check timed out after 15 seconds")
+        );
+        assert_eq!(capacity.available_permits(), 1);
+        assert_eq!(
+            run_auth_probe(
+                &capacity,
+                AUTH_PROBE_QUEUE_TIMEOUT,
+                AUTH_PROBE_TIMEOUT,
+                async { AwsAuthStatus::CliMissing },
+            )
+            .await,
+            AwsAuthStatus::CliMissing
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelling_auth_probe_releases_capacity_and_drops_work() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct DropSignal(Arc<AtomicBool>);
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let capacity = Semaphore::new(1);
+        let dropped = Arc::new(AtomicBool::new(false));
+        let signal = DropSignal(dropped.clone());
+        let mut probe = Box::pin(run_auth_probe(
+            &capacity,
+            AUTH_PROBE_QUEUE_TIMEOUT,
+            AUTH_PROBE_TIMEOUT,
+            async move {
+                let _signal = signal;
+                std::future::pending().await
+            },
+        ));
+        assert!(futures::poll!(probe.as_mut()).is_pending());
+        assert_eq!(capacity.available_permits(), 0);
+        drop(probe);
+        assert!(dropped.load(Ordering::SeqCst));
+        assert_eq!(capacity.available_permits(), 1);
     }
 
     // -- probe classification ------------------------------------------------

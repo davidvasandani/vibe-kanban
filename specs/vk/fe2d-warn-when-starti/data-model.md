@@ -1,0 +1,3 @@
+# Data model and UI contract
+
+No persisted schema changes. Projection input: projectId, issueId, remote Workspace[], PullRequest[], local SidebarWorkspace[], current user ID. Output rows: remote id, name, nullable branch, nullable accessible local id, activity (creating/running/idle/unknown), hasOpenPr, hasChanges. Unknown local metadata stays unknown. Changes use available file-diff evidence and are described as changes, never unmerged commits. Active membership is remote archived=false and exact project/issue identity. Dismissal signature uses project + issue + sorted remote workspace IDs; enrichment does not re-open a dismissal.

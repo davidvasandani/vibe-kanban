@@ -16,7 +16,10 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tokio::process::Command;
+use tokio::{
+    process::Command,
+    sync::{Notify, RwLock},
+};
 use tokio_util::sync::CancellationToken;
 use ts_rs::TS;
 use workspace_utils::{
@@ -30,8 +33,8 @@ use workspace_utils::{
 
 use self::{
     client::{
-        AUTO_APPROVE_CALLBACK_ID, ClaudeAgentClient, DENY_SCHEDULE_WAKEUP_CALLBACK_ID,
-        STOP_GIT_CHECK_CALLBACK_ID,
+        AUTO_APPROVE_CALLBACK_ID, ClaudeAgentClient, DENY_BACKGROUND_BASH_CALLBACK_ID,
+        DENY_SCHEDULE_WAKEUP_CALLBACK_ID, STOP_GIT_CHECK_CALLBACK_ID,
     },
     protocol::ProtocolPeer,
     types::{ControlRequestType, ControlResponseType, PermissionMode},
@@ -54,6 +57,10 @@ use crate::{
             shell_command_parsing::CommandCategory,
         },
     },
+    mcp_refresh::{
+        McpRefreshControl, McpRefreshErrorCategory, McpRefreshHandle, McpServerRefreshSnapshot,
+        McpServerRefreshStatus, safe_executor_error,
+    },
     model_selector::PermissionPolicy,
     profile::ExecutorConfig,
     stdout_dup::create_stdout_pipe_writer,
@@ -61,12 +68,330 @@ use crate::{
 
 const SUPPRESSED_STDERR_PATTERNS: &[&str] = &["[WARN] Fast mode requires the native binary"];
 
+pub(crate) struct ClaudeMcpInventory {
+    servers: RwLock<Option<Vec<McpServerRefreshSnapshot>>>,
+    ready: Notify,
+    deadline: tokio::time::Instant,
+}
+
+impl Default for ClaudeMcpInventory {
+    fn default() -> Self {
+        Self {
+            servers: RwLock::new(None),
+            ready: Notify::new(),
+            deadline: tokio::time::Instant::now() + Duration::from_secs(30),
+        }
+    }
+}
+
+impl ClaudeMcpInventory {
+    pub(crate) async fn observe_tools(
+        &self,
+        tools: &[serde_json::Value],
+        mcp_servers: &[serde_json::Value],
+    ) {
+        let mut by_server: HashMap<String, Vec<String>> = HashMap::new();
+        let mut failed_servers = HashMap::new();
+        for server in mcp_servers {
+            let status = server.get("status").and_then(serde_json::Value::as_str);
+            if let Some(name) = server.get("name").and_then(serde_json::Value::as_str) {
+                if status.is_none_or(|status| status == "connected") {
+                    by_server.entry(name.to_string()).or_default();
+                } else {
+                    let category = if status.is_some_and(|status| status.contains("auth")) {
+                        McpRefreshErrorCategory::AuthenticationFailed
+                    } else {
+                        McpRefreshErrorCategory::InitializeFailed
+                    };
+                    failed_servers.insert(name.to_string(), category);
+                }
+            }
+        }
+        for tool in tools {
+            let name = tool
+                .as_str()
+                .or_else(|| tool.get("name").and_then(serde_json::Value::as_str));
+            let Some(name) = name.and_then(|name| name.strip_prefix("mcp__")) else {
+                continue;
+            };
+            let known_server = by_server
+                .keys()
+                .chain(failed_servers.keys())
+                .filter(|server_id| {
+                    name.strip_prefix(server_id.as_str())
+                        .is_some_and(|suffix| suffix.starts_with("__"))
+                })
+                .max_by_key(|server_id| server_id.len())
+                .cloned();
+            let server_id = known_server.or_else(|| {
+                name.split_once("__")
+                    .map(|(server_id, _)| server_id.to_string())
+            });
+            let Some(server_id) = server_id else {
+                continue;
+            };
+            by_server
+                .entry(server_id.clone())
+                .or_default()
+                .push(format!("mcp__{name}"));
+            failed_servers.remove(&server_id);
+        }
+        let mut servers: Vec<_> = by_server
+            .into_iter()
+            .map(|(server_id, mut tool_names)| {
+                tool_names.sort();
+                tool_names.dedup();
+                McpServerRefreshSnapshot {
+                    server_id,
+                    status: if tool_names.is_empty() {
+                        McpServerRefreshStatus::ConnectedNoTools
+                    } else {
+                        McpServerRefreshStatus::Ready
+                    },
+                    tool_count: Some(tool_names.len() as u32),
+                    tool_names: Some(tool_names),
+                    // Claude's init event provides names, not schemas.
+                    tool_schema_fingerprint: None,
+                    resource_count: None,
+                    prompt_count: None,
+                    restart_occurred: Some(true),
+                    discovery_attempts: 1,
+                    observed_errors: Vec::new(),
+                    first_observed_at: Some(chrono::Utc::now()),
+                    last_observed_at: Some(chrono::Utc::now()),
+                    terminal_at: Some(chrono::Utc::now()),
+                    error: None,
+                }
+            })
+            .collect();
+        let now = chrono::Utc::now();
+        servers.extend(failed_servers.into_iter().map(|(server_id, category)| {
+            McpServerRefreshSnapshot {
+                server_id,
+                status: McpServerRefreshStatus::FailedUnavailable,
+                tool_count: Some(0),
+                tool_names: Some(Vec::new()),
+                tool_schema_fingerprint: None,
+                resource_count: None,
+                prompt_count: None,
+                restart_occurred: Some(true),
+                discovery_attempts: 1,
+                observed_errors: vec![crate::mcp_refresh::McpDiscoveryObservation {
+                    code: category.clone(),
+                    observed_at: now,
+                }],
+                first_observed_at: Some(now),
+                last_observed_at: Some(now),
+                terminal_at: Some(now),
+                error: Some(safe_executor_error(category)),
+            }
+        }));
+        servers.sort_by(|a, b| a.server_id.cmp(&b.server_id));
+        *self.servers.write().await = Some(servers);
+        self.ready.notify_waiters();
+    }
+}
+
+#[async_trait]
+impl McpRefreshControl for ClaudeMcpInventory {
+    async fn queue_refresh(&self) -> Result<(), McpRefreshErrorCategory> {
+        Err(McpRefreshErrorCategory::Unsupported)
+    }
+
+    async fn list_servers(&self) -> Result<Vec<McpServerRefreshSnapshot>, McpRefreshErrorCategory> {
+        let wait = async {
+            loop {
+                let notified = self.ready.notified();
+                if let Some(servers) = self.servers.read().await.clone() {
+                    return servers;
+                }
+                notified.await;
+            }
+        };
+        tokio::time::timeout_at(self.deadline, wait)
+            .await
+            .map_err(|_| McpRefreshErrorCategory::Timeout)
+    }
+}
+
 fn base_command(claude_code_router: bool) -> &'static str {
     if claude_code_router {
         "npx -y @musistudio/claude-code-router@1.0.66 code"
     } else {
-        "npx -y @anthropic-ai/claude-code@2.1.200"
+        "npx -y @anthropic-ai/claude-code@2.1.281"
     }
+}
+
+/// Extra CLI arguments that stop a project `.mcp.json` from shadowing a
+/// deployment-routed MCP server VK already provides.
+///
+/// A project entry pointing at the routed public URL calls it without the
+/// credentials the loopback route injects, so Claude Code reports it as failed
+/// (the misleading `vibe-kanban (CLIENT_HTTP_UNEXPECTED_CONTENT)` notice); one
+/// sharing the managed entry's name replaces the working entry entirely.
+/// `disabledMcpjsonServers` drops exactly those project entries and leaves the
+/// user-scope entry VK materialized in charge.
+///
+/// A profile that already passes `--settings` keeps its own settings: Claude
+/// Code honours one, and VK does not second-guess an explicit override.
+fn project_mcp_suppression_args(
+    args: &[String],
+    current_dir: &Path,
+    is_routed: impl Fn(&str) -> bool,
+) -> Option<Vec<String>> {
+    // Claude Code loads `.mcp.json` from the launch directory *and* every
+    // ancestor, so a workspace launched in a repo subdirectory (a nested
+    // `default_working_dir`) still sees the repository root's entries.
+    let mut names = Vec::new();
+    for dir in current_dir.ancestors() {
+        let path = dir.join(".mcp.json");
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(error) => {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    tracing::debug!("Could not read {}: {error}", path.display());
+                }
+                continue;
+            }
+        };
+        let Ok(mcp_json) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            tracing::debug!("Ignoring unparseable {}", path.display());
+            continue;
+        };
+        names.extend(crate::mcp_config::shadowed_project_mcp_servers(
+            &mcp_json, &is_routed,
+        ));
+    }
+    names.sort();
+    names.dedup();
+    if names.is_empty() {
+        return None;
+    }
+    if args
+        .iter()
+        .any(|arg| arg == "--settings" || arg.starts_with("--settings="))
+    {
+        tracing::warn!(
+            "Project .mcp.json entries {names:?} duplicate a deployment-routed MCP server, but \
+             the Claude profile already passes --settings; leaving them enabled"
+        );
+        return None;
+    }
+    tracing::info!(
+        "Disabling project .mcp.json entries {names:?}: they duplicate a deployment-routed MCP \
+         server VK already provides"
+    );
+    Some(vec![
+        "--settings".to_string(),
+        serde_json::json!({ "disabledMcpjsonServers": names }).to_string(),
+    ])
+}
+
+/// Route keys of the deployment-routed servers present in the launched
+/// agent's user-scope config (`$HOME/.claude.json`, with the execution's
+/// scoped `HOME` when it has one).
+fn managed_routed_servers(
+    env: &ExecutionEnv,
+    route_key: impl Fn(&str) -> Option<String>,
+) -> std::collections::BTreeSet<String> {
+    let config = env
+        .get("HOME")
+        .map(PathBuf::from)
+        .or_else(dirs::home_dir)
+        .map(|home| home.join(".claude.json"))
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+    config
+        .map(|config| crate::mcp_config::routed_mcp_server_keys(&config, route_key))
+        .unwrap_or_default()
+}
+
+/// Environment variable naming the default per-command `Bash` timeout.
+pub const BASH_DEFAULT_TIMEOUT_MS_VAR: &str = "BASH_DEFAULT_TIMEOUT_MS";
+/// Environment variable naming the maximum per-command `Bash` timeout.
+pub const BASH_MAX_TIMEOUT_MS_VAR: &str = "BASH_MAX_TIMEOUT_MS";
+
+/// How long a single foreground command may block a turn before the CLI stops
+/// waiting on it.
+///
+/// These are the values the pinned CLI already uses; VK states them explicitly
+/// so they become *ours*. `@anthropic-ai/claude-code` is a `needs-review`
+/// Renovate carve-out, and a bump that moved the vendor defaults would
+/// otherwise silently widen the bound with nothing to notice it.
+///
+/// They are deliberately **not** tightened: `cargo test --workspace` and
+/// `pnpm install --frozen-lockfile` on this repository are ordinary foreground
+/// commands that routinely exceed five minutes, so a shorter cap would break
+/// real work. The control against an unbounded *wait* is
+/// [`is_unbounded_wait_command`][client::is_unbounded_wait_command], which
+/// refuses the loop at admission instead of waiting for a deadline.
+///
+/// # Verification source (Constitution IX)
+///
+/// Read from the native binary in `@anthropic-ai/claude-code-linux-x64`, the
+/// platform package behind the `@anthropic-ai/claude-code@2.1.281` pin in
+/// [`base_command`] — not from documentation or a type-definition file:
+///
+/// ```text
+/// var p = 120000, d = 600000;
+/// function Awe(e = process.env) {   // effective default
+///   let t = e.BASH_DEFAULT_TIMEOUT_MS;
+///   if (t) { let o = gc(t); if (!isNaN(o) && o > 0) return o } return p }
+/// function Cwe(e = process.env) {   // effective maximum
+///   let t = e.BASH_MAX_TIMEOUT_MS;
+///   if (t) { let o = gc(t); if (!isNaN(o) && o > 0) return Math.max(o, Awe(e)) }
+///   return Math.max(d, Awe(e)) }
+/// ```
+///
+/// Two consequences encoded here, both silent if got wrong:
+///
+/// - A non-numeric or non-positive value is **ignored** and the built-in
+///   default applies, so these must serialize as plain positive integers.
+/// - The maximum is clamped to `max(requested, effective_default)`. Lowering
+///   [`BASH_MAX_TIMEOUT_MS`] below [`BASH_DEFAULT_TIMEOUT_MS`] therefore does
+///   nothing at all. `bash_timeout_values_are_consistent` pins that ordering.
+///
+/// Re-verify against the binary when the pin moves. See
+/// `specs/vk/603d-prevent-stuck-jo/research.md`.
+pub const BASH_DEFAULT_TIMEOUT_MS: u64 = 120_000;
+/// See [`BASH_DEFAULT_TIMEOUT_MS`]. Must stay `>=` it to have any effect.
+pub const BASH_MAX_TIMEOUT_MS: u64 = 600_000;
+
+// The CLI computes the effective maximum as `max(BASH_MAX_TIMEOUT_MS,
+// effective_default)`, so a maximum below the default is discarded without any
+// error and the control simply would not exist. Enforced at compile time rather
+// than in a test: the failure mode is a silently inert guard, and that deserves
+// to break the build.
+const _: () = assert!(
+    BASH_MAX_TIMEOUT_MS >= BASH_DEFAULT_TIMEOUT_MS,
+    "BASH_MAX_TIMEOUT_MS below BASH_DEFAULT_TIMEOUT_MS is silently ignored by the CLI, \
+     which clamps the maximum to at least the effective default — lower the default too"
+);
+
+/// The per-command timeout variables VK seeds onto the Claude child process,
+/// minus any the caller has already set.
+///
+/// `is_set` reports whether a variable is already present in the environment
+/// the child would otherwise inherit. Seeding is a **default**, so an existing
+/// value always wins: a child `Command` inherits the VK server's own
+/// environment, and an unconditional `.env()` would override a
+/// `BASH_MAX_TIMEOUT_MS` an operator had exported for the service — silently
+/// narrowing a deliberately widened bound. `ExecutionEnv` is built from
+/// organisation variables and VK context, not from `std::env`, so it does not
+/// cover that case on its own.
+///
+/// Split out from `spawn_internal` so the values, spellings and this precedence
+/// rule are unit testable; asserting against a constructed `Command` builder
+/// chain is not practical.
+pub fn bash_timeout_env(is_set: impl Fn(&str) -> bool) -> Vec<(&'static str, String)> {
+    [
+        (BASH_DEFAULT_TIMEOUT_MS_VAR, BASH_DEFAULT_TIMEOUT_MS),
+        (BASH_MAX_TIMEOUT_MS_VAR, BASH_MAX_TIMEOUT_MS),
+    ]
+    .into_iter()
+    .filter(|(key, _)| !is_set(key))
+    .map(|(key, value)| (key, value.to_string()))
+    .collect()
 }
 
 fn normalize_claude_stderr_logs(
@@ -125,6 +450,82 @@ pub enum ClaudeEffort {
 const SCHEDULE_WAKEUP_TOOL: &str = "ScheduleWakeup";
 /// Anchored regex matching exactly [`SCHEDULE_WAKEUP_TOOL`] for PreToolUse hooks.
 const SCHEDULE_WAKEUP_MATCHER: &str = "^ScheduleWakeup$";
+
+/// Claude Code harness tools for driving an *in-turn* background poller:
+/// starting a long-running watch, reading a background task's output, and
+/// killing it. Disallowed under VK for the same reason as
+/// [`SCHEDULE_WAKEUP_TOOL`] — a VK turn is one OS process group that is reaped
+/// at turn end (`wiki/agent-process-lifecycle.md`), so anything the agent
+/// backgrounds inside the turn dies with it. The supported replacement is the
+/// `spawn_poller` MCP tool, which runs the command in a surviving process
+/// group.
+///
+/// Both the canonical names and their aliases are listed. The harness
+/// normalizes aliases to canonical names before matching permission rules, so
+/// listing the canonical name alone would already suffice; the aliases are
+/// defence-in-depth in case that normalization changes, and they are free.
+///
+/// # Verification source (Constitution IX)
+///
+/// These are **wire tool names**, read out of the native binary shipped in
+/// `@anthropic-ai/claude-code-linux-x64@2.1.268` — the platform package behind
+/// the historical `@anthropic-ai/claude-code@2.1.268` pin. The wrapper's
+/// `sdk-tools.d.ts` lists JSON-Schema *titles* (`FileReadInput`,
+/// `FileEditInput`, …), **not** wire tool names (`Read`, `Edit`, …). A deny list
+/// derived from that file would name tools that do not exist and would silently
+/// match nothing. The alias→canonical table was read from the binary's own
+/// alias map. See
+/// `specs/vk/869c-vk-background-po/research.md`.
+///
+/// Because `@anthropic-ai/claude-code` is a `needs-review` Renovate carve-out,
+/// re-verify these names against the binary when the pin moves. All names were
+/// rechecked in the 2.1.281 native artifact; see `specs/opus-5-5-verification.md`.
+///
+/// **This list is not sufficient on its own.** `TaskOutput` is marked
+/// deprecated in-binary in favour of `Read` on the background task's output
+/// file path, and `Read` cannot be denied. The load-bearing control is
+/// therefore the parameter-level `PreToolUse` deny on `Bash` with
+/// `run_in_background: true` — see
+/// [`DENY_BACKGROUND_BASH_CALLBACK_ID`][client::DENY_BACKGROUND_BASH_CALLBACK_ID].
+const BACKGROUND_POLLER_TOOLS: &[&str] = &[
+    // Canonical names confirmed in-binary.
+    "Monitor",
+    "TaskOutput",
+    "TaskStop",
+    "CronCreate",
+    "CronDelete",
+    "CronList",
+    // Aliases the harness normalizes onto `TaskOutput` / `TaskStop`.
+    "BashOutput",
+    "BashOutputTool",
+    "AgentOutput",
+    "AgentOutputTool",
+    "KillShell",
+    "KillBash",
+];
+
+/// Anchored regex matching exactly the `Bash` tool for PreToolUse hooks. The
+/// hook fires on every `Bash` call; the callback denies only the ones that ask
+/// for a background spawn.
+const BACKGROUND_BASH_MATCHER: &str = "^Bash$";
+
+/// Builds a PreToolUse catch-all matcher (a negative lookahead) that excludes
+/// `mode_specific` names plus **every tool VK denies or disallows by name**, so
+/// a deny decision can never be overridden by a catch-all approve/ask hook.
+///
+/// Deriving the exclusions from [`SCHEDULE_WAKEUP_TOOL`] and
+/// [`BACKGROUND_POLLER_TOOLS`] rather than hand-writing them keeps the two
+/// lists from drifting apart when a name is added.
+fn catch_all_matcher_excluding(mode_specific: &[&str]) -> String {
+    let excluded = mode_specific
+        .iter()
+        .copied()
+        .chain(std::iter::once(SCHEDULE_WAKEUP_TOOL))
+        .chain(BACKGROUND_POLLER_TOOLS.iter().copied())
+        .collect::<Vec<_>>()
+        .join("|");
+    format!("^(?!({excluded})$).*")
+}
 
 #[derive(Derivative, Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[derivative(Debug, PartialEq)]
@@ -190,6 +591,16 @@ impl ClaudeCode {
         // PreToolUse deny hook in `get_hooks` is the belt-and-suspenders that
         // returns an actionable error if the CLI still surfaces the tool.
         builder = builder.extend_params([format!("--disallowedTools={SCHEDULE_WAKEUP_TOOL}")]);
+        // Same treatment, same reasoning, for the harness's in-turn
+        // background-poller tooling: VK reaps the turn's process group at turn
+        // end, so a poller driven from inside the turn cannot outlive it. Note
+        // this layer is *not* the enforcement point — see
+        // `BACKGROUND_POLLER_TOOLS` — it only removes the ergonomic path; the
+        // `^Bash$` PreToolUse hook below closes the real one.
+        builder = builder.extend_params([format!(
+            "--disallowedTools={}",
+            BACKGROUND_POLLER_TOOLS.join(",")
+        )]);
         if self.dangerously_skip_permissions.unwrap_or(false) {
             builder = builder.extend_params(["--dangerously-skip-permissions"]);
         }
@@ -238,7 +649,14 @@ impl ClaudeCode {
         // Add PreToolUse hooks based on plan/approvals settings. `ScheduleWakeup`
         // is denied first in every mode (VAS-283) and excluded from the
         // catch-all approve/ask matchers so the deny decision is unambiguous
-        // regardless of hook precedence.
+        // regardless of hook precedence. The background-`Bash` deny is
+        // registered next, in every mode, for the same reason.
+        //
+        // `Bash` is deliberately *not* excluded from the catch-all matchers:
+        // unlike the tool-name denials this rule is conditional on
+        // `run_in_background`, so foreground `Bash` must keep reaching its
+        // mode's normal approve/ask path. `deny` wins over a catch-all `allow`
+        // when both hooks match, which is exactly the behaviour we want.
         if self.plan.unwrap_or(false) {
             hooks.insert(
                 "PreToolUse".to_string(),
@@ -248,11 +666,15 @@ impl ClaudeCode {
                         "hookCallbackIds": [DENY_SCHEDULE_WAKEUP_CALLBACK_ID],
                     },
                     {
+                        "matcher": BACKGROUND_BASH_MATCHER,
+                        "hookCallbackIds": [DENY_BACKGROUND_BASH_CALLBACK_ID],
+                    },
+                    {
                         "matcher": "^(ExitPlanMode|AskUserQuestion)$",
                         "hookCallbackIds": ["tool_approval"],
                     },
                     {
-                        "matcher": "^(?!(ExitPlanMode|AskUserQuestion|ScheduleWakeup)$).*",
+                        "matcher": catch_all_matcher_excluding(&["ExitPlanMode", "AskUserQuestion"]),
                         "hookCallbackIds": [AUTO_APPROVE_CALLBACK_ID],
                     }
                 ]),
@@ -266,7 +688,18 @@ impl ClaudeCode {
                         "hookCallbackIds": [DENY_SCHEDULE_WAKEUP_CALLBACK_ID],
                     },
                     {
-                        "matcher": "^(?!(Glob|Grep|NotebookRead|Read|Task|TodoWrite|ScheduleWakeup)$).*",
+                        "matcher": BACKGROUND_BASH_MATCHER,
+                        "hookCallbackIds": [DENY_BACKGROUND_BASH_CALLBACK_ID],
+                    },
+                    {
+                        "matcher": catch_all_matcher_excluding(&[
+                            "Glob",
+                            "Grep",
+                            "NotebookRead",
+                            "Read",
+                            "Task",
+                            "TodoWrite",
+                        ]),
                         "hookCallbackIds": ["tool_approval"],
                     }
                 ]),
@@ -278,6 +711,10 @@ impl ClaudeCode {
                     {
                         "matcher": SCHEDULE_WAKEUP_MATCHER,
                         "hookCallbackIds": [DENY_SCHEDULE_WAKEUP_CALLBACK_ID],
+                    },
+                    {
+                        "matcher": BACKGROUND_BASH_MATCHER,
+                        "hookCallbackIds": [DENY_BACKGROUND_BASH_CALLBACK_ID],
                     },
                     {
                         "matcher": "^AskUserQuestion$",
@@ -310,14 +747,15 @@ fn default_discovered_options() -> crate::executor_discovery::ExecutorDiscovered
     ExecutorDiscoveredOptions {
         model_selector: ModelSelectorConfig {
             providers: vec![],
+            // Explicit, versioned IDs only: aliases such as `opus` move with CLI
+            // releases, so the picker would not say which model actually runs.
+            // Saved profiles that still name an alias keep launching with it.
             models: [
-                ("opus", "Opus"),
-                ("opus[1m]", "Opus (1M context)"),
+                ("claude-opus-5-5", "Opus 5.5"),
                 ("claude-opus-5", "Opus 5"),
                 ("claude-sonnet-5", "Sonnet 5"),
-                ("sonnet", "Sonnet"),
-                ("fable", "Fable"),
-                ("haiku", "Haiku"),
+                ("claude-fable-5-1", "Fable 5.1"),
+                ("claude-haiku-4-5", "Haiku 4.5"),
             ]
             .into_iter()
             .map(|(id, name)| ModelInfo {
@@ -331,7 +769,19 @@ fn default_discovered_options() -> crate::executor_discovery::ExecutorDiscovered
                 },
             })
             .collect(),
-            default_model: Some("opus".to_string()),
+            default_model: Some("claude-opus-5-5".to_string()),
+            // What each alias resolves to in the pinned CLI (2.1.281). Saved
+            // profiles keep sending the alias; the picker shows the model it runs.
+            model_aliases: [
+                ("opus", "claude-opus-5-5"),
+                ("opus[1m]", "claude-opus-5-5"),
+                ("sonnet", "claude-sonnet-5"),
+                ("fable", "claude-fable-5-1"),
+                ("haiku", "claude-haiku-4-5"),
+            ]
+            .into_iter()
+            .map(|(alias, id)| (alias.to_string(), id.to_string()))
+            .collect(),
             agents: vec![],
             permissions: vec![
                 PermissionPolicy::Auto,
@@ -389,7 +839,7 @@ impl StandardCodingAgentExecutor for ClaudeCode {
     ) -> Result<SpawnedChild, ExecutorError> {
         let command_builder = self.build_command_builder().await?;
         let command_parts = command_builder.build_initial()?;
-        self.spawn_internal(current_dir, prompt, command_parts, env)
+        self.spawn_internal(current_dir, prompt, command_parts, env, None)
             .await
     }
 
@@ -403,18 +853,42 @@ impl StandardCodingAgentExecutor for ClaudeCode {
     ) -> Result<SpawnedChild, ExecutorError> {
         let command_builder = self.build_command_builder().await?;
 
-        let mut args = vec!["--resume".to_string(), session_id.to_string()];
+        let vars = env.clone().with_profile(&self.cmd).vars;
+        let config_dir = claude_config_dir(&vars, |key| std::env::var(key).ok());
+        let status = config_dir
+            .as_deref()
+            .map_or(TranscriptStatus::Unknown, |dir| {
+                claude_transcript_status(dir, session_id)
+            });
 
-        // --resume-session-at truncates Claude's conversation history to the specified
-        // message and continues from there.
-        if let Some(uuid) = reset_to_message_id {
-            args.push("--resume-session-at".to_string());
-            args.push(uuid.to_string());
+        match follow_up_start(status, session_id, reset_to_message_id) {
+            FollowUpStart::Resume(args) => {
+                let command_parts = command_builder.build_follow_up(&args)?;
+                self.spawn_internal(current_dir, prompt, command_parts, env, None)
+                    .await
+            }
+            FollowUpStart::Fresh => {
+                // The transcript is gone (vendor retention cleanup, host move or
+                // manual deletion), so `--resume` would fail on every follow-up.
+                // Start a new conversation in the same workspace and say so
+                // (constitution XLVI).
+                tracing::warn!(
+                    missing_session_id = %session_id,
+                    config_dir = ?config_dir,
+                    "Claude transcript missing; starting a new conversation in the same workspace"
+                );
+                let command_parts = command_builder.build_initial()?;
+                let prompt = format!("{MISSING_TRANSCRIPT_AGENT_NOTICE}\n\n{prompt}");
+                self.spawn_internal(
+                    current_dir,
+                    &prompt,
+                    command_parts,
+                    env,
+                    Some(missing_transcript_user_notice(session_id)),
+                )
+                .await
+            }
         }
-
-        let command_parts = command_builder.build_follow_up(&args)?;
-        self.spawn_internal(current_dir, prompt, command_parts, env)
-            .await
     }
 
     fn normalize_logs(
@@ -660,8 +1134,22 @@ impl ClaudeCode {
         prompt: &str,
         command_parts: CommandParts,
         env: &ExecutionEnv,
+        startup_notice: Option<String>,
     ) -> Result<SpawnedChild, ExecutorError> {
-        let (program_path, args) = command_parts.into_resolved().await?;
+        let (program_path, mut args) = command_parts.into_resolved().await?;
+        // Only suppress a project entry when the launched agent's own user
+        // config has a managed replacement on the same route; otherwise the
+        // project entry may be the session's only connection to it.
+        let managed_routes = managed_routed_servers(
+            &env.clone().with_profile(&self.cmd),
+            crate::mcp_config::runtime_route_key,
+        );
+        if let Some(extra) = project_mcp_suppression_args(&args, current_dir, |url| {
+            crate::mcp_config::runtime_route_key(url)
+                .is_some_and(|key| managed_routes.contains(&key))
+        }) {
+            args.extend(extra);
+        }
         let combined_prompt = self.append_prompt.combine_prompt(prompt);
 
         let mut command = Command::new(program_path);
@@ -674,6 +1162,16 @@ impl ClaudeCode {
             .env("NPM_CONFIG_LOGLEVEL", "error")
             .args(&args);
 
+        // Bound how long one foreground command can block the turn. These stay
+        // *defaults* on both sides: variables already exported to the VK
+        // service are left alone (the child inherits them), and seeding happens
+        // *before* `apply_to_command` so a profile or org variable of the same
+        // name is applied after and wins. Same precedence `NPM_CONFIG_LOGLEVEL`
+        // already has.
+        for (key, value) in bash_timeout_env(|key| std::env::var_os(key).is_some()) {
+            command.env(key, value);
+        }
+
         env.clone()
             .with_profile(&self.cmd)
             .apply_to_command(&mut command);
@@ -685,6 +1183,9 @@ impl ClaudeCode {
         }
 
         let mut child = command.group_spawn_no_window()?;
+        if let Some(notice) = startup_notice {
+            crate::stdout_dup::prepend_child_stderr(&mut child, notice)?;
+        }
         let child_stdout = child.inner().stdout.take().ok_or_else(|| {
             ExecutorError::Io(std::io::Error::other("Claude Code missing stdout"))
         })?;
@@ -706,6 +1207,9 @@ impl ClaudeCode {
         let repo_context = env.repo_context.clone();
         let commit_reminder_prompt = env.commit_reminder_prompt.clone();
         let cancel_for_task = cancel.clone();
+        let mcp_inventory = Arc::new(ClaudeMcpInventory::default());
+        let (mcp_refresh_tx, mcp_refresh_rx) = tokio::sync::oneshot::channel();
+        let _ = mcp_refresh_tx.send(McpRefreshHandle(mcp_inventory.clone()));
         tokio::spawn(async move {
             let log_writer = LogWriter::new(new_stdout);
             let client = ClaudeAgentClient::new(
@@ -714,6 +1218,7 @@ impl ClaudeCode {
                 repo_context,
                 commit_reminder_prompt,
                 cancel_for_task.clone(),
+                mcp_inventory,
             );
             let protocol_peer =
                 ProtocolPeer::spawn(child_stdin, child_stdout, client.clone(), cancel_for_task);
@@ -746,9 +1251,127 @@ impl ClaudeCode {
             cancel: Some(cancel),
             keep_warm: false,
             warm_reuse: None,
-            mcp_refresh: None,
+            mcp_refresh: Some(mcp_refresh_rx),
         })
     }
+}
+
+/// Shown to the agent ahead of the user's message when its earlier Claude
+/// transcript could not be found.
+const MISSING_TRANSCRIPT_AGENT_NOTICE: &str = "[Vibe Kanban] Your earlier conversation in this \
+workspace could not be restored: its Claude Code transcript no longer exists. This is a new \
+conversation. Before continuing, check the workspace's files, git status and git log for the \
+work already done, and don't assume anything beyond what you can find there.";
+
+/// Shown to the user (on stderr, never agent stdout) when a follow-up starts
+/// fresh because the requested transcript is gone.
+fn missing_transcript_user_notice(session_id: &str) -> String {
+    format!(
+        "Vibe Kanban: Claude Code no longer has the transcript for session {session_id} \
+(it was removed, e.g. by Claude's transcript cleanup). Started a new Claude conversation in \
+this workspace; the agent does not remember the earlier conversation."
+    )
+}
+
+/// Whether Claude's private transcript for a session exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TranscriptStatus {
+    Present,
+    /// The projects folder was read and no project holds the transcript.
+    Missing,
+    /// The check could not be done; callers must behave as if it were present.
+    Unknown,
+}
+
+/// Claude's config root as the launched child will see it: non-empty
+/// `CLAUDE_CONFIG_DIR`, else `$HOME/.claude`. Each variable comes from the
+/// execution env (including a worker's scoped `HOME`) before the process env.
+/// A relative value would resolve against the child's working directory, not
+/// ours, so it yields `None` rather than a path we cannot vouch for.
+fn claude_config_dir(
+    vars: &HashMap<String, String>,
+    process_env: impl Fn(&str) -> Option<String>,
+) -> Option<PathBuf> {
+    let lookup = |key: &str| {
+        vars.get(key)
+            .cloned()
+            .or_else(|| process_env(key))
+            .filter(|value| !value.is_empty())
+    };
+    let dir = match lookup("CLAUDE_CONFIG_DIR") {
+        Some(dir) => PathBuf::from(dir),
+        None => PathBuf::from(lookup("HOME")?).join(".claude"),
+    };
+    dir.is_absolute().then_some(dir)
+}
+
+/// Look for `<session_id>.jsonl` in every `projects/*` folder. Claude Code
+/// 2.1.281 resolves `--resume <id>` across all project folders, not only the
+/// cwd's (verified against the pinned binary; see
+/// `specs/vk/9f5d-no-conversation/research.md`). Fails open: anything that
+/// prevents a definite answer is `Unknown`.
+fn claude_transcript_status(config_dir: &Path, session_id: &str) -> TranscriptStatus {
+    let safe_segment = !session_id.is_empty()
+        && session_id != "."
+        && session_id != ".."
+        && !session_id.contains(['/', '\\', '\0']);
+    if !safe_segment {
+        return TranscriptStatus::Unknown;
+    }
+    let Ok(entries) = std::fs::read_dir(config_dir.join("projects")) else {
+        return TranscriptStatus::Unknown;
+    };
+    let file_name = format!("{session_id}.jsonl");
+    // Only a clean "not there" in every project counts as missing; any other
+    // error leaves the answer unknown unless another project has the file.
+    let mut inconclusive = false;
+    for entry in entries {
+        let Ok(entry) = entry else {
+            inconclusive = true;
+            continue;
+        };
+        match std::fs::metadata(entry.path().join(&file_name)) {
+            Ok(metadata) if metadata.is_file() => return TranscriptStatus::Present,
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) => {}
+            Err(_) => inconclusive = true,
+        }
+    }
+    if inconclusive {
+        TranscriptStatus::Unknown
+    } else {
+        TranscriptStatus::Missing
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum FollowUpStart {
+    /// Follow-up arguments for `--resume`.
+    Resume(Vec<String>),
+    /// Start a new conversation; the requested one cannot be resumed.
+    Fresh,
+}
+
+fn follow_up_start(
+    status: TranscriptStatus,
+    session_id: &str,
+    reset_to_message_id: Option<&str>,
+) -> FollowUpStart {
+    if status == TranscriptStatus::Missing {
+        return FollowUpStart::Fresh;
+    }
+    let mut args = vec!["--resume".to_string(), session_id.to_string()];
+    // --resume-session-at truncates Claude's conversation history to the specified
+    // message and continues from there.
+    if let Some(uuid) = reset_to_message_id {
+        args.push("--resume-session-at".to_string());
+        args.push(uuid.to_string());
+    }
+    FollowUpStart::Resume(args)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -768,12 +1391,23 @@ const CLAUDE_1M_CONTEXT_WINDOW: u32 = 1_000_000;
 
 /// Infer a model's max context window from its name or alias.
 ///
-/// Different models have different max contexts. Opus 5 has a 1M-token context
-/// by default; older models requesting the 1M-token context beta carry a `[1m]`
+/// Different models have different max contexts. The current Opus, Sonnet, and
+/// Fable aliases and their explicit catalog models have a 1M-token context by
+/// default; older models requesting the 1M-token context beta carry a `[1m]`
 /// suffix (e.g. `opus[1m]`). We rely on the configured/reported model string
 /// because the end-of-turn usage report is only available once a turn finishes.
 fn context_window_for_model(model: &str) -> u32 {
-    if model == "claude-opus-5" || model.contains("[1m]") {
+    if matches!(
+        model,
+        "opus"
+            | "sonnet"
+            | "fable"
+            | "claude-opus-5-5"
+            | "claude-opus-5"
+            | "claude-sonnet-5"
+            | "claude-fable-5-1"
+    ) || model.contains("[1m]")
+    {
         CLAUDE_1M_CONTEXT_WINDOW
     } else {
         DEFAULT_CLAUDE_CONTEXT_WINDOW
@@ -1151,6 +1785,7 @@ impl ClaudeLogProcessor {
             ClaudeJson::ControlResponse { .. } => None,
             ClaudeJson::ControlCancelRequest { .. } => None,
             ClaudeJson::RateLimitEvent { session_id, .. } => session_id.clone(),
+            ClaudeJson::ToolProgress { session_id, .. } => session_id.clone(),
             ClaudeJson::Unknown { .. } => None,
         }
     }
@@ -2241,7 +2876,8 @@ impl ClaudeLogProcessor {
             ClaudeJson::ControlRequest { .. }
             | ClaudeJson::ControlResponse { .. }
             | ClaudeJson::ControlCancelRequest { .. }
-            | ClaudeJson::RateLimitEvent { .. } => {}
+            | ClaudeJson::RateLimitEvent { .. }
+            | ClaudeJson::ToolProgress { .. } => {}
         }
         patches
     }
@@ -2561,6 +3197,8 @@ pub enum ClaudeJson {
         session_id: Option<String>,
         cwd: Option<String>,
         tools: Option<Vec<serde_json::Value>>,
+        #[serde(default)]
+        mcp_servers: Vec<serde_json::Value>,
         model: Option<String>,
         #[serde(default, rename = "apiKeySource")]
         api_key_source: Option<String>,
@@ -2673,6 +3311,29 @@ pub enum ClaudeJson {
         session_id: Option<String>,
         #[serde(default)]
         rate_limit_info: Option<serde_json::Value>,
+    },
+    /// Heartbeat emitted periodically while a long-running tool is in flight.
+    /// Purely informational — carries no result data; the tool's real
+    /// `tool_result` still arrives separately. Silently ignored.
+    ToolProgress {
+        #[serde(default)]
+        tool_use_id: Option<String>,
+        #[serde(default)]
+        tool_name: Option<String>,
+        #[serde(default)]
+        parent_tool_use_id: Option<String>,
+        #[serde(default)]
+        elapsed_time_seconds: Option<f64>,
+        #[serde(default)]
+        heartbeat: Option<bool>,
+        #[serde(default)]
+        session_id: Option<String>,
+        #[serde(default)]
+        uuid: Option<String>,
+        #[serde(default)]
+        task_id: Option<String>,
+        #[serde(default)]
+        subagent_type: Option<String>,
     },
     // Catch-all for unknown message types
     #[serde(untagged)]
@@ -3054,7 +3715,128 @@ impl ClaudeToolData {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::logs::utils::{EntryIndexProvider, patch::extract_normalized_entry_from_patch};
+    use crate::{
+        env::RepoContext,
+        logs::utils::{EntryIndexProvider, patch::extract_normalized_entry_from_patch},
+    };
+
+    fn write_mcp_json(dir: &Path, value: serde_json::Value) {
+        std::fs::write(dir.join(".mcp.json"), value.to_string()).unwrap();
+    }
+
+    fn routed(url: &str) -> bool {
+        url == "https://vibe.vasandani.dev/mcp"
+    }
+
+    #[test]
+    fn project_duplicate_of_routed_server_is_disabled_via_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        write_mcp_json(
+            dir.path(),
+            serde_json::json!({"mcpServers": {
+                "vibe-kanban": {"type": "http", "url": "https://vibe.vasandani.dev/mcp"},
+                "fetch": {"command": "uvx"}
+            }}),
+        );
+        let args = vec!["-p".to_string(), "--verbose".to_string()];
+        let extra = project_mcp_suppression_args(&args, dir.path(), routed).unwrap();
+        assert_eq!(extra[0], "--settings");
+        let settings: serde_json::Value = serde_json::from_str(&extra[1]).unwrap();
+        assert_eq!(
+            settings,
+            serde_json::json!({"disabledMcpjsonServers": ["vibe-kanban"]})
+        );
+    }
+
+    #[test]
+    fn managed_routes_are_read_from_the_executions_scoped_home() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join(".claude.json"),
+            serde_json::json!({"mcpServers": {
+                "vibe_kanban": {"type": "http", "url": "http://127.0.0.1:18901/mcp"}
+            }})
+            .to_string(),
+        )
+        .unwrap();
+        let mut env = ExecutionEnv::new(RepoContext::default(), false, String::new());
+        env.insert("HOME", home.path().to_string_lossy());
+        let route_key = |url: &str| {
+            (url == "http://127.0.0.1:18901/mcp" || url == "https://vibe.vasandani.dev/mcp")
+                .then(|| "https://vibe.vasandani.dev/mcp".to_string())
+        };
+        assert_eq!(
+            managed_routed_servers(&env, route_key)
+                .into_iter()
+                .collect::<Vec<_>>(),
+            vec!["https://vibe.vasandani.dev/mcp".to_string()]
+        );
+
+        // An unreadable scoped home yields no managed routes, so nothing is
+        // suppressed.
+        let mut missing = ExecutionEnv::new(RepoContext::default(), false, String::new());
+        missing.insert("HOME", home.path().join("absent").to_string_lossy());
+        assert!(managed_routed_servers(&missing, route_key).is_empty());
+    }
+
+    #[test]
+    fn repository_root_mcp_json_applies_to_a_subdirectory_launch() {
+        let dir = tempfile::tempdir().unwrap();
+        write_mcp_json(
+            dir.path(),
+            serde_json::json!({"mcpServers": {
+                "vibe-kanban": {"type": "http", "url": "https://vibe.vasandani.dev/mcp"}
+            }}),
+        );
+        let nested = dir.path().join("apps/service");
+        std::fs::create_dir_all(&nested).unwrap();
+        write_mcp_json(
+            &nested,
+            serde_json::json!({"mcpServers": {
+                "vibe_kanban": {"url": "https://vibe.vasandani.dev/mcp"}
+            }}),
+        );
+        let extra = project_mcp_suppression_args(&[], &nested, routed).unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&extra[1]).unwrap();
+        assert_eq!(
+            settings,
+            serde_json::json!({"disabledMcpjsonServers": ["vibe-kanban", "vibe_kanban"]})
+        );
+    }
+
+    #[test]
+    fn existing_settings_override_is_respected() {
+        let dir = tempfile::tempdir().unwrap();
+        write_mcp_json(
+            dir.path(),
+            serde_json::json!({"mcpServers": {
+                "vibe_kanban": {"url": "https://vibe.vasandani.dev/mcp"}
+            }}),
+        );
+        for args in [
+            vec!["--settings".to_string(), "{}".to_string()],
+            vec!["--settings=/tmp/s.json".to_string()],
+        ] {
+            assert!(project_mcp_suppression_args(&args, dir.path(), routed).is_none());
+        }
+    }
+
+    #[test]
+    fn missing_invalid_or_unrelated_mcp_json_adds_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(project_mcp_suppression_args(&[], dir.path(), routed).is_none());
+
+        std::fs::write(dir.path().join(".mcp.json"), "{ not json").unwrap();
+        assert!(project_mcp_suppression_args(&[], dir.path(), routed).is_none());
+
+        write_mcp_json(
+            dir.path(),
+            serde_json::json!({"mcpServers": {
+                "tldraw": {"type": "http", "url": "https://draw.vasandani.dev/mcp"}
+            }}),
+        );
+        assert!(project_mcp_suppression_args(&[], dir.path(), routed).is_none());
+    }
 
     fn patches_to_entries(patches: &[json_patch::Patch]) -> Vec<NormalizedEntry> {
         patches
@@ -3110,6 +3892,16 @@ mod tests {
                     .is_some_and(|ids| ids.iter().any(|id| id == callback_id))
             })
             .map(|entry| entry["matcher"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// Split a `^(?!(A|B|C)$).*` catch-all matcher into its excluded names.
+    fn catch_all_excluded_names(matcher: &str) -> Vec<&str> {
+        matcher
+            .strip_prefix("^(?!(")
+            .and_then(|rest| rest.strip_suffix(")$).*"))
+            .expect("catch-all matcher shape")
+            .split('|')
             .collect()
     }
 
@@ -3169,6 +3961,155 @@ mod tests {
         }
     }
 
+    // A VK turn's process group is reaped at turn end, so every permission mode
+    // must deny a background `Bash` spawn and point the agent at `spawn_poller`.
+    #[test]
+    fn background_bash_denied_in_all_hook_modes() {
+        let modes = [
+            ("auto", claude_with(None, None)),
+            ("plan", claude_with(Some(true), None)),
+            ("approvals", claude_with(None, Some(true))),
+        ];
+        for (label, claude) in modes {
+            let hooks = claude.get_hooks(false).expect("hooks present");
+            let deny_matchers = matchers_for_callback(&hooks, DENY_BACKGROUND_BASH_CALLBACK_ID);
+            assert_eq!(
+                deny_matchers,
+                vec![BACKGROUND_BASH_MATCHER.to_string()],
+                "{label} mode must route Bash to the background-spawn deny hook exactly once"
+            );
+        }
+    }
+
+    // The deny is conditional on `run_in_background`, so `Bash` must keep
+    // reaching its mode's normal approve/ask catch-all. Excluding it there
+    // would silently turn every plan-mode shell command into a user prompt.
+    #[test]
+    fn foreground_bash_still_reaches_the_catch_all_in_every_mode() {
+        for (label, claude, catch_all_callback) in [
+            (
+                "plan",
+                claude_with(Some(true), None),
+                AUTO_APPROVE_CALLBACK_ID,
+            ),
+            ("approvals", claude_with(None, Some(true)), "tool_approval"),
+        ] {
+            let hooks = claude.get_hooks(false).expect("hooks present");
+            let matchers = matchers_for_callback(&hooks, catch_all_callback);
+            let catch_alls: Vec<_> = matchers
+                .iter()
+                .filter(|matcher| matcher.starts_with("^(?!"))
+                .collect();
+            assert!(
+                !catch_alls.is_empty(),
+                "{label} mode should still have a catch-all matcher"
+            );
+            for matcher in catch_alls {
+                // Compare against the alternation *tokens*, not a substring —
+                // `BashOutput` / `KillBash` legitimately contain "Bash".
+                assert!(
+                    !catch_all_excluded_names(matcher).contains(&"Bash"),
+                    "{label} catch-all matcher {matcher:?} must NOT exclude Bash"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn poller_tools_excluded_from_catch_all_matchers_in_all_hook_modes() {
+        let modes = [
+            ("auto", claude_with(None, None)),
+            ("plan", claude_with(Some(true), None)),
+            ("approvals", claude_with(None, Some(true))),
+        ];
+        for (label, claude) in modes {
+            let hooks = claude.get_hooks(false).expect("hooks present");
+            let approve = matchers_for_callback(&hooks, AUTO_APPROVE_CALLBACK_ID);
+            let ask = matchers_for_callback(&hooks, "tool_approval");
+            for matcher in approve.iter().chain(ask.iter()) {
+                if matcher.starts_with("^(?!") {
+                    let excluded = catch_all_excluded_names(matcher);
+                    for tool in BACKGROUND_POLLER_TOOLS {
+                        assert!(
+                            excluded.contains(tool),
+                            "{label} catch-all matcher {matcher:?} must exclude {tool}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn poller_tools_disallowed_in_all_command_modes() {
+        let modes = [
+            ("auto", claude_with(None, None)),
+            ("plan", claude_with(Some(true), None)),
+            ("approvals", claude_with(None, Some(true))),
+        ];
+        for (label, claude) in modes {
+            let builder = claude
+                .build_command_builder()
+                .await
+                .expect("command builder");
+            let params = builder.params.unwrap_or_default();
+            let disallowed: Vec<&String> = params
+                .iter()
+                .filter(|p| p.starts_with("--disallowedTools="))
+                .collect();
+            for tool in BACKGROUND_POLLER_TOOLS {
+                assert!(
+                    disallowed.iter().any(|p| p
+                        .trim_start_matches("--disallowedTools=")
+                        .split(',')
+                        .any(|name| name == *tool)),
+                    "{label} mode command must disallow {tool}; got {disallowed:?}"
+                );
+            }
+            // `Bash` must never be blanket-disallowed — the background rule is
+            // parameter-level and lives in the PreToolUse hook.
+            assert!(
+                !disallowed.iter().any(|p| p
+                    .trim_start_matches("--disallowedTools=")
+                    .split(',')
+                    .any(|name| name == "Bash")),
+                "{label} mode must not disallow Bash outright; got {disallowed:?}"
+            );
+        }
+    }
+
+    /// The names are wire tool names read from the
+    /// `@anthropic-ai/claude-code-linux-x64@2.1.268` native binary, not from
+    /// the npm stub's `sdk-tools.d.ts` (which lists JSON-Schema titles). A
+    /// misspelling would silently match nothing, so the exact spellings are
+    /// pinned here.
+    #[test]
+    fn background_poller_tool_names_are_pinned() {
+        assert_eq!(
+            BACKGROUND_POLLER_TOOLS,
+            &[
+                "Monitor",
+                "TaskOutput",
+                "TaskStop",
+                "CronCreate",
+                "CronDelete",
+                "CronList",
+                "BashOutput",
+                "BashOutputTool",
+                "AgentOutput",
+                "AgentOutputTool",
+                "KillShell",
+                "KillBash",
+            ]
+        );
+        assert_eq!(BACKGROUND_BASH_MATCHER, "^Bash$");
+        // The pin is meaningful only for the last reverified CLI artifact.
+        assert!(
+            base_command(false).contains("@anthropic-ai/claude-code@2.1.281"),
+            "tool names were verified against 2.1.281; re-verify against the binary if this pin moves"
+        );
+    }
+
     #[test]
     fn test_claude_json_parsing() {
         let system_json =
@@ -3194,6 +4135,84 @@ mod tests {
         assert_eq!(
             entries[0].content,
             "System initialized with model: claude-sonnet-4-20250514"
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_inventory_groups_registered_mcp_tools_by_server() {
+        let inventory = ClaudeMcpInventory::default();
+        inventory
+            .observe_tools(
+                &[
+                    serde_json::json!("Read"),
+                    serde_json::json!("mcp__slack__conversations_replies"),
+                    serde_json::json!({ "name": "mcp__slack__conversations_history" }),
+                    serde_json::json!("mcp__brink__sales_split"),
+                ],
+                &[],
+            )
+            .await;
+
+        let servers = inventory.list_servers().await.unwrap();
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[0].server_id, "brink");
+        assert_eq!(servers[0].tool_count, Some(1));
+        assert_eq!(servers[1].server_id, "slack");
+        assert_eq!(servers[1].tool_count, Some(2));
+    }
+
+    #[tokio::test]
+    async fn startup_inventory_matches_complete_server_names() {
+        let inventory = ClaudeMcpInventory::default();
+        inventory
+            .observe_tools(
+                &[serde_json::json!("mcp__team__slack__search")],
+                &[
+                    serde_json::json!({ "name": "team", "status": "connected" }),
+                    serde_json::json!({ "name": "team__slack", "status": "connected" }),
+                ],
+            )
+            .await;
+
+        let servers = inventory.list_servers().await.unwrap();
+        assert_eq!(servers[0].server_id, "team");
+        assert_eq!(servers[0].tool_count, Some(0));
+        assert_eq!(servers[1].server_id, "team__slack");
+        assert_eq!(servers[1].tool_count, Some(1));
+    }
+
+    #[tokio::test]
+    async fn startup_inventory_preserves_connected_zero_tool_servers() {
+        let inventory = ClaudeMcpInventory::default();
+        inventory
+            .observe_tools(
+                &[],
+                &[serde_json::json!({ "name": "resources_only", "status": "connected" })],
+            )
+            .await;
+
+        let servers = inventory.list_servers().await.unwrap();
+        assert_eq!(servers[0].status, McpServerRefreshStatus::ConnectedNoTools);
+        assert_eq!(servers[0].tool_count, Some(0));
+    }
+
+    #[tokio::test]
+    async fn startup_inventory_preserves_failed_project_servers() {
+        let inventory = ClaudeMcpInventory::default();
+        inventory
+            .observe_tools(
+                &[],
+                &[serde_json::json!({ "name": "failed_server", "status": "failed" })],
+            )
+            .await;
+
+        let servers = inventory.list_servers().await.unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].server_id, "failed_server");
+        assert_eq!(servers[0].status, McpServerRefreshStatus::FailedUnavailable);
+        assert_eq!(
+            servers[0].error.as_ref().map(|error| &error.category),
+            Some(&McpRefreshErrorCategory::InitializeFailed)
         );
     }
 
@@ -3942,20 +4961,23 @@ mod tests {
 
     #[test]
     fn test_context_window_for_model() {
-        assert_eq!(
-            context_window_for_model("opus"),
-            DEFAULT_CLAUDE_CONTEXT_WINDOW
-        );
-        assert_eq!(
-            context_window_for_model("sonnet"),
-            DEFAULT_CLAUDE_CONTEXT_WINDOW
-        );
+        assert_eq!(context_window_for_model("opus"), CLAUDE_1M_CONTEXT_WINDOW);
+        assert_eq!(context_window_for_model("sonnet"), CLAUDE_1M_CONTEXT_WINDOW);
+        assert_eq!(context_window_for_model("fable"), CLAUDE_1M_CONTEXT_WINDOW);
         assert_eq!(
             context_window_for_model("claude-opus-4-8"),
             DEFAULT_CLAUDE_CONTEXT_WINDOW
         );
         assert_eq!(
             context_window_for_model("claude-opus-5"),
+            CLAUDE_1M_CONTEXT_WINDOW
+        );
+        assert_eq!(
+            context_window_for_model("claude-fable-5-1"),
+            CLAUDE_1M_CONTEXT_WINDOW
+        );
+        assert_eq!(
+            context_window_for_model("claude-sonnet-5"),
             CLAUDE_1M_CONTEXT_WINDOW
         );
         assert_eq!(
@@ -4020,19 +5042,474 @@ mod tests {
     }
 
     #[test]
-    fn test_claude_opus_5_in_discovered_options() {
+    fn test_claude_discovered_catalog_is_versioned_and_defaults_to_opus_5_5() {
         let options = super::default_discovered_options();
-        let opus5 = options
+        let efforts = ["low", "medium", "high", "xhigh", "max"];
+        let expected: [(&str, &str, &[&str]); 5] = [
+            ("claude-opus-5-5", "Opus 5.5", &efforts),
+            ("claude-opus-5", "Opus 5", &efforts),
+            ("claude-sonnet-5", "Sonnet 5", &efforts),
+            ("claude-fable-5-1", "Fable 5.1", &efforts),
+            ("claude-haiku-4-5", "Haiku 4.5", &[]),
+        ];
+
+        let actual = options
             .model_selector
             .models
             .iter()
-            .find(|m| m.id == "claude-opus-5");
-        assert!(opus5.is_some(), "claude-opus-5 must be in model catalog");
-        let opus5 = opus5.unwrap();
-        assert_eq!(opus5.name, "Opus 5");
-        assert!(
-            !opus5.reasoning_options.is_empty(),
-            "claude-opus-5 must have reasoning options (supports_effort coverage)"
+            .map(|model| {
+                (
+                    model.id.as_str(),
+                    model.name.as_str(),
+                    model
+                        .reasoning_options
+                        .iter()
+                        .map(|option| option.id.as_str())
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let expected = expected
+            .iter()
+            .map(|(id, name, efforts)| (*id, *name, efforts.to_vec()))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+
+        assert_eq!(
+            options.model_selector.default_model.as_deref(),
+            Some("claude-opus-5-5")
         );
+        assert_eq!(
+            context_window_for_model("claude-opus-5-5"),
+            CLAUDE_1M_CONTEXT_WINDOW
+        );
+        assert_eq!(
+            context_window_for_model("claude-haiku-4-5"),
+            DEFAULT_CLAUDE_CONTEXT_WINDOW
+        );
+    }
+
+    #[test]
+    fn test_claude_legacy_aliases_resolve_to_catalog_models() {
+        let options = super::default_discovered_options();
+        let selector = &options.model_selector;
+        let mut aliases = selector
+            .model_aliases
+            .iter()
+            .map(|(alias, id)| (alias.as_str(), id.as_str()))
+            .collect::<Vec<_>>();
+        aliases.sort();
+        assert_eq!(
+            aliases,
+            [
+                ("fable", "claude-fable-5-1"),
+                ("haiku", "claude-haiku-4-5"),
+                ("opus", "claude-opus-5-5"),
+                ("opus[1m]", "claude-opus-5-5"),
+                ("sonnet", "claude-sonnet-5"),
+            ]
+        );
+        for (alias, id) in &aliases {
+            assert!(
+                selector.models.iter().any(|model| model.id == *id),
+                "alias {alias} must resolve to an advertised model"
+            );
+            assert!(
+                selector.models.iter().all(|model| model.id != *alias),
+                "alias {alias} must not be advertised"
+            );
+        }
+        assert!(
+            base_command(false).contains("@anthropic-ai/claude-code@2.1.281"),
+            "aliases were read from the 2.1.281 binary; re-verify if this pin moves"
+        );
+    }
+
+    #[test]
+    fn test_preset_options_default_to_opus_5_5() {
+        let executor = claude_with(None, None);
+        assert_eq!(
+            executor.get_preset_options().model_id.as_deref(),
+            Some("claude-opus-5-5")
+        );
+    }
+
+    #[test]
+    fn test_tool_progress_message_parses() {
+        let tool_progress_json = r#"{"type":"tool_progress","tool_use_id":"toolu_011cbTyUrSBE4D28tMCVqRSt-heartbeat-0","tool_name":"Bash","parent_tool_use_id":"toolu_011cbTyUrSBE4D28tMCVqRSt","elapsed_time_seconds":30,"heartbeat":true,"session_id":"8e8245e8-952c-4b70-9c6f-4c1cb4d4a687","uuid":"a9786562-4e78-418e-b48a-b14e57a1076d"}"#;
+        let parsed: ClaudeJson = serde_json::from_str(tool_progress_json).unwrap();
+        assert!(matches!(parsed, ClaudeJson::ToolProgress { .. }));
+
+        if let ClaudeJson::ToolProgress {
+            tool_use_id,
+            tool_name,
+            parent_tool_use_id,
+            elapsed_time_seconds,
+            heartbeat,
+            session_id,
+            ..
+        } = parsed
+        {
+            assert_eq!(
+                tool_use_id.as_deref(),
+                Some("toolu_011cbTyUrSBE4D28tMCVqRSt-heartbeat-0")
+            );
+            assert_eq!(tool_name.as_deref(), Some("Bash"));
+            assert_eq!(
+                parent_tool_use_id.as_deref(),
+                Some("toolu_011cbTyUrSBE4D28tMCVqRSt")
+            );
+            assert_eq!(elapsed_time_seconds, Some(30.0));
+            assert_eq!(heartbeat, Some(true));
+            assert_eq!(
+                session_id.as_deref(),
+                Some("8e8245e8-952c-4b70-9c6f-4c1cb4d4a687")
+            );
+        }
+    }
+
+    #[test]
+    fn test_tool_progress_message_silently_ignored() {
+        let tool_progress_json = r#"{"type":"tool_progress","tool_use_id":"toolu_abc123","tool_name":"Bash","elapsed_time_seconds":60,"heartbeat":true,"session_id":"test-session"}"#;
+        let parsed: ClaudeJson = serde_json::from_str(tool_progress_json).unwrap();
+
+        let mut processor = ClaudeLogProcessor::new();
+        let patches = normalize_helper(&mut processor, &parsed, "/tmp");
+
+        assert!(
+            patches.is_empty(),
+            "tool_progress messages should be silently ignored and produce no patches"
+        );
+    }
+
+    #[test]
+    fn test_tool_progress_session_id_extraction() {
+        let tool_progress: ClaudeJson = serde_json::from_str(
+            r#"{"type":"tool_progress","tool_use_id":"toolu_xyz","tool_name":"Read","session_id":"my-session-123"}"#,
+        )
+        .unwrap();
+
+        let session_id = ClaudeLogProcessor::extract_session_id(&tool_progress);
+        assert_eq!(session_id.as_deref(), Some("my-session-123"));
+    }
+
+    #[test]
+    fn test_tool_progress_minimal_fields() {
+        let tool_progress_json = r#"{"type":"tool_progress"}"#;
+        let parsed: ClaudeJson = serde_json::from_str(tool_progress_json).unwrap();
+        assert!(
+            matches!(parsed, ClaudeJson::ToolProgress { .. }),
+            "tool_progress with minimal fields should still parse"
+        );
+
+        let mut processor = ClaudeLogProcessor::new();
+        let patches = normalize_helper(&mut processor, &parsed, "/tmp");
+        assert!(patches.is_empty());
+    }
+
+    #[test]
+    fn test_tool_progress_with_subagent_type() {
+        let tool_progress_json = r#"{"type":"tool_progress","tool_use_id":"toolu_task123","tool_name":"Task","elapsed_time_seconds":90,"task_id":"task-abc","subagent_type":"explore","session_id":"sess-456"}"#;
+        let parsed: ClaudeJson = serde_json::from_str(tool_progress_json).unwrap();
+
+        if let ClaudeJson::ToolProgress {
+            tool_name,
+            task_id,
+            subagent_type,
+            elapsed_time_seconds,
+            ..
+        } = parsed
+        {
+            assert_eq!(tool_name.as_deref(), Some("Task"));
+            assert_eq!(task_id.as_deref(), Some("task-abc"));
+            assert_eq!(subagent_type.as_deref(), Some("explore"));
+            assert_eq!(elapsed_time_seconds, Some(90.0));
+        } else {
+            panic!("Expected ToolProgress variant");
+        }
+    }
+
+    /// The `max >= default` ordering is enforced at compile time next to the
+    /// constants (a `const` assertion), because a maximum below the default is
+    /// discarded by the CLI without any error. What remains to check here is
+    /// how the values *serialize*.
+    #[test]
+    fn bash_timeout_values_are_consistent() {
+        // A non-numeric or non-positive value is ignored by the CLI and the
+        // built-in default applies, so both must be plain positive integers.
+        for (key, value) in bash_timeout_env(|_| false) {
+            let parsed: u64 = value
+                .parse()
+                .unwrap_or_else(|_| panic!("{key} must serialize as an integer; got {value:?}"));
+            assert!(parsed > 0, "{key} must be positive; got {parsed}");
+        }
+    }
+
+    /// A variable already exported to the VK service is inherited by the child,
+    /// so VK must not overwrite it. Without this the documented escape hatch
+    /// covered only `ExecutionEnv` variables, and an operator who had widened
+    /// `BASH_MAX_TIMEOUT_MS` for the service would have found it silently
+    /// narrowed back to VK's default.
+    #[test]
+    fn already_set_bash_timeout_variables_are_left_alone() {
+        let seeded = bash_timeout_env(|key| key == BASH_MAX_TIMEOUT_MS_VAR);
+        assert_eq!(
+            seeded.len(),
+            1,
+            "an already-set variable must not be re-seeded; got {seeded:?}"
+        );
+        assert_eq!(seeded[0].0, BASH_DEFAULT_TIMEOUT_MS_VAR);
+
+        assert!(
+            bash_timeout_env(|_| true).is_empty(),
+            "nothing is seeded when the caller already set both"
+        );
+    }
+
+    /// Spelling is pinned: these are read from the pinned CLI binary, and an
+    /// unknown variable name is ignored without any error.
+    #[test]
+    fn bash_timeout_env_uses_the_verified_variable_names() {
+        let env = bash_timeout_env(|_| false);
+        assert_eq!(env[0].0, "BASH_DEFAULT_TIMEOUT_MS");
+        assert_eq!(env[1].0, "BASH_MAX_TIMEOUT_MS");
+        assert_eq!(env[0].1, BASH_DEFAULT_TIMEOUT_MS.to_string());
+        assert_eq!(env[1].1, BASH_MAX_TIMEOUT_MS.to_string());
+    }
+
+    /// VK's bound is a *default*: it is seeded before the execution environment
+    /// is applied, so an operator- or org-supplied value of the same name wins.
+    /// This is the documented escape hatch, so it is asserted rather than
+    /// assumed from statement order.
+    #[test]
+    fn execution_env_overrides_vk_bash_timeout_defaults() {
+        let mut command = tokio::process::Command::new("true");
+        for (key, value) in bash_timeout_env(|_| false) {
+            command.env(key, value);
+        }
+
+        let mut env = ExecutionEnv::new(RepoContext::default(), false, String::new());
+        env.insert("BASH_MAX_TIMEOUT_MS", "1800000");
+        env.apply_to_command(&mut command);
+
+        let vars: std::collections::HashMap<_, _> = command
+            .as_std()
+            .get_envs()
+            .filter_map(|(k, v)| Some((k.to_str()?.to_string(), v?.to_str()?.to_string())))
+            .collect();
+
+        assert_eq!(
+            vars.get("BASH_MAX_TIMEOUT_MS").map(String::as_str),
+            Some("1800000"),
+            "an explicitly supplied override must win over VK's default"
+        );
+        // The one it did not override still carries VK's default.
+        assert_eq!(
+            vars.get("BASH_DEFAULT_TIMEOUT_MS").map(String::as_str),
+            Some(BASH_DEFAULT_TIMEOUT_MS.to_string().as_str())
+        );
+    }
+}
+
+#[cfg(test)]
+mod missing_transcript_tests {
+    use super::*;
+
+    const SESSION: &str = "f54d7e57-b912-487e-9d3b-50f3f6d7dd94";
+
+    fn config_with_projects(projects: &[&str]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for project in projects {
+            std::fs::create_dir_all(dir.path().join("projects").join(project)).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn transcript_in_any_project_folder_is_present() {
+        let dir = config_with_projects(&["-srv-a", "-srv-b"]);
+        std::fs::write(
+            dir.path()
+                .join("projects/-srv-b")
+                .join(format!("{SESSION}.jsonl")),
+            "{}\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            claude_transcript_status(dir.path(), SESSION),
+            TranscriptStatus::Present
+        );
+    }
+
+    #[test]
+    fn readable_projects_without_transcript_is_missing() {
+        let dir = config_with_projects(&["-srv-a"]);
+        std::fs::write(dir.path().join("projects/-srv-a/other.jsonl"), "{}\n").unwrap();
+
+        assert_eq!(
+            claude_transcript_status(dir.path(), SESSION),
+            TranscriptStatus::Missing
+        );
+
+        let empty = config_with_projects(&[]);
+        std::fs::create_dir_all(empty.path().join("projects")).unwrap();
+        assert_eq!(
+            claude_transcript_status(empty.path(), SESSION),
+            TranscriptStatus::Missing
+        );
+    }
+
+    #[test]
+    fn a_directory_named_like_the_transcript_is_not_present() {
+        let dir = config_with_projects(&["-srv-a"]);
+        std::fs::create_dir_all(
+            dir.path()
+                .join("projects/-srv-a")
+                .join(format!("{SESSION}.jsonl")),
+        )
+        .unwrap();
+
+        assert_eq!(
+            claude_transcript_status(dir.path(), SESSION),
+            TranscriptStatus::Missing
+        );
+    }
+
+    #[test]
+    fn unreadable_or_absent_projects_folder_fails_open() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            claude_transcript_status(dir.path(), SESSION),
+            TranscriptStatus::Unknown
+        );
+        assert_eq!(
+            claude_transcript_status(&dir.path().join("does-not-exist"), SESSION),
+            TranscriptStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn stray_files_in_projects_do_not_block_a_missing_answer() {
+        let dir = config_with_projects(&["-srv-a"]);
+        std::fs::write(dir.path().join("projects/stray-file"), "x").unwrap();
+
+        assert_eq!(
+            claude_transcript_status(dir.path(), SESSION),
+            TranscriptStatus::Missing
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_project_folder_fails_open() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = config_with_projects(&["-srv-a", "-srv-locked"]);
+        let locked = dir.path().join("projects/-srv-locked");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Root ignores permission bits, so the check is only meaningful otherwise.
+        let enforced = std::fs::read_dir(&locked).is_err();
+
+        let status = claude_transcript_status(dir.path(), SESSION);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        if enforced {
+            assert_eq!(status, TranscriptStatus::Unknown);
+        }
+    }
+
+    #[test]
+    fn unsafe_session_ids_fail_open() {
+        let dir = config_with_projects(&["-srv-a"]);
+        for id in ["", ".", "..", "../x", "a/b", "a\\b", "a\0b"] {
+            assert_eq!(
+                claude_transcript_status(dir.path(), id),
+                TranscriptStatus::Unknown,
+                "{id:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn config_dir_prefers_execution_env_then_process_env() {
+        let none = |_: &str| None;
+        let vars = HashMap::from([
+            ("HOME".to_string(), "/scoped/home".to_string()),
+            ("CLAUDE_CONFIG_DIR".to_string(), "/cfg".to_string()),
+        ]);
+        assert_eq!(claude_config_dir(&vars, none), Some(PathBuf::from("/cfg")));
+
+        let vars = HashMap::from([("HOME".to_string(), "/scoped/home".to_string())]);
+        let process = |key: &str| (key == "HOME").then(|| "/server/home".to_string());
+        assert_eq!(
+            claude_config_dir(&vars, process),
+            Some(PathBuf::from("/scoped/home/.claude"))
+        );
+
+        let process_cfg =
+            |key: &str| (key == "CLAUDE_CONFIG_DIR").then(|| "/process/cfg".to_string());
+        assert_eq!(
+            claude_config_dir(&vars, process_cfg),
+            Some(PathBuf::from("/process/cfg"))
+        );
+
+        let empty = HashMap::from([
+            ("CLAUDE_CONFIG_DIR".to_string(), String::new()),
+            ("HOME".to_string(), String::new()),
+        ]);
+        assert_eq!(claude_config_dir(&empty, none), None);
+
+        // Relative values resolve against the child's cwd, not ours.
+        let relative_cfg = HashMap::from([
+            ("CLAUDE_CONFIG_DIR".to_string(), "cfg".to_string()),
+            ("HOME".to_string(), "/scoped/home".to_string()),
+        ]);
+        assert_eq!(claude_config_dir(&relative_cfg, none), None);
+        let relative_home = HashMap::from([("HOME".to_string(), "home".to_string())]);
+        assert_eq!(claude_config_dir(&relative_home, none), None);
+        assert_eq!(
+            claude_config_dir(&HashMap::new(), process),
+            Some(PathBuf::from("/server/home/.claude"))
+        );
+    }
+
+    #[test]
+    fn follow_up_resumes_unless_transcript_is_missing() {
+        let expected = FollowUpStart::Resume(vec![
+            "--resume".to_string(),
+            SESSION.to_string(),
+            "--resume-session-at".to_string(),
+            "msg-1".to_string(),
+        ]);
+        assert_eq!(
+            follow_up_start(TranscriptStatus::Present, SESSION, Some("msg-1")),
+            expected
+        );
+        assert_eq!(
+            follow_up_start(TranscriptStatus::Unknown, SESSION, Some("msg-1")),
+            expected
+        );
+        assert_eq!(
+            follow_up_start(TranscriptStatus::Present, SESSION, None),
+            FollowUpStart::Resume(vec!["--resume".to_string(), SESSION.to_string()])
+        );
+        assert_eq!(
+            follow_up_start(TranscriptStatus::Missing, SESSION, Some("msg-1")),
+            FollowUpStart::Fresh
+        );
+        assert_eq!(
+            follow_up_start(TranscriptStatus::Missing, SESSION, None),
+            FollowUpStart::Fresh
+        );
+    }
+
+    #[test]
+    fn user_notice_names_the_missing_session() {
+        let notice = missing_transcript_user_notice(SESSION);
+        assert!(notice.starts_with("Vibe Kanban:"), "{notice}");
+        assert!(notice.contains(SESSION), "{notice}");
+        assert!(!notice.contains('\n'), "one stderr line: {notice}");
+        assert!(MISSING_TRANSCRIPT_AGENT_NOTICE.contains("git log"));
     }
 }

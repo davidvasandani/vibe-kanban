@@ -16,11 +16,12 @@ pub struct IssueComment {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Deserialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct CreateIssueCommentRequest {
     /// Optional client-generated ID. If not provided, server generates one.
     /// Using client-generated IDs enables stable optimistic updates.
     #[ts(optional)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<Uuid>,
     pub issue_id: Uuid,
     pub message: String,

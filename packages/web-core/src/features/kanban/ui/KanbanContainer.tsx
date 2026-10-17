@@ -19,12 +19,12 @@ import { cn } from '@/shared/lib/utils';
 import { useCurrentKanbanRouteState } from '@/shared/hooks/useCurrentKanbanRouteState';
 import {
   useUiPreferencesStore,
-  resolveKanbanProjectState,
   KANBAN_ASSIGNEE_FILTER_VALUES,
   KANBAN_PROJECT_VIEW_IDS,
   type KanbanFilterState,
   type KanbanSortField,
 } from '@/shared/stores/useUiPreferencesStore';
+import { useKanbanPreferences } from '../model/hooks/useKanbanPreferences';
 import {
   useKanbanFilters,
   PRIORITY_ORDER,
@@ -205,48 +205,20 @@ export function KanbanContainer() {
     executeAction(Actions.ProjectsGuide);
   }, [executeAction]);
 
-  const projectViewSelection = useUiPreferencesStore(
-    (s) => s.kanbanProjectViewSelections[projectId]
-  );
-  const projectViewPreferencesById = useUiPreferencesStore(
-    (s) => s.kanbanProjectViewPreferences[projectId]
-  );
-  const setKanbanProjectView = useUiPreferencesStore(
-    (s) => s.setKanbanProjectView
-  );
-  const setKanbanProjectViewFilters = useUiPreferencesStore(
-    (s) => s.setKanbanProjectViewFilters
-  );
-  const setKanbanProjectViewShowSubIssues = useUiPreferencesStore(
-    (s) => s.setKanbanProjectViewShowSubIssues
-  );
-  const setKanbanProjectViewShowWorkspaces = useUiPreferencesStore(
-    (s) => s.setKanbanProjectViewShowWorkspaces
-  );
-  const setKanbanProjectViewHideBlocked = useUiPreferencesStore(
-    (s) => s.setKanbanProjectViewHideBlocked
-  );
-  const clearKanbanProjectViewPreferences = useUiPreferencesStore(
-    (s) => s.clearKanbanProjectViewPreferences
-  );
-  const resolvedProjectState = useMemo(
-    () => resolveKanbanProjectState(projectViewSelection),
-    [projectViewSelection]
-  );
+  const boardPreferences = useKanbanPreferences(projectId, userId);
+  const { activeViewId } = boardPreferences;
   const {
-    activeViewId,
+    filters: kanbanFilters,
+    showSubIssues,
+    showWorkspaces,
+    hideBlocked,
+  } = boardPreferences.preferences;
+  const {
     filters: defaultKanbanFilters,
     showSubIssues: defaultShowSubIssues,
     showWorkspaces: defaultShowWorkspaces,
     hideBlocked: defaultHideBlocked,
-  } = resolvedProjectState;
-  const projectViewPreferences = projectViewPreferencesById?.[activeViewId];
-  const kanbanFilters = projectViewPreferences?.filters ?? defaultKanbanFilters;
-  const showSubIssues =
-    projectViewPreferences?.showSubIssues ?? defaultShowSubIssues;
-  const showWorkspaces =
-    projectViewPreferences?.showWorkspaces ?? defaultShowWorkspaces;
-  const hideBlocked = projectViewPreferences?.hideBlocked ?? defaultHideBlocked;
+  } = boardPreferences.defaults;
 
   const hasActiveFilters = useMemo(
     () =>
@@ -297,88 +269,31 @@ export function KanbanContainer() {
     currentUserId: userId,
   });
 
-  const setKanbanSearchQuery = useCallback(
-    (searchQuery: string) => {
-      setKanbanProjectViewFilters(projectId, activeViewId, {
-        ...kanbanFilters,
-        searchQuery,
-      });
-    },
-    [activeViewId, kanbanFilters, projectId, setKanbanProjectViewFilters]
-  );
-
-  const setKanbanPriorities = useCallback(
-    (priorities: IssuePriority[]) => {
-      setKanbanProjectViewFilters(projectId, activeViewId, {
-        ...kanbanFilters,
-        priorities,
-      });
-    },
-    [activeViewId, kanbanFilters, projectId, setKanbanProjectViewFilters]
-  );
-
-  const setKanbanAssignees = useCallback(
-    (assigneeIds: string[]) => {
-      setKanbanProjectViewFilters(projectId, activeViewId, {
-        ...kanbanFilters,
-        assigneeIds,
-      });
-    },
-    [activeViewId, kanbanFilters, projectId, setKanbanProjectViewFilters]
-  );
-
-  const setKanbanTags = useCallback(
-    (tagIds: string[]) => {
-      setKanbanProjectViewFilters(projectId, activeViewId, {
-        ...kanbanFilters,
-        tagIds,
-      });
-    },
-    [activeViewId, kanbanFilters, projectId, setKanbanProjectViewFilters]
-  );
-
-  const setKanbanSort = useCallback(
-    (sortField: KanbanSortField, sortDirection: 'asc' | 'desc') => {
-      setKanbanProjectViewFilters(projectId, activeViewId, {
-        ...kanbanFilters,
-        sortField,
-        sortDirection,
-      });
-    },
-    [activeViewId, kanbanFilters, projectId, setKanbanProjectViewFilters]
-  );
-
-  const setShowSubIssues = useCallback(
-    (show: boolean) => {
-      setKanbanProjectViewShowSubIssues(projectId, activeViewId, show);
-    },
-    [activeViewId, projectId, setKanbanProjectViewShowSubIssues]
-  );
-
-  const setShowWorkspaces = useCallback(
-    (show: boolean) => {
-      setKanbanProjectViewShowWorkspaces(projectId, activeViewId, show);
-    },
-    [activeViewId, projectId, setKanbanProjectViewShowWorkspaces]
-  );
-
-  const setHideBlocked = useCallback(
-    (hide: boolean) => {
-      setKanbanProjectViewHideBlocked(projectId, activeViewId, hide);
-    },
-    [activeViewId, projectId, setKanbanProjectViewHideBlocked]
-  );
-
-  const clearKanbanFilters = useCallback(() => {
-    clearKanbanProjectViewPreferences(projectId, activeViewId);
-  }, [activeViewId, clearKanbanProjectViewPreferences, projectId]);
-
-  const handleKanbanProjectViewChange = useCallback(
-    (viewId: string) => {
-      setKanbanProjectView(projectId, viewId);
-    },
-    [projectId, setKanbanProjectView]
-  );
+  const setKanbanFilters = (filters: KanbanFilterState) => {
+    boardPreferences.update({ ...boardPreferences.preferences, filters });
+  };
+  const setKanbanSearchQuery = boardPreferences.setSearch;
+  const setKanbanPriorities = (priorities: IssuePriority[]) =>
+    setKanbanFilters({ ...kanbanFilters, priorities });
+  const setKanbanAssignees = (assigneeIds: string[]) =>
+    setKanbanFilters({ ...kanbanFilters, assigneeIds });
+  const setKanbanTags = (tagIds: string[]) =>
+    setKanbanFilters({ ...kanbanFilters, tagIds });
+  const setKanbanSort = (
+    sortField: KanbanSortField,
+    sortDirection: 'asc' | 'desc'
+  ) => setKanbanFilters({ ...kanbanFilters, sortField, sortDirection });
+  const setShowSubIssues = (showSubIssues: boolean) =>
+    boardPreferences.update({ ...boardPreferences.preferences, showSubIssues });
+  const setShowWorkspaces = (showWorkspaces: boolean) =>
+    boardPreferences.update({
+      ...boardPreferences.preferences,
+      showWorkspaces,
+    });
+  const setHideBlocked = (hideBlocked: boolean) =>
+    boardPreferences.update({ ...boardPreferences.preferences, hideBlocked });
+  const clearKanbanFilters = () => boardPreferences.update(undefined);
+  const handleKanbanProjectViewChange = boardPreferences.setView;
   const kanbanViewMode = useUiPreferencesStore((s) => s.kanbanViewMode);
   const listViewStatusFilterName = useUiPreferencesStore(
     (s) => s.listViewStatusFilterName
@@ -1010,35 +925,47 @@ export function KanbanContainer() {
             selectedStatusId={listViewStatusFilter}
             onStatusSelect={handleStatusSelect}
           />
-          <KanbanFilterBar
-            isFiltersDialogOpen={isFiltersDialogOpen}
-            onFiltersDialogOpenChange={setIsFiltersDialogOpen}
-            tags={tags}
-            users={membersWithProfiles}
-            activeViewId={activeViewId}
-            onViewChange={handleKanbanProjectViewChange}
-            viewIds={KANBAN_PROJECT_VIEW_IDS}
-            projectId={projectId}
-            currentUserId={userId}
-            filters={kanbanFilters}
-            showSubIssues={showSubIssues}
-            showWorkspaces={showWorkspaces}
-            hasActiveFilters={hasActiveFilters}
-            onSearchQueryChange={setKanbanSearchQuery}
-            onPrioritiesChange={setKanbanPriorities}
-            onAssigneesChange={setKanbanAssignees}
-            onTagsChange={setKanbanTags}
-            onSortChange={setKanbanSort}
-            onShowSubIssuesChange={setShowSubIssues}
-            onShowWorkspacesChange={setShowWorkspaces}
-            hideBlocked={hideBlocked}
-            onHideBlockedChange={setHideBlocked}
-            onClearFilters={clearKanbanFilters}
-            onCreateIssue={handleAddTask}
-            shouldAnimateCreateButton={shouldAnimateCreateButton}
-            renderFiltersDialog={(props) => <KanbanFiltersDialog {...props} />}
-            isMobile={isMobile}
-          />
+          <fieldset className="min-w-0" disabled={boardPreferences.loading}>
+            <KanbanFilterBar
+              isFiltersDialogOpen={isFiltersDialogOpen}
+              onFiltersDialogOpenChange={setIsFiltersDialogOpen}
+              tags={tags}
+              users={membersWithProfiles}
+              activeViewId={activeViewId}
+              onViewChange={handleKanbanProjectViewChange}
+              viewIds={KANBAN_PROJECT_VIEW_IDS}
+              projectId={projectId}
+              currentUserId={userId}
+              filters={kanbanFilters}
+              showSubIssues={showSubIssues}
+              showWorkspaces={showWorkspaces}
+              hasActiveFilters={hasActiveFilters}
+              onSearchQueryChange={setKanbanSearchQuery}
+              onPrioritiesChange={setKanbanPriorities}
+              onAssigneesChange={setKanbanAssignees}
+              onTagsChange={setKanbanTags}
+              onSortChange={setKanbanSort}
+              onShowSubIssuesChange={setShowSubIssues}
+              onShowWorkspacesChange={setShowWorkspaces}
+              hideBlocked={hideBlocked}
+              onHideBlockedChange={setHideBlocked}
+              onClearFilters={clearKanbanFilters}
+              onCreateIssue={handleAddTask}
+              shouldAnimateCreateButton={shouldAnimateCreateButton}
+              renderFiltersDialog={(props) => (
+                <KanbanFiltersDialog
+                  {...props}
+                  preferences={boardPreferences}
+                />
+              )}
+              isMobile={isMobile}
+            />
+          </fieldset>
+          {boardPreferences.error && (
+            <p role="alert" className="text-sm text-error">
+              {boardPreferences.error}
+            </p>
+          )}
         </div>
       </div>
 
@@ -1262,7 +1189,12 @@ export function KanbanContainer() {
           </div>
         )
       ) : (
-        <div className="flex-1 overflow-y-auto px-double">
+        <div
+          className={cn(
+            'flex-1 overflow-y-auto overflow-x-hidden',
+            isMobile ? 'px-base' : 'px-double'
+          )}
+        >
           <KanbanProvider onDragEnd={handleDragEnd} className="!block !w-full">
             <IssueListView
               statuses={listViewStatuses}
@@ -1278,6 +1210,7 @@ export function KanbanContainer() {
               selectedIssueIds={selectedIssueIds}
               isMultiSelectActive={isMultiSelectActive}
               onIssueCheckboxChange={handleCheckboxChange}
+              isMobile={isMobile}
             />
           </KanbanProvider>
         </div>

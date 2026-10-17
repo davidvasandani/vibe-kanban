@@ -13,6 +13,7 @@
       "cancel": "Keep Editing"
     },
     "layout": {
+      "resizeDrawer": "Resize settings",
       "nav": {
         "title": "Settings",
         "machineSettings": "Machine Settings",
@@ -27,12 +28,14 @@
         "reposDesc": "Repository scripts and configuration",
         "agents": "Agents",
         "agentsDesc": "Coding agent configurations",
+        "skills": "Skills",
+        "skillsDesc": "Shared agent skills and proposals",
         "mcp": "MCP Servers",
         "mcpDesc": "Model Context Protocol servers",
         "cli-tools": "CLI Tools",
         "cli-toolsDesc": "App-managed command line tools for agents",
-        "aws": "AWS",
-        "awsDesc": "AWS SSO profiles and sign-in",
+        "auth": "Auth",
+        "authDesc": "Auto-auth dashboard and AWS SSO profiles",
         "pipelines": "Pipelines",
         "pipelinesDesc": "Pipeline TOML files and defaults",
         "workers": "Cluster Workers",
@@ -69,6 +72,27 @@
       "load": "Load",
       "drain": "Drain",
       "resume": "Resume scheduling"
+    },
+    "skills": {
+      "title": "Skills",
+      "description": "Create and maintain shared agent skills. Changes open a pull request against {{baseBranch}} and become active only after review, merge, and deployment.",
+      "loading": "Loading managed skills…",
+      "unavailable": "Git-backed skill management is not configured on this machine.",
+      "add": "Add skill",
+      "delete": "Delete skill",
+      "untitled": "Untitled skill",
+      "empty": "Add a skill to begin.",
+      "fields": {
+        "name": "Name",
+        "description": "Description and trigger guidance",
+        "instructions": "Instructions (Markdown)"
+      },
+      "proposal": {
+        "title": "Propose changes",
+        "description": "Vibe Kanban validates the complete catalog and opens a reviewable GitHub pull request. The active agent catalog is never edited in place.",
+        "submit": "Open pull request ({{count}} changes)",
+        "open": "Open pull request"
+      }
     },
     "general": {
       "loading": "Loading settings...",
@@ -107,6 +131,37 @@
         "autoResume": {
           "label": "Resume interrupted runs on startup",
           "helper": "Automatically send a follow-up to coding agent runs that were interrupted by a restart. Each run is resumed at most once. Agents start without confirmation and may spend tokens."
+        }
+      },
+      "autoRemediation": {
+        "title": "Auto error remediation",
+        "description": "When a coding agent's turn fails, file an issue with pipelines attached and start a workspace that fixes it without supervision.",
+        "enabled": {
+          "label": "Remediate failed agent runs automatically",
+          "helper": "Agents start without confirmation, spend tokens, and may merge to the base branch. Remediation workspaces never trigger remediation themselves; each workspace is remediated at most once per day."
+        },
+        "project": {
+          "label": "Issue project",
+          "helper": "Project that receives remediation issues.",
+          "source": "Failing workspace's project"
+        },
+        "repos": {
+          "label": "Repositories",
+          "helper": "Repositories for the remediation workspace. None selected uses the failing workspace's repositories."
+        },
+        "executor": {
+          "label": "Agent"
+        },
+        "variant": {
+          "label": "Profile variant",
+          "helper": "Falls back to the default variant when this variant is not defined."
+        },
+        "model": {
+          "label": "Model"
+        },
+        "maxPerHour": {
+          "label": "Max launches per hour",
+          "helper": "0 disables launching."
         }
       },
       "editor": {
@@ -337,6 +392,19 @@
       "description": "Customize the behavior of coding agents with different configurations.",
       "loading": "Loading agent configurations...",
       "selectAgent": "Select agent",
+      "visibility": {
+        "title": "Visibility",
+        "description": "Disabled agents are hidden from agent pickers. They stay configurable here and existing work keeps running.",
+        "label": "Show in agent pickers",
+        "defaultLocked": "The default agent can't be disabled. Make another agent the default first.",
+        "lastLocked": "At least one agent must stay enabled."
+      },
+      "models": {
+        "title": "Models",
+        "description": "Unchecked models are hidden from the model menu for this agent.",
+        "lastEnabled": "At least one model must stay enabled.",
+        "loading": "Loading models..."
+      },
       "save": {
         "button": "Save Agent Configurations",
         "success": "✓ Executor configurations saved successfully!",
@@ -367,7 +435,8 @@
         "jsonLabel": "Agent Configuration (JSON)",
         "jsonPlaceholder": "Loading profiles...",
         "jsonLoading": "Loading...",
-        "pathLabel": "Configuration file location:"
+        "pathLabel": "Configuration file location:",
+        "disabled": "Disabled"
       },
       "errors": {
         "deleteFailed": "Failed to delete configuration. Please try again.",
@@ -675,7 +744,7 @@
     },
     "cliTools": {
       "title": "CLI Tools",
-      "description": "Install pinned vendor CLI tools and launch supported sign-in flows. A copy already provided by this machine always wins. Credentials remain stored and managed by each vendor CLI.",
+      "description": "Install pinned vendor CLI tools on the selected host. Checks below run on that host, in the environment its agents receive (login and non-login shells). Credentials remain managed by each vendor CLI.",
       "loading": "Checking tool availability…",
       "docs": "Vendor documentation",
       "actions": {
@@ -698,18 +767,69 @@
         "cancel": "Cancel",
         "retry": "Retry"
       },
+      "agent": {
+        "available": "Agents on this host: {{path}}",
+        "missing": "Agents on this host cannot find it",
+        "login_shell_missing": "Agents: found at {{path}}, but lost in login shells",
+        "login_shell_mismatch": "Agents: {{path}}, but login shells run a different copy",
+        "runtime_unavailable": "Agents: {{path}} cannot start (runtime dependency unavailable)",
+        "failed": "Agents: {{path}} did not start"
+      },
       "status": {
-        "host": "Provided by this machine: {{path}}",
-        "app": "Installed by Vibe Kanban ({{version}})",
+        "host": "Machine copy: {{path}}",
+        "app": "Installed on host by Vibe Kanban ({{version}})",
         "outdated": "catalog now pins {{version}}",
         "shadowed": "the machine's copy takes precedence on PATH",
         "notAvailable": "Not installed. Catalog version: {{version}}",
         "unsupported": "Not installable here"
       }
     },
+    "reauth": {
+      "title": "Auto-auth",
+      "description": "Credentials this host signs back in with no human involved, using the saved Entra browser session and 1Password. A success is only reported after an independent check of the vendor’s own credential store.",
+      "loading": "Checking credentials…",
+      "empty": "No re-authentication targets are configured on this host.",
+      "sweepEvery": "Expired credentials are repaired automatically every {{minutes}} minutes.",
+      "sweepOff": "Automatic repair is off; re-authenticate on demand.",
+      "runAll": "Re-authenticate all expired",
+      "run": "Re-authenticate",
+      "onDemand": "on demand only",
+      "refused": "Refused earlier: agents and the automatic sweep will not retry this until you re-run it here.",
+      "showSteps": "Show steps",
+      "hideSteps": "Hide steps",
+      "state": {
+        "authenticated": "Authenticated",
+        "unauthenticated": "Expired or signed out",
+        "unknown": "Status unknown",
+        "not_configured": "Not configured"
+      },
+      "outcome": {
+        "running": "Running",
+        "succeeded": "Succeeded",
+        "failed": "Failed",
+        "verification_failed": "Finished, but verification failed",
+        "refused": "Refused"
+      },
+      "trigger": {
+        "manual": "from Settings",
+        "agent": "by an agent",
+        "sweep": "by the automatic sweep"
+      },
+      "summary": {
+        "healthy": "Signed in",
+        "attention": "Needs attention",
+        "unknown": "Unknown",
+        "notConfigured": "Not configured"
+      },
+      "kind": {
+        "aws_sso": "AWS SSO",
+        "cli_tool": "CLI tools",
+        "sgsc": "sgsc-mcp gateway"
+      }
+    },
     "aws": {
       "title": "AWS",
-      "description": "Manage AWS SSO profiles in this machine's ~/.aws/config and sign in with the AWS CLI. Vibe Kanban writes profile configuration only; credentials and tokens stay in the AWS CLI's own storage.",
+      "description": "Manage AWS SSO profiles and sign in on the selected host. Status checks verify host authentication only. Agent shells need access to the same AWS configuration and SSO cache; select a profile with AWS_PROFILE. Tokens remain managed by the AWS CLI.",
       "loading": "Loading AWS profiles…",
       "empty": "No SSO profiles configured yet. Add one to enable AWS access on this machine.",
       "cliMissing": "The AWS CLI is not available on this machine. Install it from the CLI Tools section to check status and sign in.",
@@ -730,10 +850,10 @@
         "delete": "Delete profile"
       },
       "auth": {
-        "authenticated": "Authenticated",
-        "unauthenticated": "Not signed in",
-        "unknown": "Status unknown",
-        "cliMissing": "AWS CLI not available"
+        "authenticated": "Authenticated on host",
+        "unauthenticated": "Not signed in on host",
+        "unknown": "Host authentication status unknown",
+        "cliMissing": "AWS CLI not available on host"
       },
       "delete": {
         "confirm": "Delete the SSO profile \"{{name}}\" from ~/.aws/config?"
@@ -828,6 +948,22 @@
       },
       "client": {
         "label": "Client"
+      },
+      "management": {
+        "title": "Paired machines",
+        "description": "Manage remote machines paired with this client.",
+        "refresh": "Refresh",
+        "loading": "Loading paired machines…",
+        "loadError": "Could not load paired machines. Refresh to try again.",
+        "statusError": "Could not check connection status. Refresh to try again.",
+        "empty": "No machines paired yet. Use client setup to pair a machine.",
+        "online": "Online",
+        "offline": "Offline",
+        "unpaired": "Pairing required",
+        "unknown": "Status unknown",
+        "pairedAt": "Paired {{date}}",
+        "open": "Open workspaces",
+        "removeConfirm": "Remove the pairing with {{name}} from this client? Remote workspaces will not be deleted."
       }
     },
     "remoteProjects": {
@@ -951,6 +1087,28 @@
         "resetAllTitle": "Reset all bundled defaults?",
         "resetAllMessage": "This recreates or overwrites all bundled default pipeline files.",
         "resetAllDirtyMessage": "This recreates or overwrites all bundled default pipeline files and discards the open draft."
+      },
+      "newIssueDefaults": {
+        "title": "New issue defaults",
+        "description": "Pipelines enabled by default on new issues, in the New Issue form and for MCP create_issue calls that don't name pipelines. A project override beats its organization's, which beats this machine's default. Stored on this machine.",
+        "machine": {
+          "label": "This machine",
+          "helper": "Used when neither the project nor its organization overrides it."
+        },
+        "organizations": {
+          "label": "Organization overrides",
+          "helper": "Override the machine default for every project in an organization."
+        },
+        "projects": {
+          "label": "Project overrides",
+          "helper": "Override the organization (or machine) default for one project."
+        },
+        "inheritMachine": "Use machine default",
+        "inheritOrganization": "Use organization default",
+        "override": "Override",
+        "noneSelected": "No pipelines: new issues start without a pipeline.",
+        "missing": "{{id}} (missing)",
+        "saveFailed": "Could not save the new issue defaults. Try again."
       }
     }
   },

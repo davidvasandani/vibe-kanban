@@ -67,6 +67,35 @@ fn stale_cursor_is_reported_instead_of_silently_skipping_output() {
     assert_eq!(replay.earliest_available, 2);
 }
 
+#[test]
+fn terminal_outcome_survives_output_eviction() {
+    for state in [
+        TerminalState::Completed,
+        TerminalState::Failed,
+        TerminalState::Killed,
+        TerminalState::Interrupted,
+    ] {
+        let mut journal = EventJournal::new(Uuid::new_v4(), 1).unwrap();
+        journal
+            .append(SystemTime::now(), ExecutionEventPayload::Starting)
+            .unwrap();
+        let evidence = evidence(state.clone());
+        let payload = match state {
+            TerminalState::Completed => ExecutionEventPayload::Completed(evidence.clone()),
+            TerminalState::Failed => ExecutionEventPayload::Failed(evidence.clone()),
+            TerminalState::Killed => ExecutionEventPayload::Killed(evidence.clone()),
+            TerminalState::Interrupted => ExecutionEventPayload::Interrupted(evidence.clone()),
+        };
+        journal.append(SystemTime::now(), payload).unwrap();
+        let batch = journal.replay_after(0);
+        assert!(batch.replay_gap);
+        assert_eq!(batch.earliest_available, 2);
+        assert_eq!(journal.terminal_evidence(), Some(&evidence));
+        // Retained outcome does not make missing output contiguous.
+        assert!(!journal.replay_after(1).replay_gap);
+    }
+}
+
 fn summary(state: JobState, terminal: Option<TerminalEvidence>, last_sequence: u64) -> JobSummary {
     JobSummary {
         execution_id: Uuid::new_v4(),

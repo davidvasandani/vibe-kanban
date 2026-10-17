@@ -38,14 +38,14 @@ You can add the same template more than once. The first instance takes the templ
 The generic Slack template installs a pinned build of the
 [davidvasandani/slack-mcp-server](https://github.com/davidvasandani/slack-mcp-server)
 fork rather than the upstream npm package, because the fork adds attachment
-retrieval:
+retrieval and complete Block Kit message reads:
 
 ```json
 {
   "command": "npx",
   "args": [
     "-y",
-    "https://github.com/davidvasandani/slack-mcp-server/releases/download/v1.3.0-vk.2/slack-mcp-server-vk-1.3.0-vk.2.tgz",
+    "https://github.com/davidvasandani/slack-mcp-server/releases/download/v1.3.0-vk.3/slack-mcp-server-vk-1.3.0-vk.3.tgz",
     "--transport",
     "stdio"
   ],
@@ -53,13 +53,14 @@ retrieval:
 }
 ```
 
-Release **v1.3.0-vk.2** is based on upstream 1.3.0 and includes fork commit
-`04633fb892dc6dd38c3faffe29ff9b30829560c6`. The tarball is a launcher: it
+Release **v1.3.0-vk.3** is based on upstream 1.3.0 and includes fork commit
+`e3e4ec5cad5c5ecaf793ebda0317f187c4b53e86`. The tarball is a launcher: it
 downloads the server binary for your platform from that same release, verifies
 it against a SHA-256 recorded at build time, caches it, and runs it. A
 verification failure is fatal — the connector never falls back to a different
 build. Paste your Slack user token (`xoxp-…`) in place of `YOUR_TOKEN` when
-using this local stdio form.
+using this local stdio form. Grant `users:read.email` and reinstall your app to
+enable profile email lookup; missing permission returns an explicit error.
 
 Clustered self-hosted deployments can instead set
 `VIBE_KANBAN_SLACK_MCP_URL` to one operator-hosted Streamable HTTP endpoint.
@@ -264,6 +265,83 @@ only ever confirm that a hash equals itself. Note that the SHA pins the fork's
 source, not its dependency versions — installing from Git runs the package's own
 build, which resolves its dependencies from npm at that moment.
 
+### Brink POS connector
+
+The Brink POS template runs the `brink-pos-mcp-server` package over stdio. It is
+a SOAP client for [Brink POS](https://github.com/davidvasandani/mcp-brink) that
+lets an agent place test orders, read order details and status, test OLO
+(online-ordering) connectivity, and read a register's current business date:
+
+```json
+{
+  "command": "npx",
+  "args": ["-y", "brink-pos-mcp-server"],
+  "env": {
+    "BRINK_ACCESS_TOKEN": "YOUR_TOKEN",
+    "BRINK_LOCATION_TOKEN": "YOUR_TOKEN"
+  }
+}
+```
+
+Replace both placeholders before saving — Vibe Kanban does not check that you
+have. `BRINK_ACCESS_TOKEN` is required. `BRINK_LOCATION_TOKEN` is the default
+register for the connection; tools that accept a `location_token` argument can
+override it per request, so you can point one instance at several locations.
+
+<Warning>
+`BRINK_LOCATION_TOKEN` is a Base64 value and must keep its `==` padding. A token
+copied without it — for example `EXAMPLE_LOCATION_TOKEN` — fails authentication;
+restore the trailing `==` so it ends `EXAMPLE_LOCATION_TOKEN==`.
+</Warning>
+
+<Note>
+The server defaults to the Brink production API
+(`https://api13.brinkpos.net/Ordering.svc`). To target a different endpoint, add
+an optional `BRINK_API_URL` entry to `env`.
+</Note>
+
+Unlike the Slack and Gmail templates, this entry is an unpinned package launch,
+so `npx` must be able to resolve `brink-pos-mcp-server` on the agent host —
+publish it to the npm registry your deployment uses (public npm or a configured
+private registry) before adding the server.
+
+### Personal ServiceNow connector
+
+The Personal ServiceNow template connects to a hosted Streamable HTTP server.
+Use it to query ServiceNow incidents, requests, changes, knowledge, CMDB and
+catalog records, and to run the connector's explicit private-task, catalog and
+access-request tools:
+
+```json
+{
+  "type": "http",
+  "url": "https://snow.vasandani.dev/mcp"
+}
+```
+
+The entry deliberately has no credential. The endpoint needs an origin bearer
+token. A Vibe Kanban deployment supplies it through a host-local runtime route:
+when Vibe Kanban writes the agent's config it rewrites this URL to a loopback
+address, and the route attaches the bearer on the way out. The token therefore
+never enters your settings, the agent's native config file or any backup of it.
+Settings keep showing the public URL.
+
+<Warning>
+On a host without that runtime route the endpoint rejects the request. You can
+add an `Authorization: Bearer …` header yourself on such a host, but keep the
+value in your own secret manager and never commit it. The endpoint also accepts
+requests only from reviewed source networks, so a header alone does not grant
+access from elsewhere.
+</Warning>
+
+<Note>
+Existing sessions keep the MCP server list they started with. Start a new
+session after adding or changing this server. Earlier versions of this template
+launched a local `personal-servicenow-mcp` stdio command. A saved entry of that
+form keeps working wherever the command is installed, and you switch it by
+editing its transport to HTTP.
+</Note>
+
 ## Adding Custom MCP Servers
 
 You can also add your own MCP servers by configuring them manually:
@@ -340,18 +418,59 @@ native configuration.
 
 - Explore the [Agent Configurations](/settings/agent-configurations) guide for advanced agent setup
 - Check out [Supported Coding Agents](/supported-coding-agents) for agent-specific features
-## Refreshing tools in an active session
+## Refresh tools in an active workspace
 
-Active Codex workspace sessions expose **Refresh MCP tools** in the session
-toolbar. The action re-reads Codex's MCP configuration without replacing the
-workspace or conversation. Codex queues the new configuration for the next
-active turn, so the initial result is **Pending next turn** rather than a false
-success. After the next turn starts, Vibe Kanban reads the live Codex MCP status
-and records the confirmed server and tool counts.
+After you enable an MCP server or update its tools, select **Restart agent for
+MCP changes** in the session toolbar. Vibe Kanban starts a fresh agent process
+with the latest MCP configuration while keeping the same workspace and
+conversation.
 
-Other executors currently report **Unsupported** because they do not expose a
-live, confirmable MCP reload operation. Vibe Kanban does not substitute the
-independent connection test for live adoption.
+If a turn is running, Vibe Kanban asks for confirmation and lets that turn
+finish before it starts the new process. The restart does not change the tool
+schema of a model request that is already in progress.
+
+<Info>
+The connection test in MCP settings reads the server's current inventory, but it
+does not update an agent process that is already running. Use the session
+toolbar action to adopt the tested inventory.
+</Info>
+
+Codex also supports an internal live-refresh operation used by MCP callers. It
+queues the new configuration for the next active turn, so the initial result is
+**Pending next turn** rather than success. After that turn starts, Vibe Kanban
+reads the thread-scoped Codex MCP status and records the sorted tool names and a
+schema fingerprint as well as the tool count. This distinguishes tool additions,
+removals, and schema-only changes.
+
+Other executors report **Unsupported** for this internal operation when they do
+not expose a live, confirmable MCP reload. Vibe Kanban does not substitute the
+independent connection test for live adoption; use the agent restart instead.
+
+Claude Code is explicitly unsupported for in-place refresh. A fresh Claude Code
+process publishes its registered tool names during startup, so Vibe Kanban can
+still confirm the post-restart registry and identify a configured server that
+registered no tools.
+
+Agents connected to the Vibe Kanban MCP server can call `restart_session`.
+Inside a scoped session, the session and workspace identifiers are optional. The
+backend accepts the restart before the current process exits, preserves the
+conversation, and starts a continuation from a fresh executor process.
+
+Use `restart_workspace` when the whole workspace runtime is wedged. It preserves
+the worktree and Git state, restarts workspace-owned processes, replays durable
+dev server and background helper definitions, and resumes the selected session.
+In scoped use, it defaults to the current workspace and session.
+
+Restart results list every configured server. A server can be **Ready**,
+**Connected with 0 tools**, or terminally unavailable. Discovery has a 30-second
+bound; reconnection attempts do not leave the status at **Connecting**
+indefinitely.
+
+When the active registry is unavailable or disagrees with a successful settings
+test, use **Open VK issue for MCP failure**. Vibe Kanban pre-fills the issue with
+the executor, workspace and session identifiers, server outcomes, tool counts,
+safe error timestamps, and discovery attempt counts. It creates the issue only
+after you select the action.
 
 Codex publishes a complete MCP runtime at the next-turn boundary. This makes
 publication atomic and does not interrupt the current turn. The pinned status

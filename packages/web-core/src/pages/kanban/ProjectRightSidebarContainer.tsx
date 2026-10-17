@@ -24,7 +24,7 @@ import { useWorkspaceRepo } from '@/shared/hooks/useWorkspaceRepo';
 import { useExecutionProcesses } from '@/shared/hooks/useExecutionProcesses';
 import { getLatestConfigFromProcesses } from '@/shared/lib/executor';
 import { SessionChatBoxContainer } from '@/features/workspace-chat/ui/SessionChatBoxContainer';
-import { CreateChatBoxContainer } from '@/shared/components/CreateChatBoxContainer';
+import { CreateChatBoxContainer } from '@/features/create-mode/ui/CreateChatBoxContainer';
 import { KanbanIssuePanelContainer } from './KanbanIssuePanelContainer';
 import {
   ConversationList,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { getReconnectDelay } from './useJsonPatchWsStream';
+import { getReconnectDelay } from '@/shared/lib/sharedJsonPatchStream';
 
 describe('getReconnectDelay', () => {
   it('uses bounded exponential backoff with jitter', () => {

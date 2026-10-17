@@ -204,6 +204,7 @@ struct PendingFlow {
     cf_access_client_id: Option<String>,
     cf_access_client_secret: Option<String>,
     existing_gateway_token: Option<String>,
+    existing_gateway_id: Option<Uuid>,
     created_at: Instant,
     outcome: FlowOutcome,
 }
@@ -217,6 +218,7 @@ struct ExchangeContext {
     cf_access_client_id: Option<String>,
     cf_access_client_secret: Option<String>,
     existing_gateway_token: Option<String>,
+    existing_gateway_id: Option<Uuid>,
 }
 
 static FLOWS: LazyLock<RwLock<HashMap<Uuid, PendingFlow>>> =
@@ -292,18 +294,26 @@ async fn start(
         })
         .flatten();
     let mut url = configured_url.to_string();
-    if let Some(id) = configured_url
-        .split("/mcp-gateway/")
-        .nth(1)
-        .and_then(|tail| tail.split(['/', '?']).next())
-        && let Ok(Some(connection)) = db::models::mcp_gateway::McpGatewayConnection::find_bound(
+    let existing_gateway_id = match configured_gateway_id(configured_url) {
+        Ok(id) => id,
+        Err(message) => return Ok(ResponseJson(ApiResponse::error(&message))),
+    };
+    if let Some(id) = existing_gateway_id {
+        let connection = match db::models::mcp_gateway::McpGatewayConnection::find_bound(
             &deployment.db().pool,
-            id,
+            &id.to_string(),
             deployment.user_id(),
             deployment.user_id(),
         )
         .await
-    {
+        {
+            Ok(Some(connection)) => connection,
+            _ => {
+                return Ok(ResponseJson(ApiResponse::error(
+                    "Configured shared MCP connection is unavailable; reload MCP settings before reconnecting",
+                )));
+            }
+        };
         url = connection.upstream_url;
     }
 
@@ -417,6 +427,7 @@ async fn start(
         cf_access_client_id: payload.cf_access_client_id,
         cf_access_client_secret: payload.cf_access_client_secret,
         existing_gateway_token,
+        existing_gateway_id,
         created_at: Instant::now(),
         outcome: FlowOutcome::Pending,
     };
@@ -499,6 +510,7 @@ async fn callback(
         cf_id,
         cf_secret,
         existing_gateway_token,
+        existing_gateway_id,
     ) = {
         let mut flows = FLOWS.write().await;
         prune_flows_and_has_capacity(&mut flows);
@@ -524,6 +536,7 @@ async fn callback(
             flow.cf_access_client_id.clone(),
             flow.cf_access_client_secret.clone(),
             flow.existing_gateway_token.clone(),
+            flow.existing_gateway_id,
         )
     };
 
@@ -562,6 +575,7 @@ async fn callback(
             cf_access_client_id: cf_id,
             cf_access_client_secret: cf_secret,
             existing_gateway_token,
+            existing_gateway_id,
         },
         &code,
     )
@@ -601,6 +615,7 @@ async fn exchange_and_store(
         cf_access_client_id,
         cf_access_client_secret,
         existing_gateway_token,
+        existing_gateway_id,
     } = context;
     let tokens = mcp_oauth::exchange_token_set(
         &exchange.oauth_client,
@@ -618,14 +633,13 @@ async fn exchange_and_store(
     let upstream_url = reqwest::Url::parse(&upstream_url)
         .map_err(|_| "Configured MCP server URL is invalid".to_string())?
         .to_string();
-    let connection_id = Uuid::new_v5(
-        &Uuid::NAMESPACE_URL,
-        format!(
-            "{}|{}|{server_name}|{upstream_url}",
-            deployment.user_id(),
-            deployment.user_id()
-        )
-        .as_bytes(),
+    // Config identifiers can change (including legacy identifier migration).
+    // A reconnect must update the row referenced by the configured gateway URL.
+    let connection_id = oauth_connection_id(
+        existing_gateway_id,
+        deployment.user_id(),
+        &server_name,
+        &upstream_url,
     );
     let (gateway_url, gateway_token) = crate::mcp_gateway::store_oauth_connection(
         deployment,
@@ -648,6 +662,44 @@ async fn exchange_and_store(
     persist_gateway_assignments(&server_name, &upstream_url, &gateway_url, &gateway_token).await
 }
 
+fn configured_gateway_id(url: &str) -> Result<Option<Uuid>, String> {
+    let url =
+        reqwest::Url::parse(url).map_err(|_| "Configured MCP server URL is invalid".to_string())?;
+    let Some(id) = url.path().strip_prefix("/mcp-gateway/") else {
+        return Ok(None);
+    };
+    Uuid::parse_str(id)
+        .map(Some)
+        .map_err(|_| "Configured shared MCP connection identifier is invalid".to_string())
+}
+
+fn oauth_connection_id(
+    existing: Option<Uuid>,
+    user_id: &str,
+    server_name: &str,
+    upstream_url: &str,
+) -> Uuid {
+    existing.unwrap_or_else(|| {
+        Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("{user_id}|{user_id}|{server_name}|{upstream_url}").as_bytes(),
+        )
+    })
+}
+
+fn assignment_matches_gateway(
+    entry: &serde_json::Value,
+    upstream_url: &str,
+    gateway_path: &str,
+) -> bool {
+    entry
+        .get("url")
+        .or_else(|| entry.get("httpUrl"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(|url| reqwest::Url::parse(url).ok())
+        .is_some_and(|url| url.path() == gateway_path || url.as_str() == upstream_url)
+}
+
 async fn persist_gateway_assignments(
     server_name: &str,
     upstream_url: &str,
@@ -668,17 +720,7 @@ async fn persist_gateway_assignments(
         let Some(existing) = snapshot.servers.get(server_name) else {
             continue;
         };
-        let existing_url = existing
-            .get("url")
-            .or_else(|| existing.get("httpUrl"))
-            .and_then(serde_json::Value::as_str);
-        let same_gateway = existing_url
-            .and_then(|url| reqwest::Url::parse(url).ok())
-            .is_some_and(|url| url.path() == gateway_path);
-        let same_upstream = existing_url
-            .and_then(|url| reqwest::Url::parse(url).ok())
-            .is_some_and(|url| url.as_str() == upstream_url);
-        if !same_upstream && !same_gateway {
+        if !assignment_matches_gateway(existing, upstream_url, &gateway_path) {
             continue;
         }
         let Some(config_path) = snapshot.config_path.as_ref() else {
@@ -749,6 +791,7 @@ async fn complete(
         cf_id,
         cf_secret,
         existing_gateway_token,
+        existing_gateway_id,
     ) = {
         let mut flows = FLOWS.write().await;
         prune_flows_and_has_capacity(&mut flows);
@@ -776,6 +819,7 @@ async fn complete(
             flow.cf_access_client_id.clone(),
             flow.cf_access_client_secret.clone(),
             flow.existing_gateway_token.clone(),
+            flow.existing_gateway_id,
         )
     };
 
@@ -790,6 +834,7 @@ async fn complete(
             cf_access_client_id: cf_id,
             cf_access_client_secret: cf_secret,
             existing_gateway_token,
+            existing_gateway_id,
         },
         &code,
     )
@@ -914,6 +959,96 @@ mod tests {
     use super::*;
 
     #[test]
+    fn reconnect_after_identifier_migration_keeps_assigned_gateway() {
+        let upstream = "https://mcp.atlassian.com/v1/mcp";
+        let original = oauth_connection_id(None, "owner", "Atlassian Rovo", upstream);
+        let renamed = oauth_connection_id(None, "owner", "atlassian_rovo", upstream);
+        assert_ne!(original, renamed);
+        let configured = format!("http://127.0.0.1:8000/mcp-gateway/{original}");
+        let retained = oauth_connection_id(
+            configured_gateway_id(&configured).unwrap(),
+            "owner",
+            "atlassian_rovo",
+            upstream,
+        );
+        assert_eq!(retained, original);
+        let path = format!("/mcp-gateway/{retained}");
+        // The pre-fix path cannot match the assignments left by a rename.
+        let wrong_path = format!("/mcp-gateway/{renamed}");
+        for entry in [
+            json!({"type": "http", "url": configured}),
+            json!({"url": configured, "http_headers": {"Authorization": "Bearer fixture"}}),
+            json!({"httpUrl": configured}),
+        ] {
+            assert!(assignment_matches_gateway(&entry, upstream, &path));
+            assert!(!assignment_matches_gateway(&entry, upstream, &wrong_path));
+        }
+    }
+
+    #[test]
+    fn first_connect_and_unchanged_reconnect_use_same_identity() {
+        let upstream = "https://mcp.example/";
+        assert_eq!(configured_gateway_id(upstream).unwrap(), None);
+        let id = oauth_connection_id(None, "owner", "server", upstream);
+        assert_eq!(
+            id,
+            Uuid::new_v5(
+                &Uuid::NAMESPACE_URL,
+                b"owner|owner|server|https://mcp.example/"
+            )
+        );
+        assert_eq!(
+            oauth_connection_id(Some(id), "owner", "server", upstream),
+            id
+        );
+        assert_ne!(
+            id,
+            oauth_connection_id(None, "other-owner", "server", upstream)
+        );
+    }
+
+    #[test]
+    fn assignment_matching_preserves_unrelated_and_replaced_entries() {
+        let id = Uuid::new_v4();
+        let path = format!("/mcp-gateway/{id}");
+        let upstream = "https://mcp.example/";
+        for url in [
+            "https://mcp.example".to_string(),
+            format!("http://127.0.0.1:9999{path}"),
+        ] {
+            assert!(assignment_matches_gateway(
+                &json!({"url": url}),
+                upstream,
+                &path
+            ));
+        }
+        for entry in [
+            json!({"url": "https://different.example/mcp"}),
+            json!({"url": format!("http://127.0.0.1:8000/mcp-gateway/{}", Uuid::new_v4())}),
+            json!({"command": "other-server"}),
+            json!({"url": "invalid"}),
+            json!({}),
+        ] {
+            assert!(!assignment_matches_gateway(&entry, upstream, &path));
+        }
+    }
+
+    #[test]
+    fn gateway_identity_is_parsed_from_path_not_query() {
+        assert_eq!(
+            configured_gateway_id("https://mcp.example/?next=/mcp-gateway/invalid").unwrap(),
+            None
+        );
+        for url in [
+            "http://localhost/mcp-gateway/invalid",
+            "http://localhost/mcp-gateway/",
+            "invalid",
+        ] {
+            assert!(configured_gateway_id(url).is_err());
+        }
+    }
+
+    #[test]
     fn connect_error_adds_guidance_for_public_redirect_rejection() {
         let raw = "client registration failed (HTTP 400): redirect_uri must be a \
                    trusted MCP client callback (Claude, ChatGPT/Codex, Cursor, or localhost)"
@@ -1029,6 +1164,7 @@ mod tests {
             cf_access_client_id: None,
             cf_access_client_secret: None,
             existing_gateway_token: None,
+            existing_gateway_id: None,
             created_at,
             outcome: FlowOutcome::Pending,
         };

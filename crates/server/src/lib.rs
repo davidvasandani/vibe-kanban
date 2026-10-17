@@ -1,4 +1,5 @@
 pub mod error;
+pub mod error_remediation;
 pub mod middleware;
 pub mod relay_pairing;
 pub mod routes;
@@ -10,3 +11,4 @@ pub mod startup;
 // #[cfg(not(feature = "cloud"))]
 pub type DeploymentImpl = local_deployment::LocalDeployment;
 pub mod mcp_gateway;
+pub mod mcp_oauth;

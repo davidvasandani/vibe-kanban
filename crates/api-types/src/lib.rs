@@ -23,6 +23,7 @@ pub mod oauth;
 pub mod organization_env_var;
 pub mod organization_member;
 pub mod organizations;
+pub mod pipeline_block;
 pub mod project;
 pub mod project_status;
 pub mod pull_request;

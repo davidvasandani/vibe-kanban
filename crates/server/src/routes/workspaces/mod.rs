@@ -33,8 +33,16 @@ pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
         )
         .route("/messages/first", get(core::get_first_user_message))
         .route("/placement", get(core::get_workspace_placement))
+        .route(
+            "/creation-progress",
+            get(core::get_workspace_creation_progress),
+        )
         .route("/affinity", patch(affinity::update_workspace_affinity))
         .route("/seen", axum::routing::put(core::mark_seen))
+        .route(
+            "/mcp/restart",
+            get(mcp_refresh::workspace_restart_status).post(mcp_refresh::restart_workspace),
+        )
         .nest("/git", git::router())
         .nest("/execution", execution::router())
         .nest("/integration", integration::router())

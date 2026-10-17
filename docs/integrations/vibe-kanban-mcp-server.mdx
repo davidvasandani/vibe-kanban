@@ -84,7 +84,7 @@ Many tools accept an optional `project_id` or `organization_id` parameter. When 
 | Tool | Purpose | Required Parameters | Optional Parameters | Returns |
 |------|---------|-------------------|-------------------|---------|
 | `list_issues` | List issues in a project | None | `project_id`<br/>`status`<br/>`priority`<br/>`search`<br/>`simple_id`<br/>`parent_issue_id`<br/>`assignee_user_id`<br/>`tag_id`<br/>`tag_name`<br/>`limit`<br/>`offset` | Paginated list of issues with PR info |
-| `create_issue` | Create a new issue | `title` | `project_id`<br/>`description`<br/>`priority`<br/>`parent_issue_id` | Created issue ID |
+| `create_issue` | Create a new issue | `title` | `project_id`<br/>`description`<br/>`priority`<br/>`parent_issue_id`<br/>`pipeline_ids`<br/>`pipeline_stage_ids`<br/>`executor` | Created issue ID |
 | `get_issue` | Get detailed issue information | `issue_id` | None | Full issue details with tags, relationships, sub-issues, and PRs |
 | `update_issue` | Update an existing issue | `issue_id` | `title`<br/>`description`<br/>`status`<br/>`priority`<br/>`parent_issue_id` | Updated issue details |
 | `delete_issue` | Delete an issue | `issue_id` | None | Deletion confirmation |
@@ -93,6 +93,8 @@ Many tools accept an optional `project_id` or `organization_id` parameter. When 
 <Tip>
 For `update_issue`, the `parent_issue_id` field supports three states: omit it entirely to leave the parent unchanged, pass `null` to un-nest the issue from its parent, or pass a UUID to set a new parent.
 </Tip>
+
+`create_issue`'s `pipeline_ids`, `pipeline_stage_ids`, and `executor` parameters compose the same `## Pipeline` block that the New Issue UI appends to a task's description. Call `list_pipelines` first to find available pipeline and stage IDs; see [Pipelines](#pipelines) below.
 
 ### Issue Assignees
 
@@ -120,6 +122,16 @@ For `update_issue`, the `parent_issue_id` field supports three states: omit it e
 
 Supported relationship types: `blocking`, `related`, `has_duplicate`.
 
+### Pipelines
+
+| Tool | Purpose | Required Parameters | Optional Parameters | Returns |
+|------|---------|-------------------|-------------------|---------|
+| `list_pipelines` | List the available task pipelines (`~/.vibe-kanban/pipelines/*.toml`) | None | None | List of pipelines with their ordered stages |
+
+Each pipeline stage has an `id`, `label`, `prompt_fragment`, `default_enabled` flag, and `heavy` flag. Pass a pipeline's `id` in `create_issue`'s `pipeline_ids`, and (optionally) a subset of its stage `id`s in `pipeline_stage_ids` — omitting `pipeline_stage_ids` enables each selected pipeline's `default_enabled` stages.
+
+When `create_issue` omits `pipeline_ids`, it attaches the same default pipelines the New Issue form pre-selects. You configure these in **Settings → Pipelines → New issue defaults** on the machine the MCP server talks to. A project override takes precedence over its organization's override, and an organization override takes precedence over the machine default, which is `basic` out of the box. To create an issue without a pipeline, pass `pipeline_ids: []`. A default that names a pipeline that no longer exists is skipped.
+
 ### Repository Management
 
 | Tool | Purpose | Required Parameters | Optional Parameters | Returns |
@@ -143,7 +155,7 @@ Supported relationship types: `blocking`, `related`, `has_duplicate`.
 
 | Tool | Purpose | Required Parameters | Optional Parameters | Returns |
 |------|---------|-------------------|-------------------|---------|
-| `start_workspace` | Create a workspace and start its first coding-agent session | `name`<br/>`executor`<br/>`repositories` | `prompt`<br/>`variant`<br/>`issue_id` | Workspace ID |
+| `start_workspace` | Create a workspace and start its first coding-agent session | `name`<br/>`executor`<br/>`repositories` | `prompt`<br/>`variant`<br/>`model_id`<br/>`agent_id`<br/>`reasoning_id`<br/>`issue_id` | Workspace ID |
 | `create_session` | Create a session in an existing workspace | None | `workspace_id`<br/>`executor` | Session summary |
 | `list_sessions` | List sessions for a workspace | None | `workspace_id` | Session list |
 | `run_session_prompt` | Run a coding-agent prompt inside an existing session | `session_id`<br/>`prompt` | None | Execution details |
@@ -286,6 +298,33 @@ Once configured, you'll see the Vibe Kanban MCP server listed and ready to use i
 <Note>
 Similar configuration steps apply to other MCP clients like Claude Desktop, VS Code with MCP extensions, or any custom MCP client implementations.
 </Note>
+
+### ChatGPT and other OAuth-only clients
+
+ChatGPT custom connectors (and similar remote clients) can only sign in with OAuth. A self-hosted Vibe Kanban server can act as their OAuth authorisation server. You approve each connection on a consent page, and the client then gets the full set of MCP tools.
+
+<Steps>
+<Step title="Expose the server publicly">
+  Set `VK_MCP_OAUTH_PUBLIC_URL` to the public HTTPS origin of your server (for example `https://vibe.example.com`). Without it, the OAuth endpoints do not exist.
+
+  Your reverse proxy must:
+  - serve the MCP endpoint at `/oauth/mcp`, admitting a request only when `/api/mcp-oauth/verify` accepts its bearer token
+  - reach `/.well-known/oauth-*`, `/oauth/register` and `/oauth/token` from the client's network
+  - keep `/oauth/authorize` behind your own login, because that page is where you approve connections
+</Step>
+<Step title="Add the connector">
+  In ChatGPT, create a custom connector with the server URL `https://vibe.example.com/oauth/mcp` and the authentication method **OAuth**. ChatGPT registers itself and opens the consent page.
+  <Check>
+  After you click **Approve**, ChatGPT lists the Vibe Kanban tools.
+  </Check>
+</Step>
+</Steps>
+
+<Warning>
+Approving grants full access: the client can create, update and delete issues and workspaces, and run coding agents. Approve only connections you started yourself.
+</Warning>
+
+To see or revoke connected clients, call `GET /api/mcp-oauth/grants` and `DELETE /api/mcp-oauth/grants/{id}`. Revoking a grant stops its tokens immediately.
 
 ## Troubleshooting
 

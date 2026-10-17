@@ -108,3 +108,26 @@ export function formatUptime(
   if (hours > 0) return `${hours}h ${minutes}m`;
   return `${minutes}m`;
 }
+
+/**
+ * True when at least as many tasks sit in uninterruptible wait (D state) as
+ * the node has cores — the NFS-saturation signature, which io pressure alone
+ * misses. An absent reading on either side is never a saturation.
+ */
+export function isBlockedTaskSaturated(
+  uninterruptibleTasks: number | null | undefined,
+  coreCount: number | null | undefined
+): boolean {
+  const blocked = toNumber(uninterruptibleTasks);
+  const cores = toNumber(coreCount);
+  if (blocked === null || cores === null || cores <= 0) return false;
+  return blocked >= cores;
+}
+
+/** `/proc/pressure/io` 60 s averages as `some / full`, e.g. `2.2% / 0.9%`. */
+export function formatIoPressure(
+  some: number | null | undefined,
+  full: number | null | undefined
+): string {
+  return `${formatPercent(some)} / ${formatPercent(full)}`;
+}

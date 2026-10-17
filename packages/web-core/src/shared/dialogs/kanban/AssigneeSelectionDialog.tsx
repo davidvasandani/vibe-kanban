@@ -103,7 +103,10 @@ function AssigneeSelectionContent({
   }, [hasCreateCallback, createModeAssigneeIds, modal.visible]);
 
   // Fallback: get/set create mode defaults from shared in-memory state.
-  const issueComposerAssigneeIds = issueComposer?.draft.assigneeIds ?? [];
+  const issueComposerAssigneeIds = useMemo(
+    () => issueComposer?.draft.assigneeIds ?? [],
+    [issueComposer?.draft.assigneeIds]
+  );
 
   const setIssueComposerAssigneeIds = useCallback(
     (assigneeIds: string[]) => {

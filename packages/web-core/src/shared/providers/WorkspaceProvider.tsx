@@ -8,6 +8,7 @@ import { useWorkspaceRepo } from '@/shared/hooks/useWorkspaceRepo';
 import { useWorkspaceSessions } from '@/shared/hooks/useWorkspaceSessions';
 import { useGitHubComments } from '@/shared/hooks/useGitHubComments';
 import { useDiffStream } from '@/shared/hooks/useDiffStream';
+import { useWorkspaceDiffStreamGate } from '@/shared/hooks/useWorkspaceDiffStreamGate';
 import { workspacesApi } from '@/shared/lib/api';
 import { useWorkspaceDiffStore } from '@/shared/stores/useWorkspaceDiffStore';
 import type { DiffStats } from 'shared/types';
@@ -78,7 +79,11 @@ export function WorkspaceProvider({ children }: WorkspaceProviderProps) {
     enabled: !isCreateMode && hasPrAttached,
   });
 
-  const { diffs } = useDiffStream(workspaceId ?? null, !isCreateMode);
+  const diffStreamEnabled = useWorkspaceDiffStreamGate(
+    workspaceId,
+    isCreateMode
+  );
+  const { diffs } = useDiffStream(workspaceId ?? null, diffStreamEnabled);
 
   const diffPaths = useMemo(
     () =>

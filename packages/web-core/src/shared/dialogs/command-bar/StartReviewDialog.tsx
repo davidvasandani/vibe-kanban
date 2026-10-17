@@ -150,6 +150,7 @@ const StartReviewDialogImpl = create<StartReviewDialogProps>(
       additionalPrompt,
       queryClient,
       selectSession,
+      t,
       onSuccess,
       modal,
     ]);

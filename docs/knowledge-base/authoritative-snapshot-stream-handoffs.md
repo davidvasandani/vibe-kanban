@@ -1,6 +1,7 @@
 # Authoritative snapshot and live-stream handoffs
 
-Tags: `vk/3488-fix-stale-execut`, `c89d-address-fable-fo`
+Tags: `vk/3488-fix-stale-execut`, `c89d-address-fable-fo`,
+`vk/8a08-frontend-not-ref`, `vk/113f-sidebar-randomly`
 
 ## Subscribe before taking the snapshot
 
@@ -77,3 +78,78 @@ When relay framing carries a server close such as 1011, emit its code and reason
 to consumers but close the browser-owned underlying socket without attempting
 to originate a reserved close code. Preserve `wasClean` for normal code 1000 so
 clean completion does not reconnect.
+
+## Bridge acknowledged creations into the streamed projection
+
+A mutation response can be durable creation evidence even when the collection's
+live notification is delayed or missed by the current connection. Discarding
+the created record and waiting only for a patch creates a user-visible gap: the
+mutation succeeds, local input clears, and the new entity does not appear until
+a later full snapshot.
+
+Reconcile the complete server-returned entity into the same ID-keyed projection
+consumed by the UI. This is response-backed reconciliation, not a fabricated
+pre-acceptance optimistic record. Apply live snapshot/patch values last so they
+supersede the bridge value, then retire the bridge once live delivery contains
+that ID. Keeping a separate unkeyed UI record forces fragile matching and risks
+duplicates.
+
+Scope the bridge to the collection identity. Validate late responses against the
+current scope at callback time, filter the merged projection by that scope, and
+clear bridge state when scope changes. Tests must exercise response-first,
+stream-first, live supersession/removal, and a response settling after a scope
+switch.
+
+## A failed refresh is not an empty snapshot
+
+Workspace sidebar names and pins come from the workspace stream, while PR,
+diff, approval, poller and unseen-activity metadata come from a separate bulk
+summary query in `packages/web-core/src/shared/hooks/useWorkspaces.ts`. Losing
+all enrichment while retaining names can therefore indicate a summary-cache
+failure rather than workspace deletion.
+
+Reject failed summary requests. Returning an empty map after an HTTP, API or
+transport failure tells React Query that an authoritative empty snapshot arrived
+and replaces the last successful metadata. Rejection preserves same-key cached
+data and permits normal retry/poll recovery. A successful empty array or explicit
+null/false/zero fields must still replace the previous snapshot.
+
+Do not use `keepPreviousData` to retain data through same-key refresh failures;
+React Query already retains it. That placeholder also carries data across query
+keys and can show another host's metadata when workspace IDs overlap. Keep host
+and archive status in the query identity. Test the real QueryClient with failed
+refreshes, automatic polling recovery, explicit clears, initial failure, and
+late responses after a host switch.
+
+Contributed by: `vk/113f-sidebar-randomly`.
+
+## A polled query needs its own deadline
+
+React Query dedupes `refetchInterval` ticks and focus refetches onto an
+in-flight promise (`cancelRefetch: false`). The `signal` it hands to
+`queryFn` aborts only on cancellation or loss of observers, never on
+elapsed time. So one summaries request that never settles (a suspended
+mobile page, a lost connection behind the Cloudflare tunnel) **captures every
+later poll**. The sidebar then shows names with no metadata until a reload,
+and retention of the last good snapshot does not help when there was never
+one.
+
+- Give the `queryFn` a deadline and forward React Query's `signal`. Combine
+  them with a manual `AbortController` and `setTimeout`: `AbortSignal.any`
+  is missing on older iOS Safari, and `AbortSignal.timeout` ignores Vitest
+  fake timers.
+- **Race the load against the abort, do not just pass the signal.** The remote
+  frontend's WebRTC transport (`requestLocalApiViaWebRtc`) ignores
+  `requestInit.signal`, so an aborted signal alone never settles the promise.
+  `Promise.race([load(), aborted])` holds the deadline for every transport,
+  including body parsing.
+- A timeout must **reject**, so the retention rule above still keeps the last
+  snapshot, and the next poll then issues a new request.
+- Set `refetchOnWindowFocus: true` on queries whose staleness users notice
+  when they resume (the global default is `false`). The `focusManager`
+  listens to `visibilitychange`.
+- Test with a mock request that only settles when its signal aborts, a mock
+  that ignores the signal entirely, `client.cancelQueries`, and
+  `focusManager.setFocused`. Reset the focus manager in `afterEach`.
+
+Contributed by: `vk/b923-workspaces-loadi`.

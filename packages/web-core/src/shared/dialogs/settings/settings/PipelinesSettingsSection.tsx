@@ -31,6 +31,7 @@ import {
   type PipelineValidationTuple,
 } from '@/shared/lib/pipeline/pipelineSettings';
 import { cn } from '@/shared/lib/utils';
+import { NewIssuePipelineDefaultsCard } from './NewIssuePipelineDefaultsCard';
 import { SettingsCard, SettingsInput } from './SettingsComponents';
 import { useSettingsDirty } from './SettingsDirtyContext';
 import { useSettingsMachineClient } from './SettingsHostContext';
@@ -41,6 +42,8 @@ type ValidationStatus = 'idle' | 'pending' | 'valid' | 'invalid';
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
+
+const UNSELECTED_SCOPE_KEY = ['machine', 'unselected'] as const;
 
 function scopeSignature(scopeKey: readonly string[]): string {
   return scopeKey.join('\u0000');
@@ -134,12 +137,14 @@ function PipelineStatusRow({
 export function PipelinesSettingsSection() {
   const { t } = useTranslation('settings');
   const machineClient = useSettingsMachineClient();
-  const scopeKey =
-    machineClient?.queryScopeKey ?? (['machine', 'unselected'] as const);
+  const scopeKey = machineClient?.queryScopeKey ?? UNSELECTED_SCOPE_KEY;
   const scope = scopeSignature(scopeKey);
   const { setDirty: setContextDirty } = useSettingsDirty();
   const statusesQuery = usePipelineStatuses(machineClient);
-  const statuses = statusesQuery.data ?? [];
+  const statuses = useMemo(
+    () => statusesQuery.data ?? [],
+    [statusesQuery.data]
+  );
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [draftKind, setDraftKind] = useState<DraftKind | null>(null);
@@ -632,265 +637,270 @@ export function PipelinesSettingsSection() {
   }, [isDirty, t, validationError, validationStatus]);
 
   return (
-    <SettingsCard
-      title={t('settings.pipelines.title')}
-      description={t('settings.pipelines.description')}
-      headerAction={
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          onClick={handleResetAll}
-          disabled={!machineClient || mutationPending}
-        >
-          <ArrowClockwiseIcon className="mr-1 size-icon-xs" weight="bold" />
-          {t('settings.pipelines.actions.resetAll')}
-        </Button>
-      }
-    >
-      {statusesQuery.isLoading && (
-        <div className="flex items-center gap-2 text-sm text-low">
-          <CircleNotchIcon className="size-icon-sm animate-spin" />
-          {t('settings.pipelines.loading')}
-        </div>
-      )}
-
-      {statusesQuery.isError && (
-        <div className="rounded-sm border border-error/50 bg-error/10 p-3 text-sm text-error">
-          {errorText(statusesQuery.error)}
-        </div>
-      )}
-
-      {mutationError && (
-        <div className="rounded-sm border border-error/50 bg-error/10 p-3 text-sm text-error">
-          {mutationError}
-        </div>
-      )}
-
-      {saveSuccess && (
-        <div className="rounded-sm border border-success/50 bg-success/10 p-3 text-sm text-success">
-          {t('settings.pipelines.save.success')}
-        </div>
-      )}
-
-      <div className="grid min-h-[420px] min-w-0 grid-cols-1 overflow-hidden rounded-sm border border-border lg:grid-cols-[minmax(220px,280px)_1fr]">
-        <div className="min-h-0 border-b border-border bg-panel lg:border-b-0 lg:border-r">
-          <div className="border-b border-border bg-secondary/50 p-3">
-            <div className="text-sm font-medium text-high">
-              {t('settings.pipelines.list.title')}
-            </div>
-            <p className="mt-1 text-xs text-low">
-              {t('settings.pipelines.list.description')}
-            </p>
+    <>
+      <SettingsCard
+        title={t('settings.pipelines.title')}
+        description={t('settings.pipelines.description')}
+        headerAction={
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={handleResetAll}
+            disabled={!machineClient || mutationPending}
+          >
+            <ArrowClockwiseIcon className="mr-1 size-icon-xs" weight="bold" />
+            {t('settings.pipelines.actions.resetAll')}
+          </Button>
+        }
+      >
+        {statusesQuery.isLoading && (
+          <div className="flex items-center gap-2 text-sm text-low">
+            <CircleNotchIcon className="size-icon-sm animate-spin" />
+            {t('settings.pipelines.loading')}
           </div>
-          <div className="max-h-72 overflow-y-auto lg:max-h-[520px]">
-            {!statusesQuery.isLoading &&
-              !statusesQuery.isError &&
-              statuses.length === 0 && (
-                <div className="p-3 text-sm text-low">
-                  {t('settings.pipelines.empty')}
-                </div>
-              )}
-            {statuses.map((status) => (
-              <PipelineStatusRow
-                key={status.id}
-                status={status}
-                selected={status.id === selectedId}
-                onSelect={() => void handleSelect(status.id)}
-              />
-            ))}
-          </div>
-          <div className="space-y-2 border-t border-border p-3">
-            <div className="flex gap-2">
-              <SettingsInput
-                value={newPipelineId}
-                onChange={(value) => {
-                  setNewPipelineId(value);
-                  setAddError(null);
-                }}
-                placeholder={t('settings.pipelines.add.placeholder')}
-                disabled={mutationPending || !statusesQuery.isSuccess}
-                error={Boolean(addError)}
-              />
-              <Button
-                type="button"
-                size="sm"
-                variant="secondary"
-                onClick={() => void handleStartAdd()}
-                disabled={mutationPending || !statusesQuery.isSuccess}
-                aria-label={t('settings.pipelines.actions.add')}
-                title={t('settings.pipelines.actions.add')}
-              >
-                <PlusIcon className="size-icon-xs" weight="bold" />
-              </Button>
-            </div>
-            {addError ? (
-              <p className="text-xs text-error">{addError}</p>
-            ) : (
-              <p className="text-xs text-low">
-                {t('settings.pipelines.add.helper')}
-              </p>
-            )}
-          </div>
-        </div>
+        )}
 
-        <div className="flex min-h-0 min-w-0 flex-col bg-panel">
-          <div className="flex min-w-0 flex-col gap-3 border-b border-border bg-secondary/50 p-3 sm:flex-row sm:items-start sm:justify-between">
-            <div className="min-w-0">
-              <div className="flex min-w-0 flex-wrap items-center gap-2">
-                <span className="text-sm font-medium text-high">
-                  {effectiveId ?? t('settings.pipelines.editor.noSelection')}
-                </span>
-                {draftKind === 'new' && (
-                  <span className="rounded-sm bg-brand/10 px-1.5 py-0.5 text-xs text-brand">
-                    {t('settings.pipelines.editor.newDraft')}
-                  </span>
-                )}
+        {statusesQuery.isError && (
+          <div className="rounded-sm border border-error/50 bg-error/10 p-3 text-sm text-error">
+            {errorText(statusesQuery.error)}
+          </div>
+        )}
+
+        {mutationError && (
+          <div className="rounded-sm border border-error/50 bg-error/10 p-3 text-sm text-error">
+            {mutationError}
+          </div>
+        )}
+
+        {saveSuccess && (
+          <div className="rounded-sm border border-success/50 bg-success/10 p-3 text-sm text-success">
+            {t('settings.pipelines.save.success')}
+          </div>
+        )}
+
+        <div className="grid min-h-[420px] min-w-0 grid-cols-1 overflow-hidden rounded-sm border border-border lg:grid-cols-[minmax(220px,280px)_1fr]">
+          <div className="min-h-0 border-b border-border bg-panel lg:border-b-0 lg:border-r">
+            <div className="border-b border-border bg-secondary/50 p-3">
+              <div className="text-sm font-medium text-high">
+                {t('settings.pipelines.list.title')}
               </div>
-              {selectedStatus?.error && (
-                <p className="mt-1 text-xs text-error">
-                  {parseErrorMessage(selectedStatus.error)}
+              <p className="mt-1 text-xs text-low">
+                {t('settings.pipelines.list.description')}
+              </p>
+            </div>
+            <div className="max-h-72 overflow-y-auto lg:max-h-[520px]">
+              {!statusesQuery.isLoading &&
+                !statusesQuery.isError &&
+                statuses.length === 0 && (
+                  <div className="p-3 text-sm text-low">
+                    {t('settings.pipelines.empty')}
+                  </div>
+                )}
+              {statuses.map((status) => (
+                <PipelineStatusRow
+                  key={status.id}
+                  status={status}
+                  selected={status.id === selectedId}
+                  onSelect={() => void handleSelect(status.id)}
+                />
+              ))}
+            </div>
+            <div className="space-y-2 border-t border-border p-3">
+              <div className="flex gap-2">
+                <SettingsInput
+                  value={newPipelineId}
+                  onChange={(value) => {
+                    setNewPipelineId(value);
+                    setAddError(null);
+                  }}
+                  placeholder={t('settings.pipelines.add.placeholder')}
+                  disabled={mutationPending || !statusesQuery.isSuccess}
+                  error={Boolean(addError)}
+                />
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => void handleStartAdd()}
+                  disabled={mutationPending || !statusesQuery.isSuccess}
+                  aria-label={t('settings.pipelines.actions.add')}
+                  title={t('settings.pipelines.actions.add')}
+                >
+                  <PlusIcon className="size-icon-xs" weight="bold" />
+                </Button>
+              </div>
+              {addError ? (
+                <p className="text-xs text-error">{addError}</p>
+              ) : (
+                <p className="text-xs text-low">
+                  {t('settings.pipelines.add.helper')}
                 </p>
               )}
             </div>
-            <div className="flex shrink-0 flex-wrap gap-2">
-              {draftKind === 'new' && (
+          </div>
+
+          <div className="flex min-h-0 min-w-0 flex-col bg-panel">
+            <div className="flex min-w-0 flex-col gap-3 border-b border-border bg-secondary/50 p-3 sm:flex-row sm:items-start sm:justify-between">
+              <div className="min-w-0">
+                <div className="flex min-w-0 flex-wrap items-center gap-2">
+                  <span className="text-sm font-medium text-high">
+                    {effectiveId ?? t('settings.pipelines.editor.noSelection')}
+                  </span>
+                  {draftKind === 'new' && (
+                    <span className="rounded-sm bg-brand/10 px-1.5 py-0.5 text-xs text-brand">
+                      {t('settings.pipelines.editor.newDraft')}
+                    </span>
+                  )}
+                </div>
+                {selectedStatus?.error && (
+                  <p className="mt-1 text-xs text-error">
+                    {parseErrorMessage(selectedStatus.error)}
+                  </p>
+                )}
+              </div>
+              <div className="flex shrink-0 flex-wrap gap-2">
+                {draftKind === 'new' && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => void handleCloseNewDraft()}
+                    disabled={mutationPending}
+                  >
+                    <XIcon className="mr-1 size-icon-xs" weight="bold" />
+                    {t('settings.pipelines.actions.closeDraft')}
+                  </Button>
+                )}
+                {selectedId &&
+                  draftKind === 'existing' &&
+                  isBundledPipelineId(selectedId) && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={() => void handleResetOne()}
+                      disabled={mutationPending}
+                    >
+                      <ArrowClockwiseIcon
+                        className="mr-1 size-icon-xs"
+                        weight="bold"
+                      />
+                      {t('settings.pipelines.actions.resetOne')}
+                    </Button>
+                  )}
+                {draftKind === 'existing' && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="destructive"
+                    onClick={() => void handleDelete()}
+                    disabled={!selectedId || mutationPending}
+                  >
+                    <TrashIcon className="mr-1 size-icon-xs" weight="bold" />
+                    {t('settings.pipelines.actions.delete')}
+                  </Button>
+                )}
+              </div>
+            </div>
+
+            <div className="flex min-h-0 flex-1 flex-col gap-3 p-3">
+              {rawQuery.isLoading && draftKind === 'existing' && (
+                <div className="flex items-center gap-2 text-sm text-low">
+                  <CircleNotchIcon className="size-icon-sm animate-spin" />
+                  {t('settings.pipelines.editor.loadingRaw')}
+                </div>
+              )}
+
+              {rawQuery.isError && draftKind === 'existing' && (
+                <div className="rounded-sm border border-error/50 bg-error/10 p-3 text-sm text-error">
+                  {errorText(rawQuery.error)}
+                </div>
+              )}
+
+              {draftKind === null && !statusesQuery.isLoading ? (
+                <div className="rounded-sm border border-border bg-secondary/50 p-4 text-sm text-low">
+                  {t('settings.pipelines.editor.empty')}
+                </div>
+              ) : (
+                <textarea
+                  value={draftContent}
+                  onChange={(event) => {
+                    setDraftContent(event.target.value);
+                    setMutationError(null);
+                    setSaveSuccess(false);
+                  }}
+                  spellCheck={false}
+                  disabled={
+                    mutationPending || rawQuery.isLoading || rawQuery.isError
+                  }
+                  className={cn(
+                    'min-h-[300px] flex-1 resize-y rounded-sm border border-border bg-secondary px-3 py-2',
+                    'font-mono text-sm leading-5 text-high placeholder:text-low',
+                    'focus:outline-none focus:ring-1 focus:ring-brand',
+                    'lg:min-h-0',
+                    (mutationPending ||
+                      rawQuery.isLoading ||
+                      rawQuery.isError) &&
+                      'cursor-not-allowed opacity-60'
+                  )}
+                  placeholder={t('settings.pipelines.editor.placeholder')}
+                />
+              )}
+
+              {validationMessage && (
+                <div
+                  className={cn(
+                    'rounded-sm border p-2 text-sm',
+                    validationStatus === 'valid'
+                      ? 'border-success/50 bg-success/10 text-success'
+                      : validationStatus === 'pending'
+                        ? 'border-border bg-secondary text-low'
+                        : 'border-error/50 bg-error/10 text-error'
+                  )}
+                >
+                  {validationStatus === 'pending' && (
+                    <CircleNotchIcon className="mr-1 inline size-icon-xs animate-spin" />
+                  )}
+                  {validationMessage}
+                </div>
+              )}
+            </div>
+
+            <div className="flex flex-col gap-2 border-t border-border p-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="text-xs text-low">
+                {isDirty
+                  ? t('settings.pipelines.editor.dirty')
+                  : t('settings.pipelines.editor.clean')}
+              </div>
+              <div className="flex justify-end gap-2">
                 <Button
                   type="button"
                   size="sm"
                   variant="ghost"
-                  onClick={() => void handleCloseNewDraft()}
-                  disabled={mutationPending}
+                  onClick={() => void handleDiscard()}
+                  disabled={!isDirty || mutationPending}
                 >
-                  <XIcon className="mr-1 size-icon-xs" weight="bold" />
-                  {t('settings.pipelines.actions.closeDraft')}
+                  {t('settings.pipelines.actions.discard')}
                 </Button>
-              )}
-              {selectedId &&
-                draftKind === 'existing' &&
-                isBundledPipelineId(selectedId) && (
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    onClick={() => void handleResetOne()}
-                    disabled={mutationPending}
-                  >
-                    <ArrowClockwiseIcon
-                      className="mr-1 size-icon-xs"
-                      weight="bold"
-                    />
-                    {t('settings.pipelines.actions.resetOne')}
-                  </Button>
-                )}
-              {draftKind === 'existing' && (
                 <Button
                   type="button"
                   size="sm"
-                  variant="destructive"
-                  onClick={() => void handleDelete()}
-                  disabled={!selectedId || mutationPending}
+                  variant="secondary"
+                  onClick={() => void handleSave()}
+                  disabled={saveDisabled}
                 >
-                  <TrashIcon className="mr-1 size-icon-xs" weight="bold" />
-                  {t('settings.pipelines.actions.delete')}
+                  {writeMutation.isPending && (
+                    <CircleNotchIcon className="mr-1 size-icon-xs animate-spin" />
+                  )}
+                  {t('settings.pipelines.actions.save')}
                 </Button>
-              )}
-            </div>
-          </div>
-
-          <div className="flex min-h-0 flex-1 flex-col gap-3 p-3">
-            {rawQuery.isLoading && draftKind === 'existing' && (
-              <div className="flex items-center gap-2 text-sm text-low">
-                <CircleNotchIcon className="size-icon-sm animate-spin" />
-                {t('settings.pipelines.editor.loadingRaw')}
               </div>
-            )}
-
-            {rawQuery.isError && draftKind === 'existing' && (
-              <div className="rounded-sm border border-error/50 bg-error/10 p-3 text-sm text-error">
-                {errorText(rawQuery.error)}
-              </div>
-            )}
-
-            {draftKind === null && !statusesQuery.isLoading ? (
-              <div className="rounded-sm border border-border bg-secondary/50 p-4 text-sm text-low">
-                {t('settings.pipelines.editor.empty')}
-              </div>
-            ) : (
-              <textarea
-                value={draftContent}
-                onChange={(event) => {
-                  setDraftContent(event.target.value);
-                  setMutationError(null);
-                  setSaveSuccess(false);
-                }}
-                spellCheck={false}
-                disabled={
-                  mutationPending || rawQuery.isLoading || rawQuery.isError
-                }
-                className={cn(
-                  'min-h-[300px] flex-1 resize-y rounded-sm border border-border bg-secondary px-3 py-2',
-                  'font-mono text-sm leading-5 text-high placeholder:text-low',
-                  'focus:outline-none focus:ring-1 focus:ring-brand',
-                  'lg:min-h-0',
-                  (mutationPending || rawQuery.isLoading || rawQuery.isError) &&
-                    'cursor-not-allowed opacity-60'
-                )}
-                placeholder={t('settings.pipelines.editor.placeholder')}
-              />
-            )}
-
-            {validationMessage && (
-              <div
-                className={cn(
-                  'rounded-sm border p-2 text-sm',
-                  validationStatus === 'valid'
-                    ? 'border-success/50 bg-success/10 text-success'
-                    : validationStatus === 'pending'
-                      ? 'border-border bg-secondary text-low'
-                      : 'border-error/50 bg-error/10 text-error'
-                )}
-              >
-                {validationStatus === 'pending' && (
-                  <CircleNotchIcon className="mr-1 inline size-icon-xs animate-spin" />
-                )}
-                {validationMessage}
-              </div>
-            )}
-          </div>
-
-          <div className="flex flex-col gap-2 border-t border-border p-3 sm:flex-row sm:items-center sm:justify-between">
-            <div className="text-xs text-low">
-              {isDirty
-                ? t('settings.pipelines.editor.dirty')
-                : t('settings.pipelines.editor.clean')}
-            </div>
-            <div className="flex justify-end gap-2">
-              <Button
-                type="button"
-                size="sm"
-                variant="ghost"
-                onClick={() => void handleDiscard()}
-                disabled={!isDirty || mutationPending}
-              >
-                {t('settings.pipelines.actions.discard')}
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                variant="secondary"
-                onClick={() => void handleSave()}
-                disabled={saveDisabled}
-              >
-                {writeMutation.isPending && (
-                  <CircleNotchIcon className="mr-1 size-icon-xs animate-spin" />
-                )}
-                {t('settings.pipelines.actions.save')}
-              </Button>
             </div>
           </div>
         </div>
-      </div>
-    </SettingsCard>
+      </SettingsCard>
+      <NewIssuePipelineDefaultsCard />
+    </>
   );
 }

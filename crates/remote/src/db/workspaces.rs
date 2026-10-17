@@ -304,6 +304,24 @@ impl WorkspaceRepository {
         lines_added: Option<Option<i32>>,
         lines_removed: Option<Option<i32>>,
     ) -> Result<Workspace, WorkspaceError> {
+        let mut tx = pool.begin().await?;
+
+        // Issue mutations lock the issue before archiving its workspaces. Use
+        // the same order here so concurrent Done/unarchive cannot deadlock.
+        if archived == Some(false) {
+            sqlx::query(
+                "SELECT id FROM issues WHERE id = (SELECT issue_id FROM workspaces WHERE id = $1) FOR UPDATE",
+            )
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        }
+        let was_archived: bool =
+            sqlx::query_scalar("SELECT archived FROM workspaces WHERE id = $1 FOR UPDATE")
+                .bind(id)
+                .fetch_one(&mut *tx)
+                .await?;
+
         let update_name = name.is_some();
         let name_value = name.flatten();
 
@@ -356,9 +374,186 @@ impl WorkspaceRepository {
             lines_removed_value,
             id
         )
-        .fetch_one(pool)
+        .fetch_one(&mut *tx)
         .await?;
 
+        if was_archived && !record.archived {
+            // Match ProjectStatusRepository::find_by_name: project-scoped,
+            // case-insensitive names. A missing target leaves the issue alone.
+            sqlx::query(include_str!("sql/reopen_workspace_issue.sql"))
+                .bind(record.issue_id)
+                .bind(record.project_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
         Ok(record)
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+
+    // Minimal relational fixture keeps the tests independent of auth and Electric.
+    async fn fixture(pool: &PgPool) -> (Uuid, Uuid, Uuid, Uuid) {
+        sqlx::raw_sql(
+            "CREATE TABLE project_statuses (id uuid PRIMARY KEY, project_id uuid, name text);
+             CREATE TABLE issues (id uuid PRIMARY KEY, project_id uuid, status_id uuid,
+                                  updated_at timestamptz DEFAULT now());
+             CREATE TABLE workspaces (
+                 id uuid PRIMARY KEY, project_id uuid NOT NULL, owner_user_id uuid NOT NULL,
+                 issue_id uuid, local_workspace_id uuid, name text, archived boolean NOT NULL,
+                 files_changed integer, lines_added integer, lines_removed integer,
+                 created_at timestamptz NOT NULL DEFAULT now(),
+                 updated_at timestamptz NOT NULL DEFAULT now());",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        let project = Uuid::new_v4();
+        let issue = Uuid::new_v4();
+        let workspace = Uuid::new_v4();
+        let done = Uuid::new_v4();
+        let progress = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO project_statuses VALUES ($1, $3, 'dOnE'), ($2, $3, 'IN PROGRESS')",
+        )
+        .bind(done)
+        .bind(progress)
+        .bind(project)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO issues (id, project_id, status_id) VALUES ($1, $2, $3)")
+            .bind(issue)
+            .bind(project)
+            .bind(done)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO workspaces (id, project_id, owner_user_id, issue_id, archived) VALUES ($1, $2, $3, $4, true)")
+            .bind(workspace).bind(project).bind(Uuid::new_v4()).bind(issue).execute(pool).await.unwrap();
+        (workspace, issue, done, progress)
+    }
+
+    async fn status(pool: &PgPool, issue: Uuid) -> Uuid {
+        sqlx::query_scalar("SELECT status_id FROM issues WHERE id = $1")
+            .bind(issue)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn update(
+        pool: &PgPool,
+        workspace: Uuid,
+        archived: Option<bool>,
+    ) -> Result<Workspace, WorkspaceError> {
+        WorkspaceRepository::update(
+            pool,
+            workspace,
+            Some(Some("renamed".into())),
+            archived,
+            None,
+            None,
+            None,
+        )
+        .await
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn reactivation_reopens_done_only_on_transition(pool: PgPool) {
+        let (workspace, issue, done, progress) = fixture(&pool).await;
+        assert!(update(&pool, workspace, None).await.unwrap().archived);
+        assert_eq!(status(&pool, issue).await, done);
+        assert!(update(&pool, workspace, Some(true)).await.unwrap().archived);
+        assert_eq!(status(&pool, issue).await, done);
+        assert!(
+            !update(&pool, workspace, Some(false))
+                .await
+                .unwrap()
+                .archived
+        );
+        assert_eq!(status(&pool, issue).await, progress);
+        // An already-active update must not reopen a subsequently completed issue.
+        sqlx::query("UPDATE issues SET status_id = $1 WHERE id = $2")
+            .bind(done)
+            .bind(issue)
+            .execute(&pool)
+            .await
+            .unwrap();
+        update(&pool, workspace, Some(false)).await.unwrap();
+        assert_eq!(status(&pool, issue).await, done);
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn reactivation_preserves_other_statuses_and_missing_target(pool: PgPool) {
+        let (workspace, issue, done, progress) = fixture(&pool).await;
+        for name in ["Cancelled", "Backlog", "To do", "In review", "Custom"] {
+            sqlx::query("UPDATE project_statuses SET name = $1 WHERE id = $2")
+                .bind(name)
+                .bind(done)
+                .execute(&pool)
+                .await
+                .unwrap();
+            update(&pool, workspace, Some(true)).await.unwrap();
+            update(&pool, workspace, Some(false)).await.unwrap();
+            assert_eq!(status(&pool, issue).await, done);
+        }
+        sqlx::query("UPDATE project_statuses SET name = 'Done' WHERE id = $1")
+            .bind(done)
+            .execute(&pool)
+            .await
+            .unwrap();
+        // A target in a different project must not be used.
+        sqlx::query("UPDATE project_statuses SET project_id = $1 WHERE id = $2")
+            .bind(Uuid::new_v4())
+            .bind(progress)
+            .execute(&pool)
+            .await
+            .unwrap();
+        update(&pool, workspace, Some(true)).await.unwrap();
+        update(&pool, workspace, Some(false)).await.unwrap();
+        assert_eq!(status(&pool, issue).await, done);
+        sqlx::query("UPDATE workspaces SET issue_id = NULL WHERE id = $1")
+            .bind(workspace)
+            .execute(&pool)
+            .await
+            .unwrap();
+        update(&pool, workspace, Some(true)).await.unwrap();
+        assert!(
+            !update(&pool, workspace, Some(false))
+                .await
+                .unwrap()
+                .archived
+        );
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn issue_failure_rolls_back_workspace_reactivation(pool: PgPool) {
+        let (workspace, issue, done, progress) = fixture(&pool).await;
+        sqlx::raw_sql(&format!("ALTER TABLE issues ADD CONSTRAINT reject_progress CHECK (status_id <> '{progress}'::uuid)"))
+            .execute(&pool).await.unwrap();
+        assert!(update(&pool, workspace, Some(false)).await.is_err());
+        let archived: bool = sqlx::query_scalar("SELECT archived FROM workspaces WHERE id = $1")
+            .bind(workspace)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(archived);
+        assert_eq!(status(&pool, issue).await, done);
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn concurrent_reactivations_serialize(pool: PgPool) {
+        let (workspace, issue, _, progress) = fixture(&pool).await;
+        let (first, second) = tokio::join!(
+            update(&pool, workspace, Some(false)),
+            update(&pool, workspace, Some(false))
+        );
+        assert!(!first.unwrap().archived);
+        assert!(!second.unwrap().archived);
+        assert_eq!(status(&pool, issue).await, progress);
     }
 }

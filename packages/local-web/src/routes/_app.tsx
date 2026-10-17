@@ -20,7 +20,7 @@ import { LogsPanelProvider } from '@/shared/providers/LogsPanelProvider';
 import { ActionsProvider } from '@/shared/providers/ActionsProvider';
 import { useWorkspaceContext } from '@/shared/hooks/useWorkspaceContext';
 import { useUserSystem } from '@/shared/hooks/useUserSystem';
-import { SharedAppLayout } from '@/shared/components/ui-new/containers/SharedAppLayout';
+import { SharedAppLayout } from '@/pages/root/SharedAppLayout';
 
 function KeyboardShortcutsHandler() {
   useKeyShowHelp(

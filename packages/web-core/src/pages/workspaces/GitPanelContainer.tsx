@@ -1,7 +1,6 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useActions } from '@/shared/hooks/useActions';
-import { useWorkspaceContext } from '@/shared/hooks/useWorkspaceContext';
 import { usePush } from '@/shared/hooks/usePush';
 import { useRenameBranch } from '@/shared/hooks/useRenameBranch';
 import { useBranchStatus } from '@/shared/hooks/useBranchStatus';
@@ -11,7 +10,7 @@ import { useLinkedIssueContext } from '@/shared/providers/remote/LinkedIssueCont
 import { ConfirmDialog } from '@vibe/ui/components/ConfirmDialog';
 import { ForcePushDialog } from '@/shared/dialogs/command-bar/ForcePushDialog';
 import { CommandBarDialog } from '@/shared/dialogs/command-bar/CommandBarDialog';
-import { GitPanel, type RepoInfo } from '@vibe/ui/components/GitPanel';
+import { GitPanel } from '@vibe/ui/components/GitPanel';
 import { Actions } from '@/shared/actions';
 import { workspacesApi } from '@/shared/lib/api';
 import { toast } from 'sonner';
@@ -19,9 +18,9 @@ import type { RepoAction } from '@vibe/ui/components/RepoCard';
 import type {
   Workspace,
   RepoWithTargetBranch,
-  Merge,
   RepoBranchStatus,
 } from 'shared/types';
+import { deriveRepoInfos } from './gitPanelRepoInfo';
 
 export interface GitPanelContainerProps {
   selectedWorkspace: Workspace | undefined;
@@ -35,7 +34,6 @@ export function GitPanelContainer({
   repos,
 }: GitPanelContainerProps) {
   const { executeAction } = useActions();
-  const { activeWorkspaces, archivedWorkspaces } = useWorkspaceContext();
   const repoActions = useUiPreferencesStore((s) => s.repoActions);
   const setRepoAction = useUiPreferencesStore((s) => s.setRepoAction);
   const queryClient = useQueryClient();
@@ -46,20 +44,6 @@ export function GitPanelContainer({
   const renameBranch = useRenameBranch(selectedWorkspace?.id);
   const { data: branchStatus } = useBranchStatus(selectedWorkspace?.id);
 
-  // Get PR info from workspace summary (available immediately, no git calls needed)
-  const summaryPr = useMemo(() => {
-    if (!selectedWorkspace?.id) return undefined;
-    const ws =
-      activeWorkspaces.find((w) => w.id === selectedWorkspace.id) ??
-      archivedWorkspaces.find((w) => w.id === selectedWorkspace.id);
-    if (!ws?.prStatus || !ws.prNumber) return undefined;
-    return {
-      prNumber: ws.prNumber,
-      prUrl: ws.prUrl,
-      prStatus: ws.prStatus,
-    };
-  }, [selectedWorkspace?.id, activeWorkspaces, archivedWorkspaces]);
-
   const handleBranchNameChange = useCallback(
     (newName: string) => {
       renameBranch.mutate(newName);
@@ -67,53 +51,9 @@ export function GitPanelContainer({
     [renameBranch]
   );
 
-  // Transform repos to RepoInfo format (moved from WorkspacesLayout)
-  // Uses workspace summary PR data as a fast fallback before branchStatus loads
-  const repoInfos: RepoInfo[] = useMemo(
-    () =>
-      repos.map((repo) => {
-        const repoStatus = branchStatus?.find((s) => s.repo_id === repo.id);
-
-        let prNumber: number | undefined;
-        let prUrl: string | undefined;
-        let prStatus: 'open' | 'merged' | 'closed' | 'unknown' | undefined;
-
-        if (repoStatus?.merges) {
-          const openPR = repoStatus.merges.find(
-            (m: Merge) => m.type === 'pr' && m.pr_info.status === 'open'
-          );
-          const mergedPR = repoStatus.merges.find(
-            (m: Merge) => m.type === 'pr' && m.pr_info.status === 'merged'
-          );
-
-          const relevantPR = openPR || mergedPR;
-          if (relevantPR && relevantPR.type === 'pr') {
-            prNumber = Number(relevantPR.pr_info.number);
-            prUrl = relevantPR.pr_info.url;
-            prStatus = relevantPR.pr_info.status;
-          }
-        } else if (summaryPr) {
-          // Use workspace summary PR data as a fast fallback while branchStatus loads.
-          // The summary is fetched from the DB (no git calls) and is already cached.
-          prNumber = summaryPr.prNumber;
-          prUrl = summaryPr.prUrl;
-          prStatus = summaryPr.prStatus;
-        }
-
-        return {
-          id: repo.id,
-          name: repo.display_name || repo.name,
-          targetBranch: repo.target_branch || 'main',
-          commitsAhead: repoStatus?.commits_ahead ?? 0,
-          commitsBehind: repoStatus?.commits_behind ?? 0,
-          remoteCommitsAhead: repoStatus?.remote_commits_ahead ?? 0,
-          prNumber,
-          prUrl,
-          prStatus,
-          isTargetRemote: repoStatus?.is_target_remote ?? false,
-        };
-      }),
-    [repos, branchStatus, summaryPr]
+  const repoInfos = useMemo(
+    () => deriveRepoInfos(repos, branchStatus),
+    [repos, branchStatus]
   );
 
   // Track push state per repo: idle, pending, success, or error

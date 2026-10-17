@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { create, useModal } from '@ebay/nice-modal-react';
 import { useTranslation } from 'react-i18next';
 import { PlusIcon, TrashIcon } from '@phosphor-icons/react';
@@ -162,6 +162,11 @@ const McpServerDialogImpl = create<McpServerDialogProps>(
       initial?.assignments ?? []
     );
 
+    // Read through a ref so a late-arriving profile list doesn't re-seed (and
+    // wipe) a form that is already open; only the seed below consumes it.
+    const profilesRef = useRef(profiles);
+    profilesRef.current = profiles;
+
     // NiceModal keeps this component mounted and reuses it across opens, so
     // useState initializers don't re-run. Re-seed all editable state whenever
     // the dialog becomes visible (or is reopened for a different server).
@@ -188,16 +193,16 @@ const McpServerDialogImpl = create<McpServerDialogProps>(
       // the current transport. Do not pre-select every compatible profile.
       setAssignments(
         initial?.assignments ??
-          profiles
+          profilesRef.current
             .filter((p) =>
               isTransportCompatible(p.executor, resetForm.transport)
             )
             .slice(0, 1)
             .map((p) => p.executor)
       );
-      // initialForm/isCustom derive from codec + initial.
-      // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [modal.visible, codec, initial]);
+      // initialForm/isCustom derive from codec + initial, so they add no
+      // re-seed triggers of their own.
+    }, [modal.visible, codec, initial, initialForm, isCustom]);
 
     // Derive current transport for compatibility checks. For custom JSON entries
     // the transport is unknown, so all agents are selectable.

@@ -268,6 +268,43 @@ pub async fn append_log_message(session_id: Uuid, execution_id: Uuid, msg: &LogM
     Ok(())
 }
 
+/// Counts down raw output lines that are already on disk.
+///
+/// A store re-attached after a coordinator restart is seeded with its
+/// persisted history, so the normalizer rebuilds the whole conversation. Those
+/// seeded `Stdout`/`Stderr` messages come first in `history_plus_stream` and
+/// must not be appended to the log file a second time. Skipping by count
+/// rather than by subscription timing keeps this independent of when the
+/// writer subscribes.
+#[derive(Debug)]
+struct RawHistorySkip {
+    remaining: usize,
+}
+
+impl RawHistorySkip {
+    fn new(remaining: usize) -> Self {
+        Self { remaining }
+    }
+
+    /// Whether a raw output message should be written. Consumes one unit of
+    /// the skip budget per raw message while any remains.
+    fn should_write_raw(&mut self) -> bool {
+        if self.remaining == 0 {
+            return true;
+        }
+        self.remaining -= 1;
+        false
+    }
+}
+
+/// Whether a run writes its own raw log file. Detached persistent processes
+/// (unix) do, and that file is the persistent record; mirroring the MsgStore
+/// into a JSONL file as well would duplicate it on every adoption replay.
+pub fn writes_own_raw_log(process: &ExecutionProcess) -> bool {
+    cfg!(unix) && process.run_reason.is_persistent()
+}
+
+/// Persist an execution's raw output from its registered MsgStore.
 pub fn spawn_stream_raw_logs_to_storage(
     msg_stores: Arc<RwLock<HashMap<Uuid, Arc<MsgStore>>>>,
     db: DBService,
@@ -275,6 +312,51 @@ pub fn spawn_stream_raw_logs_to_storage(
     session_id: Uuid,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
+        let store = {
+            let map = msg_stores.read().await;
+            map.get(&execution_id).cloned()
+        };
+        if let Some(store) = store {
+            write_raw_logs(store.history_plus_stream(), db, execution_id, session_id, 0).await;
+        }
+    })
+}
+
+/// Persist a re-attached execution's raw output, skipping the seeded history
+/// that is already on disk.
+///
+/// Subscribes synchronously and counts the seeded raw lines from the very
+/// snapshot the writer replays, under one lock. Counting separately, or
+/// subscribing later inside the task, would let the tracker or normalizer push
+/// (and evict seeded history) in between, and the writer would then skip new
+/// output instead. Call before anything else can push to `store`.
+pub fn spawn_resumed_raw_log_writer(
+    store: &MsgStore,
+    db: DBService,
+    execution_id: Uuid,
+    session_id: Uuid,
+) -> JoinHandle<()> {
+    let (seeded_raw, stream) = store
+        .history_plus_stream_counting(|msg| matches!(msg, LogMsg::Stdout(_) | LogMsg::Stderr(_)));
+    tokio::spawn(write_raw_logs(
+        stream,
+        db,
+        execution_id,
+        session_id,
+        seeded_raw,
+    ))
+}
+
+/// Append raw output to the execution's JSONL log and persist session and
+/// message ids. The first `skip_raw_history` raw messages are already on disk.
+async fn write_raw_logs(
+    stream: futures::stream::BoxStream<'static, Result<LogMsg, std::io::Error>>,
+    db: DBService,
+    execution_id: Uuid,
+    session_id: Uuid,
+    skip_raw_history: usize,
+) {
+    {
         let mut log_writer =
             match ExecutionLogWriter::new_for_execution(session_id, execution_id).await {
                 Ok(w) => w,
@@ -288,16 +370,13 @@ pub fn spawn_stream_raw_logs_to_storage(
                 }
             };
 
-        let store = {
-            let map = msg_stores.read().await;
-            map.get(&execution_id).cloned()
-        };
-
-        if let Some(store) = store {
-            let mut stream = store.history_plus_stream();
+        {
+            let mut stream = stream;
+            let mut skip = RawHistorySkip::new(skip_raw_history);
 
             while let Some(Ok(msg)) = stream.next().await {
                 match &msg {
+                    LogMsg::Stdout(_) | LogMsg::Stderr(_) if !skip.should_write_raw() => {}
                     LogMsg::Stdout(_) | LogMsg::Stderr(_) => match serde_json::to_string(&msg) {
                         Ok(jsonl_line) => {
                             let mut jsonl_line_with_newline = jsonl_line;
@@ -360,7 +439,7 @@ pub fn spawn_stream_raw_logs_to_storage(
                 }
             }
         }
-    })
+    }
 }
 
 async fn read_execution_logs_for_execution(
@@ -419,4 +498,25 @@ fn new_spinner(message: &'static str) -> ProgressBar {
     pb.set_message(message);
     pb.enable_steady_tick(std::time::Duration::from_millis(100));
     pb
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RawHistorySkip;
+
+    #[test]
+    fn raw_history_skip_drops_exactly_the_seeded_lines() {
+        let mut skip = RawHistorySkip::new(2);
+        assert!(!skip.should_write_raw(), "first seeded line is on disk");
+        assert!(!skip.should_write_raw(), "second seeded line is on disk");
+        assert!(skip.should_write_raw(), "first new line is written");
+        assert!(skip.should_write_raw(), "later lines keep being written");
+    }
+
+    #[test]
+    fn raw_history_skip_of_zero_writes_everything() {
+        let mut skip = RawHistorySkip::new(0);
+        assert!(skip.should_write_raw());
+        assert!(skip.should_write_raw());
+    }
 }

@@ -1,12 +1,12 @@
 import { useMemo, type ReactNode } from 'react';
 import type { CreateModeInitialState } from '@/shared/types/createMode';
-import { useCreateModeState } from '@/features/create-mode/model/useCreateModeState';
+import { useCreateModeState } from './useCreateModeState';
 import { useWorkspaces } from '@/shared/hooks/useWorkspaces';
 import { useUserContext } from '@/shared/hooks/useUserContext';
 import {
   CreateModeContext,
   type CreateModeContextValue,
-} from '@/features/create-mode/model/useCreateMode';
+} from './useCreateMode';
 
 interface CreateModeProviderProps {
   children: ReactNode;

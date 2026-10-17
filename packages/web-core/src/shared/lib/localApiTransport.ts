@@ -90,16 +90,14 @@ function resolveScopedPath(
 
 const defaultTransport: LocalApiTransport = {
   request: (pathOrUrl, init = {}) => {
-    const {
-      hostScope: _hostScope,
-      hostId: _hostId,
-      relayHostId: _relayHostId,
-      ...requestInit
-    } = init;
+    // Routing fields are for the transport, not for fetch.
+    const requestInit: LocalApiRequestOptions = { ...init };
+    delete requestInit.hostScope;
+    delete requestInit.hostId;
+    delete requestInit.relayHostId;
     return fetch(pathOrUrl, requestInit);
   },
-  openWebSocket: (pathOrUrl, _options = {}) =>
-    new WebSocket(toAbsoluteWsUrl(pathOrUrl)),
+  openWebSocket: (pathOrUrl) => new WebSocket(toAbsoluteWsUrl(pathOrUrl)),
 };
 
 let transport: LocalApiTransport = defaultTransport;

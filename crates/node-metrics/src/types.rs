@@ -21,6 +21,83 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+pub struct DiskAlertThresholds {
+    pub warning_free_percent: f32,
+    pub warning_free_bytes: u64,
+    pub critical_free_percent: f32,
+    pub critical_free_bytes: u64,
+}
+
+impl DiskAlertThresholds {
+    pub const DEFAULT_WARNING_FREE_PERCENT: f32 = 10.0;
+    pub const DEFAULT_WARNING_FREE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+    pub const DEFAULT_CRITICAL_FREE_PERCENT: f32 = 2.0;
+    pub const DEFAULT_CRITICAL_FREE_BYTES: u64 = 1024 * 1024 * 1024;
+
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if !self.warning_free_percent.is_finite() || !self.critical_free_percent.is_finite() {
+            return Err("disk alert percentages must be finite");
+        }
+        if self.warning_free_percent < 0.0 || self.critical_free_percent < 0.0 {
+            return Err("disk alert percentages must be non-negative");
+        }
+        if self.warning_free_percent > 100.0 || self.critical_free_percent > 100.0 {
+            return Err("disk alert percentages must not exceed 100");
+        }
+        if self.critical_free_percent > self.warning_free_percent
+            || self.critical_free_bytes > self.warning_free_bytes
+        {
+            return Err("critical disk thresholds must not exceed warning thresholds");
+        }
+        Ok(())
+    }
+}
+
+impl Default for DiskAlertThresholds {
+    fn default() -> Self {
+        Self {
+            warning_free_percent: Self::DEFAULT_WARNING_FREE_PERCENT,
+            warning_free_bytes: Self::DEFAULT_WARNING_FREE_BYTES,
+            critical_free_percent: Self::DEFAULT_CRITICAL_FREE_PERCENT,
+            critical_free_bytes: Self::DEFAULT_CRITICAL_FREE_BYTES,
+        }
+    }
+}
+
+#[cfg(test)]
+mod disk_alert_threshold_tests {
+    use super::DiskAlertThresholds;
+
+    #[test]
+    fn defaults_match_documented_policy() {
+        let thresholds = DiskAlertThresholds::default();
+        assert_eq!(thresholds.warning_free_percent, 10.0);
+        assert_eq!(thresholds.warning_free_bytes, 5 * 1024 * 1024 * 1024);
+        assert_eq!(thresholds.critical_free_percent, 2.0);
+        assert_eq!(thresholds.critical_free_bytes, 1024 * 1024 * 1024);
+        assert_eq!(thresholds.validate(), Ok(()));
+    }
+
+    #[test]
+    fn critical_thresholds_cannot_be_less_severe_than_warning() {
+        let thresholds = DiskAlertThresholds {
+            critical_free_percent: 11.0,
+            ..DiskAlertThresholds::default()
+        };
+        assert!(thresholds.validate().is_err());
+    }
+
+    #[test]
+    fn percentages_cannot_exceed_one_hundred() {
+        let thresholds = DiskAlertThresholds {
+            warning_free_percent: 101.0,
+            ..DiskAlertThresholds::default()
+        };
+        assert!(thresholds.validate().is_err());
+    }
+}
+
 /// One observation of one host at one instant.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct HostSample {
@@ -72,6 +149,22 @@ pub struct CpuSample {
     pub load_15m: Option<f32>,
     pub frequency_mhz: Option<u32>,
     pub temperature_celsius: Option<f32>,
+    /// Processes in uninterruptible sleep (state `D`), counted from the
+    /// `/proc/[pid]/stat` walk. `None` when the process table is unreadable.
+    ///
+    /// Counted directly rather than read from `/proc/stat`'s `procs_blocked`,
+    /// which is only `nr_iowait`: NFS RPC waits put tasks in D state and raise
+    /// the load without counting as I/O waiters, and without showing up in
+    /// `/proc/pressure/io` — a host can sit at load 40 with both near zero.
+    /// Defaulted so samples from older workers still deserialize.
+    #[serde(default)]
+    pub uninterruptible_tasks: Option<u32>,
+    /// `/proc/pressure/io` "some" 60-second average, percent of wall time.
+    #[serde(default)]
+    pub io_pressure_some_avg60: Option<f32>,
+    /// `/proc/pressure/io` "full" 60-second average, percent of wall time.
+    #[serde(default)]
+    pub io_pressure_full_avg60: Option<f32>,
 }
 
 /// One core's derived busy percentage, tagged with the index the kernel gave
@@ -247,6 +340,23 @@ pub enum NodeMetricsAvailability {
 mod tests {
     use super::*;
 
+    /// A worker on an older version sends a `cpu` object without the
+    /// pressure fields. It must still deserialize, with those readings absent
+    /// (not zero).
+    #[test]
+    fn cpu_sample_without_pressure_fields_deserializes_as_absent() {
+        let cpu: CpuSample = serde_json::from_str(
+            r#"{"model":null,"core_count":6,"total_busy_percent":12.5,"per_core_busy":null,
+                "load_1m":1.0,"load_5m":1.0,"load_15m":1.0,"frequency_mhz":null,
+                "temperature_celsius":null}"#,
+        )
+        .expect("old cpu sample");
+
+        assert_eq!(cpu.uninterruptible_tasks, None);
+        assert_eq!(cpu.io_pressure_some_avg60, None);
+        assert_eq!(cpu.io_pressure_full_avg60, None);
+    }
+
     fn round_trip(value: &NodeMetricsAvailability) -> NodeMetricsAvailability {
         let encoded = serde_json::to_string(value).expect("serialize");
         serde_json::from_str(&encoded)
@@ -337,11 +447,16 @@ mod tests {
             load_15m: Some(1.02),
             frequency_mhz: Some(900),
             temperature_celsius: Some(41.0),
+            uninterruptible_tasks: Some(9),
+            io_pressure_some_avg60: Some(2.17),
+            io_pressure_full_avg60: Some(0.86),
         };
         let encoded = serde_json::to_string(&sample).unwrap();
         let decoded: CpuSample = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded.total_busy_percent, Some(12.5));
         assert_eq!(decoded.load_1m, Some(0.31));
+        assert_eq!(decoded.uninterruptible_tasks, Some(9));
+        assert_eq!(decoded.io_pressure_some_avg60, Some(2.17));
     }
 
     #[test]

@@ -7,6 +7,10 @@ import type {
   AwsSsoSession,
   CliToolId,
   CliToolStatus,
+  CreateGitHubOwnerTokenRequest,
+  GitHubOwnerToken,
+  ReauthOverview,
+  ReauthRunReport,
   Config,
   GetMcpServerResponse,
   GitBranch,
@@ -26,6 +30,7 @@ import type {
   SharedMcpWriteRequest,
   SharedMcpWriteResponse,
   TestMcpServersBody,
+  UpdateGitHubOwnerTokenRequest,
   UpdateMcpServersBody,
   UpdateRepo,
   UserSystemInfo,
@@ -36,6 +41,7 @@ import {
   makeLocalApiRequest,
   openLocalApiWebSocket,
   type LocalApiRequestOptions,
+  type LocalApiWebSocketOptions,
 } from './localApiTransport';
 
 export type MachineTarget =
@@ -52,9 +58,33 @@ export type MachineTarget =
       label: string;
     };
 
+export interface ManagedSkill {
+  name: string;
+  description: string;
+  instructions: string;
+}
+
+export interface SkillsCatalog {
+  available: boolean;
+  repositoryPath: string | null;
+  baseBranch: string;
+  skills: ManagedSkill[];
+}
+
+export type SkillChange =
+  | ({ operation: 'upsert'; previous?: ManagedSkill } & ManagedSkill)
+  | { operation: 'delete'; name: string; previous: ManagedSkill };
+
+export interface SkillProposalResult {
+  pullRequestUrl: string;
+  branch: string;
+}
+
 export interface MachineClient {
   target: MachineTarget;
   queryScopeKey: readonly ['machine', string];
+  /** Scope for streams that must reach this machine (e.g. discovery). */
+  webSocketOptions: LocalApiWebSocketOptions;
   getConfig: () => Promise<UserSystemInfo>;
   saveConfig: (config: Config) => Promise<Config>;
   listRepos: () => Promise<Repo[]>;
@@ -84,6 +114,15 @@ export interface MachineClient {
     body?: SharedMcpTestRequest
   ) => Promise<SharedMcpAssignmentTestResult[]>;
   disconnectSharedMcp: (connectionId: string) => Promise<boolean>;
+  listGitHubOwnerTokens: () => Promise<GitHubOwnerToken[]>;
+  createGitHubOwnerToken: (
+    data: CreateGitHubOwnerTokenRequest
+  ) => Promise<GitHubOwnerToken>;
+  updateGitHubOwnerToken: (
+    id: string,
+    data: UpdateGitHubOwnerTokenRequest
+  ) => Promise<GitHubOwnerToken>;
+  deleteGitHubOwnerToken: (id: string) => Promise<void>;
   startMcpAuth: (
     query: McpServerQuery,
     serverName: string,
@@ -102,10 +141,21 @@ export interface MachineClient {
   updateCliTool: (id: CliToolId) => Promise<CliToolStatus>;
   removeCliTool: (id: CliToolId) => Promise<CliToolStatus>;
   openCliToolLogin: (id: CliToolId) => Promise<WebSocket>;
+  listReauthTargets: () => Promise<ReauthOverview>;
+  /** Last runs only (no probing); cheap enough to poll. */
+  listReauthRuns: () => Promise<ReauthRunReport[]>;
+  /** Omit `target` to repair every expired swept target. */
+  runReauth: (target?: string) => Promise<ReauthRunReport[]>;
   listAwsProfiles: () => Promise<AwsSsoProfileStatus[]>;
   saveAwsProfile: (profile: AwsSsoProfile) => Promise<AwsSsoProfile>;
   deleteAwsProfile: (name: string) => Promise<void>;
   openAwsProfileLogin: (name: string) => Promise<WebSocket>;
+  loadSkills: () => Promise<SkillsCatalog>;
+  createSkillProposal: (request: {
+    title: string;
+    body: string;
+    changes: SkillChange[];
+  }) => Promise<SkillProposalResult>;
   listAwsSsoSessions: () => Promise<AwsSsoSession[]>;
   prepareAwsSsoSession: (session: AwsSsoSession) => Promise<AwsSsoSession>;
   discoverAwsSsoCatalog: (name: string) => Promise<AwsSsoAccount[]>;
@@ -172,6 +222,7 @@ export function createMachineClient(
   return {
     target,
     queryScopeKey,
+    webSocketOptions: getMachineRequestOptions(runtime, target),
     getConfig: async () =>
       handleApiResponse<UserSystemInfo>(
         await makeMachineRequest(runtime, target, '/api/info', {
@@ -301,6 +352,37 @@ export function createMachineClient(
           { method: 'DELETE' }
         )
       ),
+    listGitHubOwnerTokens: async () =>
+      handleApiResponse<GitHubOwnerToken[]>(
+        await makeMachineRequest(runtime, target, '/api/github-owner-tokens', {
+          cache: 'no-store',
+        })
+      ),
+    createGitHubOwnerToken: async (data) =>
+      handleApiResponse<GitHubOwnerToken>(
+        await makeMachineRequest(runtime, target, '/api/github-owner-tokens', {
+          method: 'POST',
+          body: JSON.stringify(data),
+        })
+      ),
+    updateGitHubOwnerToken: async (id, data) =>
+      handleApiResponse<GitHubOwnerToken>(
+        await makeMachineRequest(
+          runtime,
+          target,
+          `/api/github-owner-tokens/${encodeURIComponent(id)}`,
+          { method: 'PUT', body: JSON.stringify(data) }
+        )
+      ),
+    deleteGitHubOwnerToken: async (id) =>
+      handleApiResponse<void>(
+        await makeMachineRequest(
+          runtime,
+          target,
+          `/api/github-owner-tokens/${encodeURIComponent(id)}`,
+          { method: 'DELETE' }
+        )
+      ),
     startMcpAuth: async (
       query,
       serverName,
@@ -383,6 +465,23 @@ export function createMachineClient(
           { method: 'DELETE' }
         )
       ),
+    listReauthTargets: async () =>
+      handleApiResponse<ReauthOverview>(
+        await makeMachineRequest(runtime, target, '/api/reauth/targets')
+      ),
+    listReauthRuns: async () =>
+      handleApiResponse<ReauthRunReport[]>(
+        await makeMachineRequest(runtime, target, '/api/reauth/runs')
+      ),
+    runReauth: async (reauthTarget) =>
+      handleApiResponse<ReauthRunReport[]>(
+        await makeMachineRequest(runtime, target, '/api/reauth/run', {
+          method: 'POST',
+          // Settings is the operator: only a manual run may retry a target
+          // that was refused earlier.
+          body: JSON.stringify({ target: reauthTarget, trigger: 'manual' }),
+        })
+      ),
     openCliToolLogin: async (id) =>
       openLocalApiWebSocket(
         `/api/cli-tools/${encodeURIComponent(id)}/login/ws`,
@@ -416,6 +515,19 @@ export function createMachineClient(
       openLocalApiWebSocket(
         `/api/aws/profiles/${encodeURIComponent(name)}/login/ws`,
         getMachineRequestOptions(runtime, target)
+      ),
+    loadSkills: async () =>
+      handleApiResponse<SkillsCatalog>(
+        await makeMachineRequest(runtime, target, '/api/skills', {
+          cache: 'no-store',
+        })
+      ),
+    createSkillProposal: async (request) =>
+      handleApiResponse<SkillProposalResult>(
+        await makeMachineRequest(runtime, target, '/api/skills/proposals', {
+          method: 'POST',
+          body: JSON.stringify(request),
+        })
       ),
     listAwsSsoSessions: async () =>
       handleApiResponse<AwsSsoSession[]>(

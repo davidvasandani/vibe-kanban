@@ -2,7 +2,7 @@
 
 import type { MouseEvent } from 'react';
 import { cn } from '../lib/cn';
-import { Draggable } from '@hello-pangea/dnd';
+import { Draggable, type DraggableProvided } from '@hello-pangea/dnd';
 import { DotsSixVerticalIcon } from '@phosphor-icons/react';
 import { PriorityIcon, type PriorityLevel } from './PriorityIcon';
 import { StatusDot } from './StatusDot';
@@ -71,6 +71,7 @@ export interface IssueListRowProps {
   isMultiSelectActive?: boolean;
   isChecked?: boolean;
   onCheckboxChange?: (checked: boolean) => void;
+  isMobile?: boolean;
   className?: string;
 }
 
@@ -86,10 +87,76 @@ export function IssueListRow({
   isMultiSelectActive = false,
   isChecked = false,
   onCheckboxChange,
+  isMobile = false,
   className,
 }: IssueListRowProps) {
   const showCheckbox = isMultiSelectActive || isChecked;
   const visibleTags = tags.slice(0, MAX_VISIBLE_TAGS);
+  // Mobile only: tags/relationships get their own line; without them the
+  // assignee stays on the first line instead of taking a line on its own.
+  const hasMetadataLine = visibleTags.length > 0 || relationships.length > 0;
+
+  const renderHandle = (
+    dragHandleProps: DraggableProvided['dragHandleProps']
+  ) => (
+    <div className="relative shrink-0 w-4 flex items-center justify-center">
+      {/* Drag handle — hidden when checkbox is shown */}
+      <div
+        {...dragHandleProps}
+        className={cn(
+          'cursor-grab',
+          showCheckbox ? 'hidden' : 'flex group-hover/row:hidden'
+        )}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <DotsSixVerticalIcon className="size-icon-xs text-low" weight="bold" />
+      </div>
+      {/* Checkbox — shown on hover or when multi-select active */}
+      <div
+        className={cn(
+          'items-center justify-center',
+          showCheckbox ? 'flex' : 'hidden group-hover/row:flex'
+        )}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <Checkbox
+          checked={isChecked}
+          onCheckedChange={(checked) => {
+            onCheckboxChange?.(checked);
+          }}
+        />
+      </div>
+    </div>
+  );
+
+  const metadata = (
+    <>
+      {visibleTags.length > 0 && (
+        <div className="flex items-center gap-half">
+          {visibleTags.map((tag) => (
+            <KanbanBadge key={tag.id} name={tag.name} color={tag.color} />
+          ))}
+        </div>
+      )}
+      {relationships.length > 0 && (
+        <div className="flex items-center gap-half">
+          {relationships.slice(0, 2).map((rel) => (
+            <RelationshipBadge
+              key={rel.relationshipId}
+              displayType={rel.displayType}
+              relatedIssueDisplayId={rel.relatedIssueDisplayId}
+              compact
+            />
+          ))}
+          {relationships.length > 2 && (
+            <span className="text-sm text-low">
+              +{relationships.length - 2}
+            </span>
+          )}
+        </div>
+      )}
+    </>
+  );
 
   return (
     <Draggable draggableId={issue.id} index={index}>
@@ -107,86 +174,72 @@ export function IssueListRow({
             }
           }}
           className={cn(
-            'group/row flex items-center justify-between gap-double px-double py-half',
-            'transition-colors',
+            'group/row flex transition-colors',
+            isMobile
+              ? 'flex-col gap-half px-base py-half'
+              : 'items-center justify-between gap-double px-double py-half',
             'hover:bg-secondary',
             (isSelected || isChecked) && 'bg-secondary',
             snapshot.isDragging && 'bg-secondary shadow-lg cursor-grabbing',
             className
           )}
         >
-          {/* Left side: Checkbox/Drag handle, Priority, ID, Status, Title */}
-          <div className="flex items-center gap-double flex-1 min-w-0">
-            <div className="relative shrink-0 w-4 flex items-center justify-center">
-              {/* Drag handle — hidden when checkbox is shown */}
-              <div
-                {...provided.dragHandleProps}
-                className={cn(
-                  'cursor-grab',
-                  showCheckbox ? 'hidden' : 'flex group-hover/row:hidden'
+          {isMobile ? (
+            <>
+              {/* Line 1: handle, priority, ID, status, title, age */}
+              <div className="flex items-center gap-base min-w-0">
+                {renderHandle(provided.dragHandleProps)}
+                <PriorityIcon priority={issue.priority} />
+                <span className="font-ibm-plex-mono text-sm text-normal shrink-0">
+                  {issue.simple_id}
+                </span>
+                <StatusDot color={statusColor} />
+                <span className="flex-1 min-w-0 text-base text-high truncate">
+                  {issue.title}
+                </span>
+                {!hasMetadataLine && (
+                  <KanbanAssignee assignees={assignees} className="shrink-0" />
                 )}
-                onClick={(e) => e.stopPropagation()}
-              >
-                <DotsSixVerticalIcon
-                  className="size-icon-xs text-low"
-                  weight="bold"
-                />
+                <span className="text-sm text-low shrink-0">
+                  {formatRelativeTime(issue.created_at)}
+                </span>
               </div>
-              {/* Checkbox — shown on hover or when multi-select active */}
-              <div
-                className={cn(
-                  'items-center justify-center',
-                  showCheckbox ? 'flex' : 'hidden group-hover/row:flex'
-                )}
-                onClick={(e) => e.stopPropagation()}
-              >
-                <Checkbox
-                  checked={isChecked}
-                  onCheckedChange={(checked) => {
-                    onCheckboxChange?.(checked);
-                  }}
-                />
-              </div>
-            </div>
-            <PriorityIcon priority={issue.priority} />
-            <span className="font-ibm-plex-mono text-sm text-normal shrink-0">
-              {issue.simple_id}
-            </span>
-            <StatusDot color={statusColor} />
-            <span className="text-base text-high truncate">{issue.title}</span>
-          </div>
 
-          {/* Right side: Tags, Assignee, Age */}
-          <div className="flex items-center gap-base shrink-0">
-            {visibleTags.length > 0 && (
-              <div className="flex items-center gap-half">
-                {visibleTags.map((tag) => (
-                  <KanbanBadge key={tag.id} name={tag.name} color={tag.color} />
-                ))}
+              {/* Line 2: tags, relationships, assignee — clipped, never wraps */}
+              {hasMetadataLine && (
+                <div className="flex items-center gap-half min-w-0 pl-6">
+                  <div className="flex flex-1 items-center gap-half min-w-0 overflow-hidden">
+                    {metadata}
+                  </div>
+                  <KanbanAssignee assignees={assignees} className="shrink-0" />
+                </div>
+              )}
+            </>
+          ) : (
+            <>
+              {/* Left side: Checkbox/Drag handle, Priority, ID, Status, Title */}
+              <div className="flex items-center gap-double flex-1 min-w-0">
+                {renderHandle(provided.dragHandleProps)}
+                <PriorityIcon priority={issue.priority} />
+                <span className="font-ibm-plex-mono text-sm text-normal shrink-0">
+                  {issue.simple_id}
+                </span>
+                <StatusDot color={statusColor} />
+                <span className="text-base text-high truncate">
+                  {issue.title}
+                </span>
               </div>
-            )}
-            {relationships.length > 0 && (
-              <div className="flex items-center gap-half">
-                {relationships.slice(0, 2).map((rel) => (
-                  <RelationshipBadge
-                    key={rel.relationshipId}
-                    displayType={rel.displayType}
-                    relatedIssueDisplayId={rel.relatedIssueDisplayId}
-                    compact
-                  />
-                ))}
-                {relationships.length > 2 && (
-                  <span className="text-sm text-low">
-                    +{relationships.length - 2}
-                  </span>
-                )}
+
+              {/* Right side: Tags, Assignee, Age */}
+              <div className="flex items-center gap-base shrink-0">
+                {metadata}
+                <KanbanAssignee assignees={assignees} />
+                <span className="text-sm text-low w-5 text-right">
+                  {formatRelativeTime(issue.created_at)}
+                </span>
               </div>
-            )}
-            <KanbanAssignee assignees={assignees} />
-            <span className="text-sm text-low w-5 text-right">
-              {formatRelativeTime(issue.created_at)}
-            </span>
-          </div>
+            </>
+          )}
         </div>
       )}
     </Draggable>

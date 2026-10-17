@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use convert_case::{Case, Casing};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -78,6 +80,12 @@ pub struct ModelSelectorConfig {
 
     /// Supported permission policies
     pub permissions: Vec<PermissionPolicy>,
+
+    /// Model IDs the executor still accepts but does not advertise (e.g. floating
+    /// aliases), mapped to the catalog model they currently run. Lets saved
+    /// selections resolve to a versioned entry with its reasoning options.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub model_aliases: HashMap<String, String>,
 }
 
 impl ReasoningOption {

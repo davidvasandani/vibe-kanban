@@ -13,6 +13,7 @@
       "hostSwitchMessage": "You have unsaved changes for the current host. Switching hosts will discard those drafts."
     },
     "layout": {
+      "resizeDrawer": "Redimensionner les paramètres",
       "nav": {
         "title": "Paramètres",
         "general": "Général",
@@ -23,12 +24,14 @@
         "reposDesc": "Scripts et configuration des dépôts",
         "agents": "Agents",
         "agentsDesc": "Configurations des agents de codage",
+        "skills": "Compétences",
+        "skillsDesc": "Compétences partagées et propositions",
         "mcp": "Serveurs MCP",
         "mcpDesc": "Serveurs Model Context Protocol",
         "cli-tools": "Outils CLI",
         "cli-toolsDesc": "Outils en ligne de commande gérés par l’application pour les agents",
-        "aws": "AWS",
-        "awsDesc": "Profils SSO AWS et connexion",
+        "auth": "Authentification",
+        "authDesc": "Tableau de bord d’authentification automatique et profils AWS SSO",
         "organizations": "Paramètres de l'organisation",
         "organizationsDesc": "Gérer les membres et les permissions de l'organisation",
         "remote-projects": "Projets",
@@ -47,6 +50,27 @@
         "pipelinesDesc": "Pipeline TOML files and defaults",
         "workers": "Workers du cluster",
         "workersDesc": "État des workers, stockage et planification"
+      }
+    },
+    "skills": {
+      "title": "Compétences",
+      "description": "Créez et gérez des compétences partagées. Les modifications ouvrent une pull request vers {{baseBranch}}.",
+      "loading": "Chargement des compétences…",
+      "unavailable": "La gestion des compétences avec Git n’est pas configurée.",
+      "add": "Ajouter une compétence",
+      "delete": "Supprimer la compétence",
+      "untitled": "Compétence sans titre",
+      "empty": "Ajoutez une compétence pour commencer.",
+      "fields": {
+        "name": "Nom",
+        "description": "Description et guide de déclenchement",
+        "instructions": "Instructions (Markdown)"
+      },
+      "proposal": {
+        "title": "Proposer des modifications",
+        "description": "Vibe Kanban valide le catalogue et ouvre une pull request révisable.",
+        "submit": "Ouvrir la pull request ({{count}} modifications)",
+        "open": "Ouvrir la pull request"
       }
     },
     "general": {
@@ -86,6 +110,37 @@
         "autoResume": {
           "label": "Reprendre les exécutions interrompues au démarrage",
           "helper": "Envoie automatiquement une relance aux exécutions d'agents interrompues par un redémarrage. Chaque exécution n'est reprise qu'une seule fois. Les agents démarrent sans confirmation et peuvent consommer des tokens."
+        }
+      },
+      "autoRemediation": {
+        "title": "Correction automatique des erreurs",
+        "description": "Lorsqu'un tour d'agent de code échoue, crée un ticket avec des pipelines et lance un espace de travail qui le corrige sans supervision.",
+        "enabled": {
+          "label": "Corriger automatiquement les exécutions échouées",
+          "helper": "Les agents démarrent sans confirmation, consomment des jetons et peuvent fusionner dans la branche de base. Les espaces de correction ne déclenchent jamais de correction ; chaque espace est corrigé au plus une fois par jour."
+        },
+        "project": {
+          "label": "Projet du ticket",
+          "helper": "Projet qui reçoit les tickets de correction.",
+          "source": "Projet de l'espace en échec"
+        },
+        "repos": {
+          "label": "Dépôts",
+          "helper": "Dépôts de l'espace de correction. Sans sélection, ceux de l'espace en échec sont utilisés."
+        },
+        "executor": {
+          "label": "Agent"
+        },
+        "variant": {
+          "label": "Variante de profil",
+          "helper": "Revient à la variante par défaut si celle-ci n'est pas définie."
+        },
+        "model": {
+          "label": "Modèle"
+        },
+        "maxPerHour": {
+          "label": "Lancements max. par heure",
+          "helper": "0 désactive les lancements."
         }
       },
       "editor": {
@@ -316,6 +371,19 @@
       "description": "Personnalisez le comportement des agents de codage avec différentes configurations.",
       "loading": "Chargement des configurations d'agents...",
       "selectAgent": "Sélectionner un agent",
+      "visibility": {
+        "title": "Visibilité",
+        "description": "Les agents désactivés sont masqués des sélecteurs d'agents. Ils restent configurables ici et le travail en cours continue de s'exécuter.",
+        "label": "Afficher dans les sélecteurs d'agents",
+        "defaultLocked": "L'agent par défaut ne peut pas être désactivé. Définissez d'abord un autre agent par défaut.",
+        "lastLocked": "Au moins un agent doit rester activé."
+      },
+      "models": {
+        "title": "Modèles",
+        "description": "Les modèles décochés sont masqués du menu des modèles pour cet agent.",
+        "lastEnabled": "Au moins un modèle doit rester activé.",
+        "loading": "Chargement des modèles..."
+      },
       "save": {
         "button": "Enregistrer les configurations d'agents",
         "success": "✓ Configurations d'exécuteurs enregistrées avec succès !",
@@ -346,7 +414,8 @@
         "jsonLabel": "Configuration de l'agent (JSON)",
         "jsonPlaceholder": "Chargement des profils...",
         "jsonLoading": "Chargement...",
-        "pathLabel": "Emplacement du fichier de configuration :"
+        "pathLabel": "Emplacement du fichier de configuration :",
+        "disabled": "Désactivé"
       },
       "errors": {
         "deleteFailed": "Échec de la suppression de la configuration. Veuillez réessayer.",
@@ -675,6 +744,22 @@
       "overview": {
         "available": "Available",
         "unavailable": "Unavailable"
+      },
+      "management": {
+        "title": "Machines associées",
+        "description": "Gérez les machines distantes associées à ce client.",
+        "refresh": "Actualiser",
+        "loading": "Chargement des machines associées…",
+        "loadError": "Impossible de charger les machines associées. Actualisez pour réessayer.",
+        "statusError": "Impossible de vérifier la connexion. Actualisez pour réessayer.",
+        "empty": "Aucune machine associée. Utilisez la configuration du client pour en associer une.",
+        "online": "En ligne",
+        "offline": "Hors ligne",
+        "unpaired": "Association requise",
+        "unknown": "État inconnu",
+        "pairedAt": "Associée le {{date}}",
+        "open": "Ouvrir les espaces de travail",
+        "removeConfirm": "Supprimer l’association avec {{name}} de ce client ? Les espaces de travail distants ne seront pas supprimés."
       }
     },
     "remoteProjects": {
@@ -774,7 +859,7 @@
     },
     "cliTools": {
       "title": "Outils CLI",
-      "description": "Installe des versions épinglées d’outils CLI dans un répertoire géré par l’application. Les outils sont ajoutés au PATH des agents, mais une copie présente sur cette machine reste prioritaire. L’application ne stocke jamais les identifiants.",
+      "description": "Installez les outils CLI sur l’hôte sélectionné. Les vérifications s’exécutent sur cet hôte, dans l’environnement que reçoivent ses agents (shells de connexion ou non). Chaque CLI gère ses identifiants.",
       "loading": "Vérification de la disponibilité des outils…",
       "docs": "Documentation du fournisseur",
       "actions": {
@@ -797,18 +882,69 @@
         "cancel": "Annuler",
         "retry": "Réessayer"
       },
+      "agent": {
+        "available": "Agents sur cet hôte : {{path}}",
+        "missing": "Les agents de cet hôte ne le trouvent pas",
+        "login_shell_missing": "Agents : trouvé à {{path}}, mais perdu dans les shells de connexion",
+        "login_shell_mismatch": "Agents : {{path}}, mais les shells de connexion exécutent une autre copie",
+        "runtime_unavailable": "Agents : {{path}} ne peut pas démarrer (dépendance d’exécution indisponible)",
+        "failed": "Agents : {{path}} n’a pas démarré"
+      },
       "status": {
-        "host": "Fourni par cette machine : {{path}}",
-        "app": "Installé par Vibe Kanban ({{version}})",
+        "host": "Copie de la machine : {{path}}",
+        "app": "Installé sur l’hôte par Vibe Kanban ({{version}})",
         "outdated": "le catalogue épingle désormais {{version}}",
         "shadowed": "la copie de la machine est prioritaire dans le PATH",
         "notAvailable": "Non installé. Version du catalogue : {{version}}",
         "unsupported": "Installation impossible ici"
       }
     },
+    "reauth": {
+      "title": "Authentification automatique",
+      "description": "Identifiants que cet hôte reconnecte sans intervention humaine, grâce à la session de navigateur Entra enregistrée et à 1Password. Un succès n’est signalé qu’après une vérification indépendante du magasin d’identifiants du fournisseur.",
+      "loading": "Vérification des identifiants…",
+      "empty": "Aucune cible de réauthentification n’est configurée sur cet hôte.",
+      "sweepEvery": "Les identifiants expirés sont réparés automatiquement toutes les {{minutes}} minutes.",
+      "sweepOff": "La réparation automatique est désactivée ; réauthentifiez à la demande.",
+      "runAll": "Réauthentifier tous les expirés",
+      "run": "Réauthentifier",
+      "onDemand": "à la demande uniquement",
+      "refused": "Refusé précédemment : les agents et le balayage automatique ne réessaieront pas tant que vous ne l’aurez pas relancé ici.",
+      "showSteps": "Afficher les étapes",
+      "hideSteps": "Masquer les étapes",
+      "state": {
+        "authenticated": "Authentifié",
+        "unauthenticated": "Expiré ou déconnecté",
+        "unknown": "État inconnu",
+        "not_configured": "Non configuré"
+      },
+      "outcome": {
+        "running": "En cours",
+        "succeeded": "Réussi",
+        "failed": "Échec",
+        "verification_failed": "Terminé, mais la vérification a échoué",
+        "refused": "Refusé"
+      },
+      "trigger": {
+        "manual": "depuis les paramètres",
+        "agent": "par un agent",
+        "sweep": "par le balayage automatique"
+      },
+      "summary": {
+        "healthy": "Connecté",
+        "attention": "À vérifier",
+        "unknown": "Inconnu",
+        "notConfigured": "Non configuré"
+      },
+      "kind": {
+        "aws_sso": "AWS SSO",
+        "cli_tool": "Outils CLI",
+        "sgsc": "Passerelle sgsc-mcp"
+      }
+    },
     "aws": {
       "title": "AWS",
-      "description": "Gérez les profils SSO AWS dans le ~/.aws/config de cette machine et connectez-vous avec la CLI AWS. Vibe Kanban n'écrit que la configuration du profil ; les identifiants et jetons restent dans le stockage propre de la CLI AWS.",
+      "description": "Gérez les profils AWS SSO et connectez-vous sur l’hôte sélectionné. Le statut vérifie uniquement l’authentification de l’hôte. L’agent doit accéder à la même configuration et au même cache SSO ; sélectionnez un profil avec AWS_PROFILE. AWS CLI gère les jetons.",
       "loading": "Chargement des profils AWS…",
       "empty": "Aucun profil SSO configuré pour l'instant. Ajoutez-en un pour activer l'accès AWS sur cette machine.",
       "cliMissing": "La CLI AWS n'est pas disponible sur cette machine. Installez-la depuis la section Outils CLI pour vérifier l'état et vous connecter.",
@@ -829,10 +965,10 @@
         "delete": "Supprimer le profil"
       },
       "auth": {
-        "authenticated": "Authentifié",
-        "unauthenticated": "Non connecté",
-        "unknown": "État inconnu",
-        "cliMissing": "CLI AWS indisponible"
+        "authenticated": "Authentifié sur l’hôte",
+        "unauthenticated": "Non connecté sur l’hôte",
+        "unknown": "Authentification de l’hôte inconnue",
+        "cliMissing": "AWS CLI indisponible sur l’hôte"
       },
       "delete": {
         "confirm": "Supprimer le profil SSO « {{name}} » de ~/.aws/config ?"
@@ -951,6 +1087,28 @@
         "resetAllTitle": "Reset all bundled defaults?",
         "resetAllMessage": "This recreates or overwrites all bundled default pipeline files.",
         "resetAllDirtyMessage": "This recreates or overwrites all bundled default pipeline files and discards the open draft."
+      },
+      "newIssueDefaults": {
+        "title": "Valeurs par défaut des nouveaux tickets",
+        "description": "Pipelines activés par défaut sur les nouveaux tickets, dans le formulaire de création et pour les appels MCP create_issue qui ne nomment aucun pipeline. Le remplacement d'un projet l'emporte sur celui de son organisation, qui l'emporte sur la valeur de cette machine. Enregistré sur cette machine.",
+        "machine": {
+          "label": "Cette machine",
+          "helper": "Utilisé lorsque ni le projet ni son organisation ne le remplacent."
+        },
+        "organizations": {
+          "label": "Remplacements par organisation",
+          "helper": "Remplace la valeur de la machine pour tous les projets d'une organisation."
+        },
+        "projects": {
+          "label": "Remplacements par projet",
+          "helper": "Remplace la valeur de l'organisation (ou de la machine) pour un projet."
+        },
+        "inheritMachine": "Utiliser la valeur de la machine",
+        "inheritOrganization": "Utiliser la valeur de l'organisation",
+        "override": "Remplacer",
+        "noneSelected": "Aucun pipeline : les nouveaux tickets démarrent sans pipeline.",
+        "missing": "{{id}} (introuvable)",
+        "saveFailed": "Impossible d'enregistrer les valeurs par défaut. Réessayez."
       }
     }
   },

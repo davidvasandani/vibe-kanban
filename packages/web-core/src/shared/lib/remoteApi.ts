@@ -253,8 +253,10 @@ export async function bulkUpdateProjectStatuses(
 // Relay host API functions (served by remote backend)
 // ---------------------------------------------------------------------------
 
-export async function listRelayHosts(): Promise<RelayHost[]> {
-  const response = await makeRequest('/v1/hosts', { method: 'GET' });
+export async function listRelayHosts({
+  signal,
+}: { signal?: AbortSignal } = {}): Promise<RelayHost[]> {
+  const response = await makeRequest('/v1/hosts', { method: 'GET', signal });
   if (!response.ok) {
     throw await parseErrorResponse(response, 'Failed to list relay hosts');
   }

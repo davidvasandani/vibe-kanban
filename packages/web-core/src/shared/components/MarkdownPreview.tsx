@@ -1,5 +1,5 @@
 import { useMemo, type ComponentPropsWithoutRef } from 'react';
-import ReactMarkdown from 'react-markdown';
+import ReactMarkdown, { type Options } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
 import rehypeRaw from 'rehype-raw';
@@ -14,8 +14,7 @@ interface MarkdownPreviewProps {
 }
 
 const remarkPlugins = [remarkGfm];
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const rehypePlugins: any[] = [
+const rehypePlugins: NonNullable<Options['rehypePlugins']> = [
   rehypeRaw,
   [rehypeSanitize, defaultSchema],
   rehypeHighlight,
@@ -140,7 +139,6 @@ export function MarkdownPreview({
         <hr className="border-border my-4" {...props} />
       ),
       img: (props: ComponentPropsWithoutRef<'img'>) => (
-        // eslint-disable-next-line jsx-a11y/alt-text
         <img className="max-w-full rounded-sm" {...props} />
       ),
       pre: ({ children, ...props }: ComponentPropsWithoutRef<'pre'>) => {

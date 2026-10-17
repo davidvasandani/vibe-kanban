@@ -258,6 +258,24 @@ function CliToolRow({
             )}
           </p>
         )}
+        {(tool.host || tool.app) && (
+          <p
+            className={
+              tool.agent.state === 'available' ? 'text-normal' : 'text-warning'
+            }
+          >
+            {t(`settings.cliTools.agent.${tool.agent.state}`, {
+              ns: 'settings',
+              path: tool.agent.path ?? tool.binary_name,
+            })}
+            {tool.agent.version ? (
+              <span className="text-low"> · {tool.agent.version}</span>
+            ) : null}
+            {tool.agent.message ? (
+              <span className="text-low"> · {tool.agent.message}</span>
+            ) : null}
+          </p>
+        )}
         {!tool.host && !tool.app && tool.supported && (
           <p className="text-low">
             {t('settings.cliTools.status.notAvailable', {

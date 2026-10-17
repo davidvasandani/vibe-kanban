@@ -5,6 +5,7 @@ import {
   useWorkspacePanelState,
   type LayoutMode,
 } from '@/shared/stores/useUiPreferencesStore';
+import { useSettingsDrawerStore } from '@/shared/stores/useSettingsDrawerStore';
 import { useDiffViewMode } from '@/shared/stores/useDiffViewStore';
 import { useDiffPaths } from '@/shared/stores/useWorkspaceDiffStore';
 import { useWorkspaceContext } from '@/shared/hooks/useWorkspaceContext';
@@ -83,6 +84,7 @@ export function useActionVisibilityContext(
   }, [shouldResolveSelectedIssueParent, projectIssues, effectiveIssueIds]);
 
   // Derive layoutMode from current route instead of persisted state
+  const isSettingsOpen = useSettingsDrawerStore((s) => s.isOpen);
   const layoutMode: LayoutMode = isProjectDestination(destination)
     ? 'kanban'
     : 'workspaces';
@@ -129,6 +131,7 @@ export function useActionVisibilityContext(
       isLeftSidebarVisible: panelState.isLeftSidebarVisible,
       isLeftMainPanelVisible: panelState.isLeftMainPanelVisible,
       isRightSidebarVisible: panelState.isRightSidebarVisible,
+      isSettingsOpen,
       isCreateMode,
       hasWorkspace: !!workspace,
       workspaceArchived: workspace?.archived ?? false,
@@ -155,6 +158,7 @@ export function useActionVisibilityContext(
     panelState.isLeftSidebarVisible,
     panelState.isLeftMainPanelVisible,
     panelState.isRightSidebarVisible,
+    isSettingsOpen,
     isCreateMode,
     workspace,
     repos,

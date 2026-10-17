@@ -12,9 +12,9 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chrono::{DateTime, Utc};
 use cluster_protocol::{
     CancellationPhase, CancellationRequest, EventAcknowledgement, ExecutionDispatch,
-    ExecutionEventPayload, InteractionRequest, InteractionResponse, McpConfigSnapshot,
-    McpRefreshRequest, PROTOCOL_VERSION, PersistencePolicy, RequestAuthority, TerminalState,
-    WorkerMcpRefreshStatus,
+    ExecutionEventPayload, InteractionRequest, InteractionResponse, JobState, JobSummary,
+    McpConfigSnapshot, McpRefreshRequest, PROTOCOL_VERSION, PersistencePolicy, RequestAuthority,
+    TerminalEvidence, TerminalState, WorkerMcpRefreshStatus,
 };
 use command_group::AsyncGroupChild;
 use db::{
@@ -23,6 +23,7 @@ use db::{
         coding_agent_turn::CodingAgentTurn,
         execution_process::{
             ExecutionContext, ExecutionProcess, ExecutionProcessRunReason, ExecutionProcessStatus,
+            ExecutorActionField,
         },
         execution_process_repo_state::ExecutionProcessRepoState,
         execution_worker_job::{ExecutionWorkerDispatchState, ExecutionWorkerJob},
@@ -63,19 +64,24 @@ use serde_json::json;
 use services::services::{
     analytics::AnalyticsContext,
     approvals::{Approvals, executor_approvals::ExecutorApprovalBridge},
-    cluster::{ClusterConfig, WorkerClient},
+    cluster::{ClusterConfig, WorkerClient, dispatch_liveness},
     config::{Config, DEFAULT_COMMIT_REMINDER_PROMPT},
     container::{ContainerError, ContainerRef, ContainerService},
     diff_stream::{self, DiffStreamHandle},
+    error_remediation::ErrorRemediationEvent,
     file::FileService,
     mcp_refresh::McpRefreshCoordinator,
     notification::NotificationService,
     queued_message::QueuedMessageService,
     remote_client::{RemoteClient, RemoteClientError},
     remote_sync,
+    workspace_diff_stats::WORKSPACE_DIFF_STATS,
 };
 use sha2::{Digest, Sha256};
-use tokio::{sync::RwLock, task::JoinHandle};
+use tokio::{
+    sync::{RwLock, broadcast},
+    task::JoinHandle,
+};
 use tokio_util::io::ReaderStream;
 use utils::{
     approvals::{ApprovalOutcome, ApprovalRequest},
@@ -127,6 +133,7 @@ async fn wait_for_unfinalized_output(
     msg_stores: Arc<RwLock<HashMap<Uuid, Arc<MsgStore>>>>,
     child_store: Option<AsyncChildStore>,
     exec_id: Uuid,
+    live_child_is_turn_evidence: bool,
 ) {
     let mut observed_final_at = None;
     loop {
@@ -148,7 +155,8 @@ async fn wait_for_unfinalized_output(
             tokio::time::Instant::now().duration_since(observed)
                 >= FINAL_OUTPUT_RECONCILIATION_TIMEOUT
         }) {
-            if let Some(child_store) = &child_store
+            if live_child_is_turn_evidence
+                && let Some(child_store) = &child_store
                 && let Some(child) = child_store.read().await.get(&exec_id).cloned()
                 && matches!(child.write().await.try_wait(), Ok(None))
             {
@@ -191,8 +199,188 @@ fn should_ack_worker_batch(cursor: u64, has_terminal: bool) -> bool {
     cursor > 0 && !has_terminal
 }
 
-fn worker_job_has_positive_liveness(job: &ExecutionWorkerJob, now: DateTime<Utc>) -> bool {
-    !job.dispatch_state.is_terminal() && job.lease_expires_at.is_some_and(|lease| lease > now)
+/// Output retention and terminal truth have separate lifetimes. Only accept
+/// independently retained evidence for this exact dispatch, at or beyond the
+/// gap boundary; an active or contradictory summary cannot resolve a gap.
+/// Whether a replay gap hit a job the worker still reports as live. The
+/// identity must match exactly — worker, execution, job id and request digest
+/// — before an inventory entry counts as positive liveness evidence.
+fn replay_gap_job_is_live(
+    known: &ExecutionWorkerJob,
+    worker_node_id: Uuid,
+    execution_id: Uuid,
+    summary: &JobSummary,
+) -> bool {
+    known.worker_node_id == worker_node_id
+        && known.execution_process_id == execution_id
+        && summary.execution_id == execution_id
+        && summary.worker_job_id == known.worker_job_id
+        && summary.request_digest == known.request_digest
+        && !summary.state.is_terminal()
+}
+
+/// Whether a running execution row is worker-owned, and so is handed off at
+/// coordinator shutdown and re-attached at boot rather than stopped.
+///
+/// Any worker job counts, terminal dispatch state included: a crash between
+/// the tracker's job update and its process-row update leaves a terminal job
+/// under a `Running` row. Terminal events are never acknowledged before the
+/// row persists, so a re-attached tracker replays that event and finalizes;
+/// excluding it would leave the row `Running` forever, because boot
+/// reconciliation defers running rows to the tracker.
+fn should_hand_off_worker_job(job: Option<&ExecutionWorkerJob>) -> bool {
+    job.is_some()
+}
+
+/// Interaction-request sequences awaiting delivery of their response.
+type UnresolvedInteractions = Arc<std::sync::Mutex<std::collections::BTreeSet<u64>>>;
+
+/// The cursor that may be persisted for re-attachment: never past an
+/// interaction request whose response has not reached the worker, because
+/// its approval waiter lives only in this process and must be re-created by
+/// replaying the request after a restart.
+fn durable_worker_cursor(cursor: u64, unresolved: &std::collections::BTreeSet<u64>) -> u64 {
+    unresolved
+        .first()
+        .map_or(cursor, |earliest| cursor.min(earliest.saturating_sub(1)))
+}
+
+/// Whether a worker event's only coordinator-side effect is MsgStore output,
+/// which the raw-log writer makes durable. Interactions and terminal events
+/// have effects a restart can lose, so they must be replayed after one.
+fn worker_event_is_output(payload: &ExecutionEventPayload) -> bool {
+    matches!(
+        payload,
+        ExecutionEventPayload::Stdout { .. }
+            | ExecutionEventPayload::Stderr { .. }
+            | ExecutionEventPayload::Structured { .. }
+            | ExecutionEventPayload::Accepted
+            | ExecutionEventPayload::Starting
+            | ExecutionEventPayload::InteractionAcknowledged { .. }
+            | ExecutionEventPayload::Preview(_)
+    )
+}
+
+/// Upper bound on waiting, at shutdown, for handed-off executions' raw-log
+/// writers to flush what their trackers already pushed.
+const WORKER_HANDOFF_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn replay_gap_terminal_evidence(
+    known: &ExecutionWorkerJob,
+    worker_node_id: Uuid,
+    execution_id: Uuid,
+    earliest_available: u64,
+    summary: &JobSummary,
+) -> Option<(
+    ExecutionWorkerDispatchState,
+    ExecutionProcessStatus,
+    TerminalEvidence,
+)> {
+    if known.worker_node_id != worker_node_id
+        || known.execution_process_id != execution_id
+        || summary.execution_id != execution_id
+        || summary.worker_job_id != known.worker_job_id
+        || summary.request_digest != known.request_digest
+        || summary.last_sequence < earliest_available
+        || summary.last_sequence < u64::try_from(known.worker_last_sequence).ok()?
+    {
+        return None;
+    }
+    terminal_summary_states(summary)
+}
+
+/// The dispatch state and process status a terminal worker summary stands
+/// for, when its job state and terminal evidence agree.
+fn terminal_summary_states(
+    summary: &JobSummary,
+) -> Option<(
+    ExecutionWorkerDispatchState,
+    ExecutionProcessStatus,
+    TerminalEvidence,
+)> {
+    let evidence = summary.terminal.as_ref()?;
+    let (worker_state, process_state) = match (&summary.state, &evidence.state) {
+        (JobState::Completed, TerminalState::Completed) => (
+            ExecutionWorkerDispatchState::Completed,
+            ExecutionProcessStatus::Completed,
+        ),
+        (JobState::Failed, TerminalState::Failed) => (
+            ExecutionWorkerDispatchState::Failed,
+            ExecutionProcessStatus::Failed,
+        ),
+        (JobState::Killed, TerminalState::Killed) => (
+            ExecutionWorkerDispatchState::Killed,
+            ExecutionProcessStatus::Killed,
+        ),
+        (JobState::Interrupted, TerminalState::Interrupted) => (
+            ExecutionWorkerDispatchState::Interrupted,
+            ExecutionProcessStatus::Interrupted,
+        ),
+        _ => return None,
+    };
+    Some((worker_state, process_state, evidence.clone()))
+}
+
+/// Whether the worker's journal is behind the tracker's cursor. Every cursor
+/// value is a sequence this worker's journal served, so a live journal never
+/// reports less; a lower `latest_available` means the worker lost that
+/// journal (it restarted and recovered the job from a stale persisted
+/// summary). Polling on would wait forever for events that cannot come.
+fn worker_journal_regressed(cursor: u64, latest_available: u64) -> bool {
+    latest_available < cursor
+}
+
+/// Terminal evidence that resolves a regressed journal: the summary must be
+/// this exact dispatch and describe the journal the worker is serving now
+/// (its last sequence is that journal's latest), not some other generation.
+fn journal_regression_terminal_evidence(
+    known: &ExecutionWorkerJob,
+    worker_node_id: Uuid,
+    execution_id: Uuid,
+    latest_available: u64,
+    summary: &JobSummary,
+) -> Option<(
+    ExecutionWorkerDispatchState,
+    ExecutionProcessStatus,
+    TerminalEvidence,
+)> {
+    if known.worker_node_id != worker_node_id
+        || known.execution_process_id != execution_id
+        || summary.execution_id != execution_id
+        || summary.worker_job_id != known.worker_job_id
+        || summary.request_digest != known.request_digest
+        || summary.last_sequence != latest_available
+    {
+        return None;
+    }
+    terminal_summary_states(summary)
+}
+
+fn worker_job_has_positive_liveness(
+    job: &ExecutionWorkerJob,
+    now: DateTime<Utc>,
+    live_lease_is_turn_evidence: bool,
+) -> bool {
+    live_lease_is_turn_evidence
+        && !job.dispatch_state.is_terminal()
+        && job.lease_expires_at.is_some_and(|lease| lease > now)
+}
+
+fn worker_lease_is_turn_evidence(base_executor: Option<BaseCodingAgent>) -> bool {
+    // Keep this aligned with executors whose SpawnedChild carries
+    // `exit_signal: Some(_)`. Their worker process can stay alive independently
+    // of the protocol turn, so a renewed lease is not evidence of turn work.
+    !matches!(
+        base_executor,
+        Some(
+            BaseCodingAgent::Codex
+                | BaseCodingAgent::Opencode
+                | BaseCodingAgent::Gemini
+                | BaseCodingAgent::QwenCode
+                | BaseCodingAgent::Copilot
+                | BaseCodingAgent::Grok
+        )
+    )
 }
 
 #[cfg(test)]
@@ -206,8 +394,13 @@ mod final_output_reconciliation_tests {
     use uuid::Uuid;
 
     use super::{
-        history_has_final_assistant_message, normalized_final_assistant_state,
-        should_ack_worker_batch, wait_for_unfinalized_output, worker_job_has_positive_liveness,
+        ExecutionEventPayload, ExecutionProcessStatus, ExecutionWorkerDispatchState,
+        ExecutionWorkerJob, InteractionRequest, JobState, JobSummary, TerminalEvidence,
+        TerminalState, Utc, durable_worker_cursor, history_has_final_assistant_message,
+        journal_regression_terminal_evidence, normalized_final_assistant_state,
+        replay_gap_job_is_live, replay_gap_terminal_evidence, should_ack_worker_batch,
+        should_hand_off_worker_job, wait_for_unfinalized_output, worker_event_is_output,
+        worker_job_has_positive_liveness, worker_journal_regressed, worker_lease_is_turn_evidence,
     };
 
     fn normalized_message(entry_type: NormalizedEntryType, content: &str) -> LogMsg {
@@ -284,14 +477,445 @@ mod final_output_reconciliation_tests {
             created_at: now,
             updated_at: now,
         };
-        assert!(worker_job_has_positive_liveness(&job, now));
+        assert!(worker_job_has_positive_liveness(&job, now, true));
+        assert!(
+            !worker_job_has_positive_liveness(&job, now, false),
+            "a signal-driven worker lease is process liveness, not turn liveness"
+        );
 
         job.lease_expires_at = Some(now - chrono::Duration::seconds(1));
-        assert!(!worker_job_has_positive_liveness(&job, now));
+        assert!(!worker_job_has_positive_liveness(&job, now, true));
         job.lease_expires_at = Some(now + chrono::Duration::seconds(30));
         job.dispatch_state =
             db::models::execution_worker_job::ExecutionWorkerDispatchState::Completed;
-        assert!(!worker_job_has_positive_liveness(&job, now));
+        assert!(!worker_job_has_positive_liveness(&job, now, true));
+    }
+
+    #[test]
+    fn replay_gap_recovers_only_matching_terminal_evidence() {
+        let now = Utc::now();
+        let known = ExecutionWorkerJob {
+            execution_process_id: Uuid::new_v4(),
+            worker_node_id: Uuid::new_v4(),
+            worker_job_id: Uuid::new_v4(),
+            request_digest: "digest".into(),
+            dispatch_state: ExecutionWorkerDispatchState::Running,
+            last_event_sequence: 2,
+            worker_last_sequence: 5,
+            lease_expires_at: None,
+            output_complete: true,
+            terminal_evidence: None,
+            dispatched_at: now,
+            accepted_at: Some(now),
+            completed_at: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let summary = JobSummary {
+            execution_id: known.execution_process_id,
+            worker_job_id: known.worker_job_id,
+            workspace_id: Uuid::new_v4(),
+            request_digest: known.request_digest.clone(),
+            state: JobState::Completed,
+            last_sequence: 10,
+            terminal: Some(TerminalEvidence {
+                state: TerminalState::Completed,
+                exit_code: Some(0),
+                signal: None,
+                observed_at: now,
+            }),
+        };
+        let resolve = |summary: &JobSummary| {
+            replay_gap_terminal_evidence(
+                &known,
+                known.worker_node_id,
+                known.execution_process_id,
+                7,
+                summary,
+            )
+        };
+        for (state, terminal, worker, process) in [
+            (
+                JobState::Completed,
+                TerminalState::Completed,
+                ExecutionWorkerDispatchState::Completed,
+                ExecutionProcessStatus::Completed,
+            ),
+            (
+                JobState::Failed,
+                TerminalState::Failed,
+                ExecutionWorkerDispatchState::Failed,
+                ExecutionProcessStatus::Failed,
+            ),
+            (
+                JobState::Killed,
+                TerminalState::Killed,
+                ExecutionWorkerDispatchState::Killed,
+                ExecutionProcessStatus::Killed,
+            ),
+            (
+                JobState::Interrupted,
+                TerminalState::Interrupted,
+                ExecutionWorkerDispatchState::Interrupted,
+                ExecutionProcessStatus::Interrupted,
+            ),
+        ] {
+            let mut candidate = summary.clone();
+            candidate.state = state;
+            candidate.terminal.as_mut().unwrap().state = terminal;
+            let (worker_state, process_state, evidence) = resolve(&candidate).unwrap();
+            assert_eq!(worker_state, worker);
+            assert_eq!(process_state, process);
+            assert_eq!(Some(evidence), candidate.terminal);
+        }
+        for change in 0..8 {
+            let mut candidate = summary.clone();
+            match change {
+                0 => candidate.execution_id = Uuid::new_v4(),
+                1 => candidate.worker_job_id = Uuid::new_v4(),
+                2 => candidate.request_digest = "different".into(),
+                3 => candidate.last_sequence = 6,
+                4 => candidate.terminal = None,
+                5 => candidate.state = JobState::Running,
+                6 => candidate.state = JobState::Quarantined,
+                _ => candidate.terminal.as_mut().unwrap().state = TerminalState::Failed,
+            }
+            assert!(
+                resolve(&candidate).is_none(),
+                "invalid evidence case {change}"
+            );
+        }
+        assert!(
+            replay_gap_terminal_evidence(
+                &known,
+                Uuid::new_v4(),
+                known.execution_process_id,
+                7,
+                &summary
+            )
+            .is_none()
+        );
+        assert!(
+            replay_gap_terminal_evidence(&known, known.worker_node_id, Uuid::new_v4(), 7, &summary)
+                .is_none()
+        );
+        let mut later_known = known.clone();
+        later_known.worker_last_sequence = 11;
+        assert!(
+            replay_gap_terminal_evidence(
+                &later_known,
+                known.worker_node_id,
+                known.execution_process_id,
+                7,
+                &summary
+            )
+            .is_none()
+        );
+    }
+
+    fn known_worker_job(state: ExecutionWorkerDispatchState) -> ExecutionWorkerJob {
+        let now = Utc::now();
+        ExecutionWorkerJob {
+            execution_process_id: Uuid::new_v4(),
+            worker_node_id: Uuid::new_v4(),
+            worker_job_id: Uuid::new_v4(),
+            request_digest: "digest".into(),
+            dispatch_state: state,
+            last_event_sequence: 2,
+            worker_last_sequence: 5,
+            lease_expires_at: None,
+            output_complete: true,
+            terminal_evidence: None,
+            dispatched_at: now,
+            accepted_at: Some(now),
+            completed_at: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn journal_regression_is_a_latest_sequence_behind_the_cursor() {
+        assert!(worker_journal_regressed(2549, 6));
+        assert!(worker_journal_regressed(1, 0));
+        assert!(!worker_journal_regressed(6, 6));
+        assert!(!worker_journal_regressed(6, 9000));
+        assert!(!worker_journal_regressed(0, 0));
+    }
+
+    #[test]
+    fn journal_regression_recovers_only_matching_current_terminal_evidence() {
+        // The incident shape: the coordinator consumed thousands of events,
+        // then the worker restarted and recovered the job as interrupted at
+        // its stale persisted sequence + 1.
+        let mut known = known_worker_job(ExecutionWorkerDispatchState::Running);
+        known.last_event_sequence = 2549;
+        known.worker_last_sequence = 2549;
+        let summary = JobSummary {
+            execution_id: known.execution_process_id,
+            worker_job_id: known.worker_job_id,
+            workspace_id: Uuid::new_v4(),
+            request_digest: known.request_digest.clone(),
+            state: JobState::Interrupted,
+            last_sequence: 6,
+            terminal: Some(TerminalEvidence {
+                state: TerminalState::Interrupted,
+                exit_code: None,
+                signal: None,
+                observed_at: Utc::now(),
+            }),
+        };
+        let resolve = |summary: &JobSummary| {
+            journal_regression_terminal_evidence(
+                &known,
+                known.worker_node_id,
+                known.execution_process_id,
+                6,
+                summary,
+            )
+        };
+        let (worker_state, process_state, evidence) = resolve(&summary).unwrap();
+        assert_eq!(worker_state, ExecutionWorkerDispatchState::Interrupted);
+        assert_eq!(process_state, ExecutionProcessStatus::Interrupted);
+        assert_eq!(Some(evidence), summary.terminal);
+        assert!(
+            replay_gap_terminal_evidence(
+                &known,
+                known.worker_node_id,
+                known.execution_process_id,
+                6,
+                &summary
+            )
+            .is_none(),
+            "replay-gap rules reject this summary, which is why regression needs its own rule"
+        );
+
+        for (state, terminal, worker, process) in [
+            (
+                JobState::Completed,
+                TerminalState::Completed,
+                ExecutionWorkerDispatchState::Completed,
+                ExecutionProcessStatus::Completed,
+            ),
+            (
+                JobState::Failed,
+                TerminalState::Failed,
+                ExecutionWorkerDispatchState::Failed,
+                ExecutionProcessStatus::Failed,
+            ),
+            (
+                JobState::Killed,
+                TerminalState::Killed,
+                ExecutionWorkerDispatchState::Killed,
+                ExecutionProcessStatus::Killed,
+            ),
+        ] {
+            let mut candidate = summary.clone();
+            candidate.state = state;
+            candidate.terminal.as_mut().unwrap().state = terminal;
+            let (worker_state, process_state, _) = resolve(&candidate).unwrap();
+            assert_eq!(worker_state, worker);
+            assert_eq!(process_state, process);
+        }
+
+        for change in 0..8 {
+            let mut candidate = summary.clone();
+            match change {
+                0 => candidate.execution_id = Uuid::new_v4(),
+                1 => candidate.worker_job_id = Uuid::new_v4(),
+                2 => candidate.request_digest = "different".into(),
+                3 => candidate.last_sequence = 5,
+                4 => candidate.last_sequence = 7,
+                5 => candidate.terminal = None,
+                6 => candidate.state = JobState::Running,
+                _ => candidate.terminal.as_mut().unwrap().state = TerminalState::Completed,
+            }
+            assert!(
+                resolve(&candidate).is_none(),
+                "invalid evidence case {change}"
+            );
+        }
+        assert!(
+            journal_regression_terminal_evidence(
+                &known,
+                Uuid::new_v4(),
+                known.execution_process_id,
+                6,
+                &summary
+            )
+            .is_none()
+        );
+        assert!(
+            journal_regression_terminal_evidence(
+                &known,
+                known.worker_node_id,
+                Uuid::new_v4(),
+                6,
+                &summary
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn replay_gap_continues_only_for_a_matching_live_job() {
+        let known = known_worker_job(ExecutionWorkerDispatchState::Running);
+        let summary = JobSummary {
+            execution_id: known.execution_process_id,
+            worker_job_id: known.worker_job_id,
+            workspace_id: Uuid::new_v4(),
+            request_digest: known.request_digest.clone(),
+            state: JobState::Running,
+            last_sequence: 9000,
+            terminal: None,
+        };
+        let live = |summary: &JobSummary| {
+            replay_gap_job_is_live(
+                &known,
+                known.worker_node_id,
+                known.execution_process_id,
+                summary,
+            )
+        };
+        assert!(live(&summary));
+        for state in [JobState::Accepted, JobState::Starting, JobState::Cancelling] {
+            let mut candidate = summary.clone();
+            candidate.state = state;
+            assert!(live(&candidate), "non-terminal job is live");
+        }
+        for change in 0..5 {
+            let mut candidate = summary.clone();
+            match change {
+                0 => candidate.execution_id = Uuid::new_v4(),
+                1 => candidate.worker_job_id = Uuid::new_v4(),
+                2 => candidate.request_digest = "different".into(),
+                3 => candidate.state = JobState::Completed,
+                _ => candidate.state = JobState::Quarantined,
+            }
+            assert!(!live(&candidate), "not positive liveness, case {change}");
+        }
+        assert!(
+            !replay_gap_job_is_live(&known, Uuid::new_v4(), known.execution_process_id, &summary),
+            "another worker's inventory is not evidence"
+        );
+    }
+
+    #[test]
+    fn shutdown_hands_off_every_worker_owned_running_row() {
+        assert!(
+            !should_hand_off_worker_job(None),
+            "a coordinator-local execution keeps interruption semantics"
+        );
+        // Terminal dispatch states are included on purpose: a running row
+        // over a terminal job means the terminal event is still unacknowledged
+        // and must be replayed by a re-attached tracker to finalize.
+        for state in [
+            ExecutionWorkerDispatchState::Pending,
+            ExecutionWorkerDispatchState::Accepted,
+            ExecutionWorkerDispatchState::Starting,
+            ExecutionWorkerDispatchState::Running,
+            ExecutionWorkerDispatchState::Cancelling,
+            ExecutionWorkerDispatchState::Completed,
+            ExecutionWorkerDispatchState::Failed,
+            ExecutionWorkerDispatchState::Killed,
+            ExecutionWorkerDispatchState::Interrupted,
+            ExecutionWorkerDispatchState::Indeterminate,
+            ExecutionWorkerDispatchState::Quarantined,
+        ] {
+            assert!(
+                should_hand_off_worker_job(Some(&known_worker_job(state))),
+                "{state:?} row is worker-owned"
+            );
+        }
+    }
+
+    #[test]
+    fn persisted_cursor_stays_before_the_earliest_unresolved_interaction() {
+        use std::collections::BTreeSet;
+
+        assert_eq!(durable_worker_cursor(40, &BTreeSet::new()), 40);
+        assert_eq!(
+            durable_worker_cursor(40, &BTreeSet::from([12, 30])),
+            11,
+            "a re-attach must replay the earliest pending request"
+        );
+        assert_eq!(
+            durable_worker_cursor(5, &BTreeSet::from([12])),
+            5,
+            "never ahead of what was actually received"
+        );
+        assert_eq!(durable_worker_cursor(3, &BTreeSet::from([0])), 0);
+    }
+
+    #[test]
+    fn only_pure_output_events_advance_the_pushed_cursor() {
+        use cluster_protocol::DisconnectPolicy;
+
+        let evidence = TerminalEvidence {
+            state: TerminalState::Completed,
+            exit_code: Some(0),
+            signal: None,
+            observed_at: Utc::now(),
+        };
+        for payload in [
+            ExecutionEventPayload::Stdout {
+                data_base64: String::new(),
+            },
+            ExecutionEventPayload::Stderr {
+                data_base64: String::new(),
+            },
+            ExecutionEventPayload::Structured { json: "{}".into() },
+            ExecutionEventPayload::Accepted,
+            ExecutionEventPayload::Starting,
+        ] {
+            assert!(worker_event_is_output(&payload), "{payload:?}");
+        }
+        for payload in [
+            ExecutionEventPayload::Completed(evidence.clone()),
+            ExecutionEventPayload::Failed(evidence.clone()),
+            ExecutionEventPayload::Killed(evidence.clone()),
+            ExecutionEventPayload::Interrupted(evidence),
+            ExecutionEventPayload::Indeterminate {
+                reason: "lost".into(),
+            },
+            ExecutionEventPayload::InteractionRequested(InteractionRequest {
+                interaction_id: Uuid::new_v4(),
+                kind: "approval".into(),
+                prompt: "ok?".into(),
+                expires_at: None,
+                disconnect_policy: DisconnectPolicy::FailClosed,
+            }),
+        ] {
+            assert!(
+                !worker_event_is_output(&payload),
+                "{payload:?} must be replayed after a restart"
+            );
+        }
+    }
+
+    #[test]
+    fn signal_driven_worker_lease_is_not_turn_liveness() {
+        use executors::executors::BaseCodingAgent;
+
+        for executor in [
+            BaseCodingAgent::Codex,
+            BaseCodingAgent::Opencode,
+            BaseCodingAgent::Gemini,
+            BaseCodingAgent::QwenCode,
+            BaseCodingAgent::Copilot,
+            BaseCodingAgent::Grok,
+        ] {
+            assert!(!worker_lease_is_turn_evidence(Some(executor)));
+        }
+        for executor in [
+            BaseCodingAgent::ClaudeCode,
+            BaseCodingAgent::Amp,
+            BaseCodingAgent::CursorAgent,
+            BaseCodingAgent::Droid,
+        ] {
+            assert!(worker_lease_is_turn_evidence(Some(executor)));
+        }
+        assert!(worker_lease_is_turn_evidence(None));
     }
 
     #[tokio::test(start_paused = true)]
@@ -304,7 +928,12 @@ mod final_output_reconciliation_tests {
         ));
         let stores = Arc::new(RwLock::new(HashMap::from([(execution_id, store)])));
 
-        let reconciliation = tokio::spawn(wait_for_unfinalized_output(stores, None, execution_id));
+        let reconciliation = tokio::spawn(wait_for_unfinalized_output(
+            stores,
+            None,
+            execution_id,
+            true,
+        ));
         tokio::time::advance(Duration::from_secs(44)).await;
         assert!(!reconciliation.is_finished());
         tokio::time::advance(Duration::from_secs(2)).await;
@@ -332,6 +961,7 @@ mod final_output_reconciliation_tests {
             stores,
             Some(children),
             execution_id,
+            true,
         ));
         tokio::time::advance(Duration::from_secs(46)).await;
         assert!(!reconciliation.is_finished());
@@ -341,6 +971,41 @@ mod final_output_reconciliation_tests {
         reconciliation
             .await
             .expect("dead child permits reconciliation");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn signal_driven_turn_does_not_treat_live_child_as_turn_liveness() {
+        let execution_id = Uuid::new_v4();
+        let store = Arc::new(MsgStore::new());
+        store.push(normalized_message(
+            NormalizedEntryType::AssistantMessage,
+            "Final answer",
+        ));
+        let stores = Arc::new(RwLock::new(HashMap::from([(execution_id, store)])));
+        let child = Arc::new(RwLock::new(
+            tokio::process::Command::new("sleep")
+                .arg("300")
+                .group_spawn()
+                .expect("spawn live app-server child"),
+        ));
+        let children = Arc::new(RwLock::new(HashMap::from([(execution_id, child.clone())])));
+
+        let reconciliation = tokio::spawn(wait_for_unfinalized_output(
+            stores,
+            Some(children),
+            execution_id,
+            false,
+        ));
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(46)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            reconciliation.is_finished(),
+            "an app-server child can outlive its turn and must not defer forever"
+        );
+
+        child.write().await.kill().await.expect("kill child");
+        reconciliation.await.expect("reconciliation task completes");
     }
 }
 
@@ -363,6 +1028,10 @@ fn validated_mcp_snapshot(
     Ok(snapshot)
 }
 
+fn supports_live_mcp_refresh(executor: BaseCodingAgent) -> bool {
+    executor == BaseCodingAgent::Codex
+}
+
 fn push_worker_bytes(store: &MsgStore, encoded: &str, stderr: bool) {
     let message = match BASE64_STANDARD.decode(encoded) {
         Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
@@ -377,6 +1046,42 @@ fn push_worker_bytes(store: &MsgStore, encoded: &str, stderr: bool) {
         store.push(LogMsg::Stderr(message));
     } else {
         store.push_stdout(message);
+    }
+}
+
+/// A worker `Structured` event, classified so that product metadata never
+/// reaches the agent's stdout, where executor parsers would render it as an
+/// unrecognized agent message.
+enum WorkerStructuredEvent {
+    Log(LogMsg),
+    CancellationPhase(String),
+    Diagnostic(String),
+}
+
+fn classify_worker_structured(json: &str) -> WorkerStructuredEvent {
+    if let Ok(message) = serde_json::from_str::<LogMsg>(json) {
+        return WorkerStructuredEvent::Log(message);
+    }
+    let parsed = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(json).ok();
+    let field = parsed
+        .as_ref()
+        .and_then(|object| match object.iter().next() {
+            Some((key, serde_json::Value::String(value))) if object.len() == 1 => {
+                Some((key.as_str(), value.as_str()))
+            }
+            _ => None,
+        });
+    match field {
+        Some(("cancellation_phase", phase)) => {
+            WorkerStructuredEvent::CancellationPhase(phase.to_string())
+        }
+        Some(("worker_error", reason)) => {
+            WorkerStructuredEvent::Diagnostic(format!("Worker error: {reason}"))
+        }
+        Some(("stream_error", reason)) => {
+            WorkerStructuredEvent::Diagnostic(format!("Worker output stream error: {reason}"))
+        }
+        _ => WorkerStructuredEvent::Diagnostic(format!("Unrecognized worker event: {json}")),
     }
 }
 
@@ -664,9 +1369,17 @@ fn dispatched_executor_profile(config: &ExecutorConfig) -> Option<ExecutorProfil
     let agent = ExecutorConfigs::get_cached().get_coding_agent(&profile_id)?;
     Some(ExecutorProfile {
         recently_used_models: None,
+        disabled_models: Vec::new(),
+        disabled: false,
         configurations: HashMap::from([(variant, agent)]),
     })
 }
+
+type McpRefreshControls = Arc<RwLock<HashMap<Uuid, (Uuid, DateTime<Utc>, McpRefreshHandle)>>>;
+
+/// Failed-turn events beyond this backlog are dropped (and logged by the
+/// consumer as lag); the remediation rate cap would skip them anyway.
+const ERROR_REMEDIATION_CHANNEL_CAPACITY: usize = 64;
 
 #[derive(Clone)]
 pub struct LocalContainerService {
@@ -685,13 +1398,21 @@ pub struct LocalContainerService {
     /// Process group ids of dev servers adopted from a previous server
     /// instance. These have no child handle; they are managed by pgid.
     adopted_pgids: Arc<RwLock<HashMap<Uuid, i32>>>,
+    /// Highest worker event sequence each tracker has pushed into its MsgStore.
+    /// Acknowledgement lags pushes by up to one batch, so shutdown persists
+    /// this (not the acknowledged cursor) after aborting a handed-off tracker:
+    /// lines already pushed reach the raw log during the flush grace, and
+    /// re-attachment must not replay them.
+    worker_pushed_sequences: Arc<RwLock<HashMap<Uuid, Arc<std::sync::atomic::AtomicU64>>>>,
+    /// Raw-log writer tasks of worker-tracked executions, awaited at handoff.
+    worker_log_writers: Arc<RwLock<HashMap<Uuid, JoinHandle<()>>>>,
     /// Warm app-servers kept alive between turns, keyed by **session id** (one
     /// active agent session per attempt). This registry is the single owner of a
     /// warm process's lifetime — it reaps at teardown/stop/idle/death, closing
     /// the leak where a `Completed` turn row is skipped by `try_stop`. Phase 2,
     /// see `specs/vk/826e-coding-agent-war/`.
     warm_app_servers: Arc<RwLock<HashMap<Uuid, WarmAppServer>>>,
-    mcp_refresh_controls: Arc<RwLock<HashMap<Uuid, (Uuid, McpRefreshHandle)>>>,
+    mcp_refresh_controls: McpRefreshControls,
     mcp_refresh_coordinator: McpRefreshCoordinator,
     workspace_touch_times: Arc<RwLock<HashMap<Uuid, Instant>>>,
     config: Arc<RwLock<Config>>,
@@ -701,6 +1422,7 @@ pub struct LocalContainerService {
     approvals: Approvals,
     queued_message_service: QueuedMessageService,
     notification_service: NotificationService,
+    error_remediation_tx: broadcast::Sender<ErrorRemediationEvent>,
     remote_client: Option<RemoteClient>,
     cluster_config: ClusterConfig,
     repository_admin_locks: RepositoryAdminLockManager,
@@ -713,7 +1435,15 @@ impl LocalContainerService {
         execution_id: Uuid,
         worker_node_id: Uuid,
         interaction: InteractionRequest,
+        unresolved: Option<(UnresolvedInteractions, u64)>,
     ) {
+        // Whatever the outcome, stop holding the persisted cursor back once
+        // this routing task is done with the interaction.
+        let resolve = move || {
+            if let Some((unresolved, sequence)) = &unresolved {
+                unresolved.lock().unwrap().remove(sequence);
+            }
+        };
         let Some(client) = self.worker_client.clone() else {
             tracing::error!(%execution_id, "Cannot route worker interaction without a worker client");
             return;
@@ -732,6 +1462,7 @@ impl LocalContainerService {
             let is_question = interaction.kind == "question";
             let Ok((_, waiter)) = approvals.create_with_waiter(request, is_question).await else {
                 tracing::error!(%execution_id, interaction_id = %interaction.interaction_id, "Failed to register worker interaction");
+                resolve();
                 return;
             };
             let mut outcome = waiter.await;
@@ -763,7 +1494,10 @@ impl LocalContainerService {
                         .expect("approval outcome must serialize"),
                 };
                 match client.respond_interaction(worker_node_id, &response).await {
-                    Ok(()) => break,
+                    Ok(()) => {
+                        resolve();
+                        break;
+                    }
                     Err(error) => {
                         tracing::warn!(%execution_id, interaction_id = %interaction.interaction_id, "Worker interaction response failed; retrying: {error}");
                         if matches!(
@@ -785,30 +1519,85 @@ impl LocalContainerService {
         session_id: Uuid,
         execution_id: Uuid,
         execution_started_at: DateTime<Utc>,
+        configured_server_ids: Vec<String>,
         signal: McpRefreshSignal,
     ) {
         let controls = self.mcp_refresh_controls.clone();
         let coordinator = self.mcp_refresh_coordinator.clone();
         tokio::spawn(async move {
-            let handle = match signal.await {
-                Ok(handle) => handle,
-                Err(_) => {
-                    if coordinator
-                        .status(session_id)
-                        .await
-                        .is_some_and(|state| state.status == McpRefreshStatus::PendingNextTurn)
-                    {
+            let discovery_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+            let mut signal = signal;
+            let handle = match tokio::time::timeout_at(discovery_deadline, &mut signal).await {
+                Ok(Ok(handle)) => handle,
+                Ok(Err(_)) => {
+                    let pending = coordinator.status(session_id).await.filter(|state| {
+                        state.status == McpRefreshStatus::PendingNextTurn
+                            && state.requested_at <= execution_started_at
+                    });
+                    if let Some(state) = pending {
                         coordinator
-                            .fail(session_id, McpRefreshErrorCategory::InitializeFailed)
+                            .fail(
+                                session_id,
+                                state.generation,
+                                McpRefreshErrorCategory::Timeout,
+                            )
+                            .await;
+                    } else {
+                        coordinator
+                            .observe_failure(
+                                session_id,
+                                execution_started_at,
+                                configured_server_ids,
+                                McpRefreshErrorCategory::Timeout,
+                            )
                             .await;
                     }
                     return;
                 }
+                Err(_) => {
+                    let pending = coordinator.status(session_id).await.filter(|state| {
+                        state.status == McpRefreshStatus::PendingNextTurn
+                            && state.requested_at <= execution_started_at
+                    });
+                    if let Some(state) = pending {
+                        coordinator
+                            .fail(
+                                session_id,
+                                state.generation,
+                                McpRefreshErrorCategory::Timeout,
+                            )
+                            .await;
+                    } else {
+                        coordinator
+                            .observe_failure(
+                                session_id,
+                                execution_started_at,
+                                configured_server_ids.clone(),
+                                McpRefreshErrorCategory::Timeout,
+                            )
+                            .await;
+                    }
+                    match signal.await {
+                        Ok(handle) => handle,
+                        Err(_) => return,
+                    }
+                }
             };
-            controls
-                .write()
-                .await
-                .insert(session_id, (execution_id, handle.clone()));
+            {
+                let mut controls = controls.write().await;
+                if controls
+                    .get(&session_id)
+                    .is_some_and(|(_, current_started_at, _)| {
+                        *current_started_at > execution_started_at
+                    })
+                {
+                    return;
+                }
+                controls.insert(
+                    session_id,
+                    (execution_id, execution_started_at, handle.clone()),
+                );
+            }
 
             if let Some(state) = coordinator
                 .status(session_id)
@@ -820,17 +1609,73 @@ impl LocalContainerService {
                 // Queue it on this live thread and let the following turn
                 // perform the atomic confirmation.
                 if state.requested_at > execution_started_at {
+                    if coordinator
+                        .is_restart_generation(session_id, state.generation)
+                        .await
+                    {
+                        return;
+                    }
                     if let Err(category) = handle.0.queue_refresh().await {
-                        coordinator.fail(session_id, category).await;
+                        coordinator
+                            .fail(session_id, state.generation, category)
+                            .await;
                     }
                     return;
                 }
-                match handle.0.list_servers().await {
+                let inventory =
+                    tokio::time::timeout_at(discovery_deadline, handle.0.list_servers())
+                        .await
+                        .unwrap_or(Err(McpRefreshErrorCategory::Timeout));
+                if controls.read().await.get(&session_id).is_some_and(
+                    |(current_execution_id, _, _)| *current_execution_id != execution_id,
+                ) {
+                    return;
+                }
+                match inventory {
                     Ok(servers) => {
-                        coordinator.confirm(session_id, servers).await;
+                        coordinator
+                            .confirm(session_id, state.generation, servers)
+                            .await;
                     }
                     Err(category) => {
-                        coordinator.fail(session_id, category).await;
+                        coordinator
+                            .fail(session_id, state.generation, category)
+                            .await;
+                    }
+                }
+            } else {
+                let inventory =
+                    tokio::time::timeout_at(discovery_deadline, handle.0.list_servers())
+                        .await
+                        .unwrap_or(Err(McpRefreshErrorCategory::Timeout));
+                if controls.read().await.get(&session_id).is_none_or(
+                    |(current_execution_id, _, _)| *current_execution_id != execution_id,
+                ) {
+                    return;
+                }
+                // Inventory is active-session state, not merely a refresh
+                // result. Publish every normal startup so the panel cannot
+                // retain evidence from a previous executor process.
+                match inventory {
+                    Ok(servers) => {
+                        coordinator
+                            .observe_inventory(
+                                session_id,
+                                execution_started_at,
+                                configured_server_ids,
+                                servers,
+                            )
+                            .await;
+                    }
+                    Err(category) => {
+                        coordinator
+                            .observe_failure(
+                                session_id,
+                                execution_started_at,
+                                configured_server_ids,
+                                category,
+                            )
+                            .await;
                     }
                 }
             }
@@ -858,10 +1703,13 @@ impl LocalContainerService {
         let exit_monitor_handles = Arc::new(RwLock::new(HashMap::new()));
         let raw_log_tailers = Arc::new(RwLock::new(HashMap::new()));
         let adopted_pgids = Arc::new(RwLock::new(HashMap::new()));
+        let worker_pushed_sequences = Arc::new(RwLock::new(HashMap::new()));
+        let worker_log_writers = Arc::new(RwLock::new(HashMap::new()));
         let warm_app_servers = Arc::new(RwLock::new(HashMap::new()));
         let mcp_refresh_controls = Arc::new(RwLock::new(HashMap::new()));
         let workspace_touch_times = Arc::new(RwLock::new(HashMap::new()));
         let notification_service = NotificationService::new(config.clone());
+        let (error_remediation_tx, _) = broadcast::channel(ERROR_REMEDIATION_CHANNEL_CAPACITY);
         let repository_admin_locks =
             RepositoryAdminLockManager::new(db.pool.clone(), Duration::from_mins(5))
                 .expect("static repository lock lease must be valid");
@@ -876,6 +1724,8 @@ impl LocalContainerService {
             exit_monitor_handles,
             raw_log_tailers,
             adopted_pgids,
+            worker_pushed_sequences,
+            worker_log_writers,
             warm_app_servers,
             mcp_refresh_controls,
             mcp_refresh_coordinator: McpRefreshCoordinator::default(),
@@ -887,6 +1737,7 @@ impl LocalContainerService {
             approvals,
             queued_message_service,
             notification_service,
+            error_remediation_tx,
             remote_client,
             cluster_config,
             repository_admin_locks,
@@ -1191,6 +2042,22 @@ impl LocalContainerService {
         }
     }
 
+    /// Remove a just-finished execution's in-memory store and push its
+    /// `Finished` sentinel — the shared tail every completion path in this
+    /// file runs. Caches the store's settled entries to disk first (VAS-440):
+    /// every call site here means the execution just left `Running`, so this
+    /// is the one place guaranteed to hold the complete history without
+    /// requiring a reader to ask for it before the store is gone.
+    async fn finish_msg_store(&self, id: &Uuid) {
+        self.worker_pushed_sequences.write().await.remove(id);
+        self.worker_log_writers.write().await.remove(id);
+        let Some(store) = self.msg_stores.write().await.remove(id) else {
+            return;
+        };
+        self.cache_finished_execution(id, &store).await;
+        store.push_finished();
+    }
+
     /// Leave a detached process running across a server shutdown so the next
     /// boot can adopt it. Forgets the child handle (defusing kill_on_drop)
     /// and stops its monitor tasks without touching the DB row, which stays
@@ -1246,9 +2113,7 @@ impl LocalContainerService {
 
             container.take_adopted_pgid(&exec_id).await;
             container.finish_raw_log_tailer(&exec_id).await;
-            if let Some(msg) = container.msg_stores.write().await.remove(&exec_id) {
-                msg.push_finished();
-            }
+            container.finish_msg_store(&exec_id).await;
         })
     }
 
@@ -1279,9 +2144,7 @@ impl LocalContainerService {
             handle.abort();
         }
         self.finish_raw_log_tailer(&execution_process.id).await;
-        if let Some(msg) = self.msg_stores.write().await.remove(&execution_process.id) {
-            msg.push_finished();
-        }
+        self.finish_msg_store(&execution_process.id).await;
 
         self.update_after_head_commits(execution_process.id).await;
 
@@ -1317,29 +2180,83 @@ impl LocalContainerService {
             }
         };
 
-        if workspace_inputs.is_empty() {
+        let cleanup_succeeded = if workspace_inputs.is_empty() {
             tracing::warn!(
                 "No repositories found for workspace {}, cleaning up workspace directory only",
                 workspace.id
             );
-            if workspace_dir.exists()
-                && let Err(e) = tokio::fs::remove_dir_all(&workspace_dir).await
-            {
-                tracing::warn!("Failed to remove workspace directory: {}", e);
+            if workspace_dir.exists() {
+                match tokio::fs::remove_dir_all(&workspace_dir).await {
+                    Ok(()) => true,
+                    Err(error) => {
+                        tracing::warn!("Failed to remove workspace directory: {}", error);
+                        false
+                    }
+                }
+            } else {
+                true
             }
         } else {
-            WorkspaceManager::cleanup_workspace(&workspace_dir, &workspace_inputs)
-                .await
-                .unwrap_or_else(|e| {
+            match WorkspaceManager::cleanup_workspace(&workspace_dir, &workspace_inputs).await {
+                Ok(()) => true,
+                Err(error) => {
                     tracing::warn!(
                         "Failed to clean up workspace for workspace {}: {}",
                         workspace.id,
-                        e
+                        error
                     );
-                });
+                    false
+                }
+            }
+        };
+
+        if !cleanup_succeeded {
+            if self.cluster_config.enabled
+                && let Err(error) =
+                    WorkspacePlacement::cancel_cleanup(&self.db.pool, workspace.id).await
+            {
+                tracing::warn!(
+                    workspace_id = %workspace.id,
+                    %error,
+                    "Failed to release unsuccessful clustered workspace cleanup claim"
+                );
+            }
+            return;
         }
 
-        let _ = Workspace::mark_worktree_deleted(&self.db.pool, workspace.id).await;
+        if let Err(error) = Workspace::mark_worktree_deleted(&self.db.pool, workspace.id).await {
+            tracing::warn!(
+                workspace_id = %workspace.id,
+                %error,
+                "Failed to mark cleaned workspace worktree deleted"
+            );
+            if self.cluster_config.enabled
+                && let Err(cancel_error) =
+                    WorkspacePlacement::cancel_cleanup(&self.db.pool, workspace.id).await
+            {
+                tracing::warn!(
+                    workspace_id = %workspace.id,
+                    error = %cancel_error,
+                    "Failed to release cleanup claim after deletion-state persistence failed"
+                );
+            }
+            return;
+        }
+
+        if self.cluster_config.enabled {
+            match WorkspacePlacement::finish_cleanup(&self.db.pool, workspace.id).await {
+                Ok(true) => {}
+                Ok(false) => tracing::warn!(
+                    workspace_id = %workspace.id,
+                    "Cleaned clustered workspace did not hold the cleanup fence"
+                ),
+                Err(error) => tracing::warn!(
+                    workspace_id = %workspace.id,
+                    %error,
+                    "Failed to release clustered workspace cleanup fence"
+                ),
+            }
+        }
     }
 
     async fn cleanup_expired_workspaces(&self) -> Result<(), DeploymentError> {
@@ -1651,14 +2568,23 @@ impl LocalContainerService {
         let mut process_exit_rx = self.spawn_os_exit_watcher(exec_id);
 
         tokio::spawn(async move {
+            // For natural-exit executors the child lifetime is the turn
+            // lifetime. App-server executors report turn completion through a
+            // separate signal, so their still-live child does not prove the
+            // protocol turn remains active.
+            let live_child_is_turn_evidence = exit_signal.is_none();
             let mut exit_signal_future = exit_signal
                 .map(|rx| rx.boxed()) // wait for result
                 .unwrap_or_else(|| std::future::pending().boxed()); // no signal, stall forever
 
             let status_result: std::io::Result<std::process::ExitStatus>;
             let mut reconciliation_timed_out = false;
-            let final_output_timeout =
-                wait_for_unfinalized_output(msg_stores.clone(), Some(child_store.clone()), exec_id);
+            let final_output_timeout = wait_for_unfinalized_output(
+                msg_stores.clone(),
+                Some(child_store.clone()),
+                exec_id,
+                live_child_is_turn_evidence,
+            );
             tokio::pin!(final_output_timeout);
             // True when a persistent app-server finished a turn cleanly and is
             // being left alive for reuse; also guards the tail cleanup below so
@@ -1883,7 +2809,12 @@ impl LocalContainerService {
                         container.queued_message_service.take_queued(ctx.session.id)
                     {
                         let should_execute_queued = (queued_msg.restart_agent
-                            && ctx.execution_process.status == ExecutionProcessStatus::Failed)
+                            && (ctx.execution_process.status == ExecutionProcessStatus::Failed
+                                || (ctx.execution_process.status
+                                    == ExecutionProcessStatus::Killed
+                                    && container
+                                        .queued_message_service
+                                        .is_workspace_mcp_restart(ctx.session.id))))
                             || !matches!(
                                 ctx.execution_process.status,
                                 ExecutionProcessStatus::Failed
@@ -1902,6 +2833,9 @@ impl LocalContainerService {
                             {
                                 started_queued_follow_up = true;
                             } else {
+                                if queued_msg.restart_agent {
+                                    container.clear_mcp_restart_tracking(ctx.session.id).await;
+                                }
                                 container.finalize_task(&ctx).await;
                             }
                         } else {
@@ -1911,6 +2845,9 @@ impl LocalContainerService {
                                 ctx.session.id,
                                 ctx.execution_process.status
                             );
+                            if queued_msg.restart_agent {
+                                container.clear_mcp_restart_tracking(ctx.session.id).await;
+                            }
                             container.finalize_task(&ctx).await;
                         }
                     } else if !started_queued_follow_up {
@@ -1988,6 +2925,10 @@ impl LocalContainerService {
                     })));
                 }
 
+                // The process may have changed the worktree: drop the workspace's
+                // cached bulk diff stats so the next summaries poll recomputes them.
+                WORKSPACE_DIFF_STATS.invalidate(ctx.workspace.id);
+
                 // Sync workspace to remote after CodingAgent execution
                 if matches!(
                     &ctx.execution_process.run_reason,
@@ -2000,21 +2941,21 @@ impl LocalContainerService {
                         &ctx.workspace,
                     )
                     .await;
-                    let workspace_name =
-                        Workspace::find_by_id_with_status(&container.db.pool, ctx.workspace.id)
+                    let current_workspace =
+                        Workspace::find_by_id(&container.db.pool, ctx.workspace.id)
                             .await
                             .ok()
-                            .flatten()
-                            .and_then(|ws| ws.workspace.name);
+                            .flatten();
                     let client = client.clone();
                     let workspace_id = ctx.workspace.id;
-                    let archived = ctx.workspace.archived;
+                    let workspace_name = current_workspace.as_ref().and_then(|ws| ws.name.clone());
+                    let archived = current_workspace.map(|ws| ws.archived);
                     tokio::spawn(async move {
                         remote_sync::sync_workspace_to_remote(
                             &client,
                             workspace_id,
                             workspace_name.map(Some),
-                            Some(archived),
+                            archived,
                             stats.as_ref(),
                         )
                         .await;
@@ -2030,9 +2971,7 @@ impl LocalContainerService {
             // for DB persistence to complete before cleaning up the MsgStore
             container.finish_raw_log_tailer(&exec_id).await;
             let db_stream_handle = container.take_db_stream_handle(&exec_id).await;
-            if let Some(msg_arc) = msg_stores.write().await.remove(&exec_id) {
-                msg_arc.push_finished();
-            }
+            container.finish_msg_store(&exec_id).await;
             if let Some(handle) = db_stream_handle {
                 let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
             }
@@ -2057,7 +2996,7 @@ impl LocalContainerService {
             let mut controls = container.mcp_refresh_controls.write().await;
             if controls
                 .get(&session_id)
-                .is_some_and(|(control_exec_id, _)| *control_exec_id == exec_id)
+                .is_some_and(|(control_exec_id, _, _)| *control_exec_id == exec_id)
             {
                 controls.remove(&session_id);
             }
@@ -2117,8 +3056,12 @@ impl LocalContainerService {
     /// following the file as the process appends to it. Replays from the
     /// start of the file so the store's history is complete even when the
     /// process was adopted from a previous server instance.
-    async fn track_raw_file_msgs_in_store(&self, id: Uuid, path: PathBuf) {
-        let store = Arc::new(MsgStore::new());
+    async fn track_raw_file_msgs_in_store(&self, id: Uuid, path: PathBuf, replay: bool) {
+        let store = Arc::new(if replay {
+            MsgStore::new()
+        } else {
+            MsgStore::live()
+        });
         self.msg_stores.write().await.insert(id, store.clone());
 
         let handle = tokio::spawn(async move {
@@ -2170,7 +3113,7 @@ impl LocalContainerService {
     }
 
     async fn track_child_msgs_in_store(&self, id: Uuid, child: &mut AsyncGroupChild) {
-        let store = Arc::new(MsgStore::new());
+        let store = Arc::new(MsgStore::live());
 
         // stdout/stderr may be absent when re-tracking a warm-reused child: its
         // original streams were consumed by the first turn's forwarder (a warm
@@ -2201,10 +3144,90 @@ impl LocalContainerService {
         map.insert(id, store);
     }
 
+    /// Resume following one worker-owned execution left running by a previous
+    /// server instance. Returns `Ok(false)` when the row is not live worker
+    /// work (or is already tracked).
+    ///
+    /// The store is seeded with the persisted raw history so the normalizer
+    /// rebuilds one continuous conversation, the tracker continues from the
+    /// acknowledged cursor (never from zero, never backwards), and the raw-log
+    /// writer skips the seeded lines so nothing is written twice.
+    async fn reattach_worker_execution(
+        &self,
+        process: &ExecutionProcess,
+    ) -> Result<bool, ContainerError> {
+        let pool = &self.db.pool;
+        let Some(job) = ExecutionWorkerJob::find_by_execution_id(pool, process.id).await? else {
+            return Ok(false);
+        };
+        if !should_hand_off_worker_job(Some(&job)) {
+            return Ok(false);
+        }
+        if self.msg_stores.read().await.contains_key(&process.id) {
+            return Ok(false);
+        }
+        let ctx = ExecutionProcess::load_context(pool, process.id).await?;
+        let executor_action = process.executor_action().map_err(ContainerError::Other)?;
+
+        let history =
+            services::services::execution_process::load_raw_log_messages(pool, process.id)
+                .await
+                .unwrap_or_default();
+        let store = Arc::new(MsgStore::new());
+        for msg in history {
+            store.push(msg);
+        }
+        // Subscribe the writer now, before the tracker or normalizer can push:
+        // it counts the seeded lines it must skip from the exact snapshot it
+        // replays. Counting from what was loaded (the store evicts past its
+        // size bound) or after later pushes would make it skip new output.
+        if !services::services::execution_process::writes_own_raw_log(process) {
+            let writer = services::services::execution_process::spawn_resumed_raw_log_writer(
+                &store,
+                self.db.clone(),
+                process.id,
+                process.session_id,
+            );
+            self.worker_log_writers
+                .write()
+                .await
+                .insert(process.id, writer);
+        }
+        self.msg_stores.write().await.insert(process.id, store);
+
+        let cursor = u64::try_from(job.last_event_sequence).unwrap_or(0);
+        if let Err(error) = self
+            .track_worker_msgs_in_store(process, job.worker_node_id, Some(cursor))
+            .await
+        {
+            self.msg_stores.write().await.remove(&process.id);
+            return Err(error);
+        }
+        self.start_execution_log_pipeline(&ctx.workspace, process, executor_action, false)
+            .await;
+        self.spawn_execution_stage_tracker(&ctx.workspace, process)
+            .await;
+        tracing::info!(
+            execution_id = %process.id,
+            worker_node_id = %job.worker_node_id,
+            cursor,
+            "Re-attached worker-owned execution"
+        );
+        Ok(true)
+    }
+
+    /// Follow a worker execution's event journal into its MsgStore.
+    ///
+    /// `resume_from` is `None` for a fresh dispatch (poll from the start, with
+    /// a new store). A boot re-attachment passes the persisted acknowledged
+    /// cursor; the caller has already registered a store seeded with the
+    /// persisted history, which is reused so the normalizer sees one
+    /// continuous stream.
     async fn track_worker_msgs_in_store(
         &self,
         execution_process: &ExecutionProcess,
         worker_node_id: Uuid,
+        resume_from: Option<u64>,
     ) -> Result<(), ContainerError> {
         let client = self.worker_client.clone().ok_or_else(|| {
             ContainerError::Other(anyhow!("Cluster worker client is not configured"))
@@ -2213,56 +3236,191 @@ impl LocalContainerService {
             ContainerError::Other(anyhow!("Cluster coordinator identity is missing"))
         })?;
         let execution_id = execution_process.id;
-        let store = Arc::new(MsgStore::new());
-        self.msg_stores
+        let base_executor = match &execution_process.executor_action.0 {
+            ExecutorActionField::ExecutorAction(action) => action.base_executor(),
+            ExecutorActionField::Other(_) => None,
+        };
+        let live_worker_lease_is_turn_evidence = worker_lease_is_turn_evidence(base_executor);
+        let store = {
+            let mut stores = self.msg_stores.write().await;
+            match (resume_from, stores.get(&execution_id)) {
+                (Some(_), Some(seeded)) => seeded.clone(),
+                _ => {
+                    let store = Arc::new(if resume_from.is_none() {
+                        MsgStore::live()
+                    } else {
+                        MsgStore::new()
+                    });
+                    stores.insert(execution_id, store.clone());
+                    store
+                }
+            }
+        };
+        let pushed = Arc::new(std::sync::atomic::AtomicU64::new(resume_from.unwrap_or(0)));
+        // Sequences of interaction requests whose response has not yet been
+        // delivered to the worker.
+        let unresolved: UnresolvedInteractions = Arc::default();
+        self.worker_pushed_sequences
             .write()
             .await
-            .insert(execution_id, store.clone());
+            .insert(execution_id, pushed.clone());
         let db = self.db.clone();
         let container = self.clone();
         let handle = tokio::spawn(async move {
-            let mut cursor = 0_u64;
+            let mut cursor = resume_from.unwrap_or(0);
             let mut retry_delay = Duration::from_millis(100);
             let mut final_output_deadline: Option<tokio::time::Instant> = None;
+            let mut regression_reported = false;
             'poll: loop {
                 let batch = match client.events(worker_node_id, execution_id, cursor).await {
                     Ok(batch) => {
                         retry_delay = Duration::from_millis(100);
                         batch
                     }
-                    Err(services::services::cluster::WorkerClientError::ReplayGap { .. }) => {
-                        let _ = ExecutionWorkerJob::mark_output_incomplete(&db.pool, execution_id)
-                            .await;
-                        let _ = ExecutionWorkerJob::update_state(
-                            &db.pool,
-                            execution_id,
-                            ExecutionWorkerDispatchState::Indeterminate,
-                            None,
-                            Some(Utc::now()),
-                        )
-                        .await;
-                        if let Err(error) = update_completion_with_retry(
-                            &db,
-                            execution_id,
-                            ExecutionProcessStatus::Indeterminate,
-                            None,
-                        )
-                        .await
-                        {
-                            tracing::error!(%execution_id, %error, "Failed to persist replay-gap reconciliation");
-                            tokio::time::sleep(retry_delay).await;
-                            continue;
+                    Err(services::services::cluster::WorkerClientError::ReplayGap {
+                        requested_after,
+                        earliest_available,
+                    }) => {
+                        tracing::warn!(%execution_id, %worker_node_id, requested_after,
+                            earliest_available, "Worker output replay gap; checking retained terminal evidence");
+                        let (recovered, job_is_live) = match (
+                            ExecutionWorkerJob::find_by_execution_id(&db.pool, execution_id).await,
+                            client.inventory(worker_node_id).await,
+                        ) {
+                            (Ok(Some(known)), Ok(inventory)) => {
+                                let recovered = inventory.iter().find_map(|summary| {
+                                    replay_gap_terminal_evidence(
+                                        &known,
+                                        worker_node_id,
+                                        execution_id,
+                                        earliest_available.max(cursor),
+                                        summary,
+                                    )
+                                });
+                                let live = inventory.iter().any(|summary| {
+                                    replay_gap_job_is_live(
+                                        &known,
+                                        worker_node_id,
+                                        execution_id,
+                                        summary,
+                                    )
+                                });
+                                (recovered, live)
+                            }
+                            (known, inventory) => {
+                                tracing::warn!(%execution_id, database_error = ?known.err(),
+                                    inventory_error = ?inventory.err(),
+                                    "Unable to verify terminal evidence after replay gap");
+                                (None, false)
+                            }
+                        };
+                        if recovered.is_none() && job_is_live {
+                            // Output was trimmed from the worker's journal
+                            // (typically while this coordinator was restarting),
+                            // but the worker still reports the job live. Lost
+                            // output is not evidence that the execution ended:
+                            // record it as incomplete, say so in the chat, and
+                            // keep following from the earliest retained event.
+                            match ExecutionWorkerJob::mark_output_incomplete(&db.pool, execution_id)
+                                .await
+                            {
+                                Ok(true) => {}
+                                Ok(false) => tracing::warn!(%execution_id,
+                                    "Worker job row missing while recording incomplete output"),
+                                Err(error) => tracing::error!(%execution_id, %error,
+                                    "Failed to record incomplete worker output"),
+                            }
+                            tracing::warn!(%execution_id, %worker_node_id, requested_after,
+                                earliest_available, "Worker output replay gap on a live job; continuing");
+                            store.push(LogMsg::Stderr(format!(
+                                "Output events {} to {} were lost while Vibe Kanban was unavailable; the execution is still running on its worker and output continues below",
+                                requested_after.saturating_add(1),
+                                earliest_available.saturating_sub(1)
+                            )));
+                            cursor = earliest_available.saturating_sub(1);
+                            pushed.fetch_max(
+                                durable_worker_cursor(cursor, &unresolved.lock().unwrap()),
+                                std::sync::atomic::Ordering::AcqRel,
+                            );
+                            continue 'poll;
                         }
-                        store.push(LogMsg::Stderr(
-                            "Worker output replay gap; execution state is indeterminate".into(),
-                        ));
-                        // Remove before finishing so a client that subscribes
-                        // after this point re-derives from disk instead of
-                        // attaching to a store whose live broadcast will never
-                        // carry another message (see the terminal arm below
-                        // for the full explanation).
-                        container.msg_stores.write().await.remove(&execution_id);
-                        store.push_finished();
+                        let (worker_state, process_state, evidence) = match recovered {
+                            Some((worker_state, process_state, evidence)) => {
+                                (worker_state, process_state, Some(evidence))
+                            }
+                            None => (
+                                ExecutionWorkerDispatchState::Indeterminate,
+                                ExecutionProcessStatus::Indeterminate,
+                                None,
+                            ),
+                        };
+                        let evidence_json = evidence
+                            .as_ref()
+                            .map(serde_json::to_value)
+                            .transpose()
+                            .expect("terminal evidence is serializable");
+                        // Keep captured evidence until BOTH database records persist.
+                        // Never acknowledge a cursor across missing events.
+                        loop {
+                            let result: Result<(), anyhow::Error> = async {
+                                if !ExecutionWorkerJob::mark_output_incomplete(
+                                    &db.pool,
+                                    execution_id,
+                                )
+                                .await?
+                                {
+                                    anyhow::bail!(
+                                        "worker job disappeared during replay-gap reconciliation"
+                                    );
+                                }
+                                if !ExecutionWorkerJob::update_state(
+                                    &db.pool,
+                                    execution_id,
+                                    worker_state,
+                                    evidence_json.as_ref(),
+                                    Some(
+                                        evidence.as_ref().map_or_else(Utc::now, |e| e.observed_at),
+                                    ),
+                                )
+                                .await?
+                                {
+                                    anyhow::bail!(
+                                        "worker job disappeared during replay-gap reconciliation"
+                                    );
+                                }
+                                if !ExecutionProcess::was_stopped(&db.pool, execution_id).await {
+                                    update_completion_with_retry(
+                                        &db,
+                                        execution_id,
+                                        process_state.clone(),
+                                        evidence.as_ref().and_then(|e| e.exit_code).map(i64::from),
+                                    )
+                                    .await?;
+                                }
+                                Ok(())
+                            }
+                            .await;
+                            match result {
+                                Ok(()) => break,
+                                Err(error) => {
+                                    tracing::error!(%execution_id, %error, "Failed to persist replay-gap reconciliation");
+                                    tokio::time::sleep(retry_delay).await;
+                                    retry_delay = (retry_delay * 2).min(Duration::from_secs(5));
+                                }
+                            }
+                        }
+                        let outcome = if evidence.is_some() {
+                            format!(
+                                "execution outcome recovered from worker terminal evidence: {process_state:?}"
+                            )
+                        } else {
+                            "execution state is indeterminate".into()
+                        };
+                        store.push(LogMsg::Stderr(format!(
+                            "Worker output replay gap after sequence {requested_after} (earliest retained: {earliest_available}); output is incomplete; {outcome}"
+                        )));
+                        container.finalize_remote_execution(execution_id).await;
+                        container.finish_msg_store(&execution_id).await;
                         break;
                     }
                     Err(error) => {
@@ -2287,8 +3445,7 @@ impl LocalContainerService {
                                 continue 'poll;
                             }
                             container.finalize_remote_execution(execution_id).await;
-                            container.msg_stores.write().await.remove(&execution_id);
-                            store.push_finished();
+                            container.finish_msg_store(&execution_id).await;
                             break;
                         }
                         tokio::time::sleep(retry_delay).await;
@@ -2298,9 +3455,84 @@ impl LocalContainerService {
                 };
 
                 let mut terminal = None;
+                if worker_journal_regressed(cursor, batch.latest_available) {
+                    // The worker restarted and rebuilt this job's journal
+                    // below what was already consumed; its recovered terminal
+                    // event sits at a sequence this cursor has passed. Resolve
+                    // the job from its inventory summary instead of polling
+                    // for events that will never arrive.
+                    let recovered = match (
+                        ExecutionWorkerJob::find_by_execution_id(&db.pool, execution_id).await,
+                        client.inventory(worker_node_id).await,
+                    ) {
+                        (Ok(Some(known)), Ok(inventory)) => inventory.iter().find_map(|summary| {
+                            journal_regression_terminal_evidence(
+                                &known,
+                                worker_node_id,
+                                execution_id,
+                                batch.latest_available,
+                                summary,
+                            )
+                        }),
+                        (known, inventory) => {
+                            tracing::warn!(%execution_id, database_error = ?known.err(),
+                                inventory_error = ?inventory.err(),
+                                "Unable to verify terminal evidence after worker journal regression; retrying");
+                            tokio::time::sleep(retry_delay).await;
+                            retry_delay = (retry_delay * 2).min(Duration::from_secs(5));
+                            continue 'poll;
+                        }
+                    };
+                    if !regression_reported {
+                        regression_reported = true;
+                        tracing::warn!(%execution_id, %worker_node_id, cursor,
+                            latest_available = batch.latest_available,
+                            recovered = recovered.is_some(),
+                            "Worker journal regressed below the coordinator cursor; the worker restarted");
+                        if let Err(error) =
+                            ExecutionWorkerJob::mark_output_incomplete(&db.pool, execution_id).await
+                        {
+                            tracing::error!(%execution_id, %error, "Failed to record incomplete worker output");
+                        }
+                        store.push(LogMsg::Stderr(format!(
+                            "The worker restarted while this execution was running; output after event {cursor} may be missing"
+                        )));
+                    }
+                    match recovered {
+                        // Finalize through the normal terminal path below.
+                        Some(recovered) => terminal = Some(recovered),
+                        None => {
+                            tracing::warn!(%execution_id, %worker_node_id,
+                                "No matching terminal evidence after worker journal regression; marking execution indeterminate");
+                            if !ExecutionProcess::was_stopped(&db.pool, execution_id).await
+                                && let Err(update_error) =
+                                    mark_remote_execution_indeterminate(&db, execution_id).await
+                            {
+                                tracing::error!(%execution_id, %update_error, "Failed to reconcile regressed worker execution");
+                                tokio::time::sleep(retry_delay).await;
+                                continue 'poll;
+                            }
+                            container.finalize_remote_execution(execution_id).await;
+                            container.finish_msg_store(&execution_id).await;
+                            break;
+                        }
+                    }
+                }
                 let had_events = !batch.events.is_empty();
+                // Output effects are durable once pushed (the raw-log writer
+                // follows the store). An interaction or terminal event has
+                // effects a restart can lose, so the pushed sequence stops
+                // before it and only the acknowledgement below moves past it.
+                let mut batch_output_only = true;
                 for event in batch.events {
                     cursor = event.sequence;
+                    batch_output_only &= worker_event_is_output(&event.payload);
+                    if batch_output_only {
+                        pushed.fetch_max(
+                            durable_worker_cursor(cursor, &unresolved.lock().unwrap()),
+                            std::sync::atomic::Ordering::AcqRel,
+                        );
+                    }
                     match event.payload {
                         ExecutionEventPayload::Stdout { data_base64 } => {
                             push_worker_bytes(&store, &data_base64, false);
@@ -2309,16 +3541,24 @@ impl LocalContainerService {
                             push_worker_bytes(&store, &data_base64, true);
                         }
                         ExecutionEventPayload::Structured { json } => {
-                            if let Ok(message) = serde_json::from_str::<LogMsg>(&json) {
-                                if let Some(is_final) = normalized_final_assistant_state(&message) {
-                                    final_output_deadline = is_final.then(|| {
-                                        tokio::time::Instant::now()
-                                            + FINAL_OUTPUT_RECONCILIATION_TIMEOUT
-                                    });
+                            match classify_worker_structured(&json) {
+                                WorkerStructuredEvent::Log(message) => {
+                                    if let Some(is_final) =
+                                        normalized_final_assistant_state(&message)
+                                    {
+                                        final_output_deadline = is_final.then(|| {
+                                            tokio::time::Instant::now()
+                                                + FINAL_OUTPUT_RECONCILIATION_TIMEOUT
+                                        });
+                                    }
+                                    store.push(message);
                                 }
-                                store.push(message);
-                            } else {
-                                store.push_stdout(format!("{json}\n"));
+                                WorkerStructuredEvent::CancellationPhase(phase) => {
+                                    tracing::debug!(%execution_id, %phase, "Worker cancellation phase");
+                                }
+                                WorkerStructuredEvent::Diagnostic(message) => {
+                                    store.push(LogMsg::Stderr(message));
+                                }
                             }
                         }
                         ExecutionEventPayload::Completed(evidence) => {
@@ -2378,16 +3618,21 @@ impl LocalContainerService {
                                     }
                                 }
                             }
-                            container.msg_stores.write().await.remove(&execution_id);
-                            store.push_finished();
+                            // Finalize like every other indeterminate path, so
+                            // queued restarts and session restart tracking are
+                            // resolved instead of stranded behind this row.
+                            container.finalize_remote_execution(execution_id).await;
+                            container.finish_msg_store(&execution_id).await;
                             return;
                         }
                         ExecutionEventPayload::InteractionRequested(interaction) => {
                             final_output_deadline = None;
+                            unresolved.lock().unwrap().insert(cursor);
                             container.route_worker_interaction(
                                 execution_id,
                                 worker_node_id,
                                 interaction,
+                                Some((unresolved.clone(), cursor)),
                             );
                         }
                         ExecutionEventPayload::Accepted => {}
@@ -2407,11 +3652,17 @@ impl LocalContainerService {
                 // Terminal events are deliberately not acknowledged until the
                 // process-row transition below succeeds; the worker retains
                 // replay authority if this coordinator dies while persisting.
+                // The persisted cursor stays before any interaction still
+                // awaiting a response: its approval waiter is in memory only,
+                // so a re-attach after a restart must replay the request. The
+                // worker ack is bookkeeping (it does not trim the journal) and
+                // keeps the full cursor.
+                let durable = durable_worker_cursor(cursor, &unresolved.lock().unwrap());
                 if should_ack_worker_batch(cursor, terminal.is_some()) {
                     let _ = ExecutionWorkerJob::acknowledge_sequence(
                         &db.pool,
                         execution_id,
-                        cursor as i64,
+                        durable as i64,
                         batch.latest_available as i64,
                     )
                     .await;
@@ -2430,6 +3681,9 @@ impl LocalContainerService {
                     if let Err(error) = client.acknowledge(worker_node_id, &acknowledgement).await {
                         tracing::warn!(%execution_id, "Worker event acknowledgement failed: {error}");
                     }
+                }
+                if should_ack_worker_batch(cursor, terminal.is_some()) {
+                    pushed.fetch_max(durable, std::sync::atomic::Ordering::AcqRel);
                 }
 
                 if let Some((worker_state, process_state, evidence)) = terminal {
@@ -2493,20 +3747,20 @@ impl LocalContainerService {
                         tracing::warn!(%execution_id, "Terminal worker acknowledgement failed after persistence: {error}");
                     }
                     container.finalize_remote_execution(execution_id).await;
-                    // Remove from the map before pushing Finished. Historic
-                    // replay (`stream_normalized_logs`) reads a resident store
-                    // via `history_plus_stream()`, which chains the buffered
-                    // history onto a *live* broadcast subscription. A late
-                    // subscriber's history replay includes this store's past
-                    // `Finished` entry, but the filter used by that replay
-                    // path drops non-JsonPatch entries — so the sentinel is
-                    // discarded and the replay falls through to the live half,
-                    // which never yields again for a store nothing will ever
-                    // push to. Removing the store here ensures any later
-                    // subscriber instead falls back to the on-disk/materialized
-                    // log path, which terminates correctly.
-                    container.msg_stores.write().await.remove(&execution_id);
-                    store.push_finished();
+                    // Remove (and cache) from the map before pushing Finished.
+                    // Historic replay (`stream_normalized_logs`) reads a
+                    // resident store via `history_plus_stream()`, which chains
+                    // the buffered history onto a *live* broadcast
+                    // subscription. A late subscriber's history replay
+                    // includes this store's past `Finished` entry, but the
+                    // filter used by that replay path drops non-JsonPatch
+                    // entries — so the sentinel is discarded and the replay
+                    // falls through to the live half, which never yields
+                    // again for a store nothing will ever push to. Removing
+                    // the store here ensures any later subscriber instead
+                    // falls back to the on-disk/materialized log path, which
+                    // terminates correctly.
+                    container.finish_msg_store(&execution_id).await;
                     break;
                 }
 
@@ -2514,7 +3768,13 @@ impl LocalContainerService {
                     .is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
                 {
                     match ExecutionWorkerJob::find_by_execution_id(&db.pool, execution_id).await {
-                        Ok(Some(job)) if worker_job_has_positive_liveness(&job, Utc::now()) => {
+                        Ok(Some(job))
+                            if worker_job_has_positive_liveness(
+                                &job,
+                                Utc::now(),
+                                live_worker_lease_is_turn_evidence,
+                            ) =>
+                        {
                             // A current job lease is authoritative positive
                             // liveness. Do not turn quiet final text into a
                             // cancellation while the worker still owns work.
@@ -2581,8 +3841,7 @@ impl LocalContainerService {
                             .into(),
                     ));
                     container.finalize_remote_execution(execution_id).await;
-                    container.msg_stores.write().await.remove(&execution_id);
-                    store.push_finished();
+                    container.finish_msg_store(&execution_id).await;
                     break;
                 }
 
@@ -2608,9 +3867,42 @@ impl LocalContainerService {
                 tracing::error!(%execution_id, "Remote execution next action failed: {error}");
             }
         }
+        let mut started_queued_follow_up = false;
         if self.should_finalize(&ctx) {
+            self.queued_message_service
+                .wait_for_restart_resolution(ctx.session.id)
+                .await;
+            if let Some(queued_msg) = self.queued_message_service.take_queued(ctx.session.id) {
+                let should_execute_queued = (queued_msg.restart_agent
+                    && (ctx.execution_process.status == ExecutionProcessStatus::Failed
+                        || (ctx.execution_process.status == ExecutionProcessStatus::Killed
+                            && self
+                                .queued_message_service
+                                .is_workspace_mcp_restart(ctx.session.id))))
+                    || !matches!(
+                        ctx.execution_process.status,
+                        ExecutionProcessStatus::Failed
+                            | ExecutionProcessStatus::Killed
+                            | ExecutionProcessStatus::Interrupted
+                            | ExecutionProcessStatus::Indeterminate
+                    );
+                if should_execute_queued {
+                    started_queued_follow_up =
+                        self.start_queued_follow_up_message(&ctx, &queued_msg).await;
+                    if !started_queued_follow_up && queued_msg.restart_agent {
+                        self.clear_mcp_restart_tracking(ctx.session.id).await;
+                    }
+                } else if queued_msg.restart_agent {
+                    self.clear_mcp_restart_tracking(ctx.session.id).await;
+                }
+            }
+        }
+        if self.should_finalize(&ctx) && !started_queued_follow_up {
             self.finalize_task(&ctx).await;
         }
+        // Remote processes edit the shared worktree from a worker; invalidate
+        // the coordinator's cached bulk diff stats for this workspace.
+        WORKSPACE_DIFF_STATS.invalidate(ctx.workspace.id);
         self.update_after_head_commits(execution_id).await;
     }
 
@@ -2783,6 +4075,18 @@ impl LocalContainerService {
         queued_msg: &services::services::queued_message::QueuedMessage,
     ) -> bool {
         if queued_msg.restart_agent {
+            if !self
+                .queued_message_service
+                .wait_for_mcp_restart_start(ctx.session.id, queued_msg.queued_at)
+                .await
+            {
+                self.queued_message_service
+                    .finish_workspace_mcp_restart(ctx.session.id);
+                self.clear_mcp_restart_tracking(ctx.session.id).await;
+                return false;
+            }
+            self.queued_message_service
+                .finish_workspace_mcp_restart(ctx.session.id);
             self.reap_warm_server(&ctx.session.id).await;
         }
         if let Err(e) =
@@ -2863,7 +4167,7 @@ impl LocalContainerService {
 
         let action = ExecutorAction::new(action_type, cleanup_action.map(Box::new));
 
-        self.start_execution(
+        self.start_execution_after_workspace_restart(
             &ctx.workspace,
             &ctx.session,
             &action,
@@ -3003,12 +4307,54 @@ const ORG_ENV_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 /// case-sensitive to match process env semantics on Unix.
 const RESERVED_ENV_PREFIXES: &[&str] = &["VK_"];
 const RESERVED_ENV_NAMES: &[&str] = &[
+    "GOBIN",
+    "GOCACHE",
+    "GOENV",
+    "GOMODCACHE",
+    "GOPATH",
+    "GOTOOLCHAIN",
     "PATH",
     "HOME",
     "LD_PRELOAD",
     "LD_LIBRARY_PATH",
     "OPENCODE_SERVER_PASSWORD",
 ];
+
+fn workspace_go_environment(
+    workspace_root: &Path,
+    inherited_path: Option<&std::ffi::OsStr>,
+) -> HashMap<String, String> {
+    let root = workspace_root.join(".vibe-kanban/go");
+    let gobin = root.join("bin");
+    let mut environment = HashMap::from([
+        ("GOBIN".into(), gobin.to_string_lossy().into_owned()),
+        (
+            "GOCACHE".into(),
+            root.join("build").to_string_lossy().into_owned(),
+        ),
+        (
+            "GOENV".into(),
+            root.join("env").to_string_lossy().into_owned(),
+        ),
+        (
+            "GOMODCACHE".into(),
+            root.join("mod").to_string_lossy().into_owned(),
+        ),
+        (
+            "GOPATH".into(),
+            root.join("path").to_string_lossy().into_owned(),
+        ),
+        ("GOTOOLCHAIN".into(), "auto".into()),
+    ]);
+    if let Some(inherited_path) = inherited_path {
+        let path = std::env::join_paths(
+            std::iter::once(gobin).chain(std::env::split_paths(inherited_path)),
+        )
+        .unwrap_or_else(|_| inherited_path.to_os_string());
+        environment.insert("PATH".into(), path.to_string_lossy().into_owned());
+    }
+    environment
+}
 
 fn is_reserved_env_name(name: &str) -> bool {
     RESERVED_ENV_PREFIXES
@@ -3042,6 +4388,12 @@ fn failure_exit_status() -> std::process::ExitStatus {
 
 #[async_trait]
 impl ContainerService for LocalContainerService {
+    async fn activate_workspace(&self, workspace_id: Uuid) -> Result<(), ContainerError> {
+        remote_sync::activate_workspace(&self.db.pool, self.remote_client.as_ref(), workspace_id)
+            .await?;
+        Ok(())
+    }
+
     fn msg_stores(&self) -> &Arc<RwLock<HashMap<Uuid, Arc<MsgStore>>>> {
         &self.msg_stores
     }
@@ -3052,7 +4404,17 @@ impl ContainerService for LocalContainerService {
     async fn reap_warm_processes_for_session(&self, session_id: Uuid) {
         self.reap_warm_server(&session_id).await;
         self.mcp_refresh_controls.write().await.remove(&session_id);
-        self.mcp_refresh_coordinator.remove(session_id).await;
+        if !self
+            .queued_message_service
+            .is_mcp_restart_start_blocked(session_id)
+        {
+            self.mcp_refresh_coordinator.remove(session_id).await;
+        }
+    }
+
+    async fn reap_warm_process_for_mcp_restart(&self, session_id: Uuid) {
+        self.reap_warm_server(&session_id).await;
+        self.mcp_refresh_controls.write().await.remove(&session_id);
     }
 
     fn db(&self) -> &DBService {
@@ -3065,6 +4427,10 @@ impl ContainerService for LocalContainerService {
 
     fn notification_service(&self) -> &NotificationService {
         &self.notification_service
+    }
+
+    fn error_remediation_sender(&self) -> Option<&broadcast::Sender<ErrorRemediationEvent>> {
+        Some(&self.error_remediation_tx)
     }
 
     async fn refresh_mcp_tools(
@@ -3085,10 +4451,21 @@ impl ContainerService for LocalContainerService {
                 .await?;
         let supported = profile
             .as_ref()
-            .is_some_and(|profile| profile.executor == BaseCodingAgent::Codex);
+            .is_some_and(|profile| supports_live_mcp_refresh(profile.executor));
+        let configured_servers = if let Some(profile_id) = profile.as_ref()
+            && let Some(agent) = ExecutorConfigs::get_cached().get_coding_agent(profile_id)
+        {
+            read_coding_agent_mcp_servers(&agent).await.ok()
+        } else {
+            None
+        };
+        let configured_server_ids = configured_servers
+            .as_ref()
+            .map(|servers| servers.keys().cloned().collect())
+            .unwrap_or_default();
         let result = self
             .mcp_refresh_coordinator
-            .request(session_id, supported)
+            .request(session_id, supported, configured_server_ids)
             .await;
         if result.status != McpRefreshStatus::PendingNextTurn {
             return Ok(result);
@@ -3107,26 +4484,40 @@ impl ContainerService for LocalContainerService {
             && let Some(worker_job) =
                 ExecutionWorkerJob::find_by_execution_id(&self.db.pool, execution.id).await?
         {
-            let Some(profile_id) = profile else {
+            let Some(profile_id) = profile.as_ref() else {
                 return Ok(self
                     .mcp_refresh_coordinator
-                    .fail(session_id, McpRefreshErrorCategory::Unsupported)
+                    .fail(
+                        session_id,
+                        result.generation,
+                        McpRefreshErrorCategory::Unsupported,
+                    )
                     .await
                     .unwrap_or(result));
             };
-            let Some(agent) = ExecutorConfigs::get_cached().get_coding_agent(&profile_id) else {
+            let Some(agent) = ExecutorConfigs::get_cached().get_coding_agent(profile_id) else {
                 return Ok(self
                     .mcp_refresh_coordinator
-                    .fail(session_id, McpRefreshErrorCategory::MaterializationFailed)
+                    .fail(
+                        session_id,
+                        result.generation,
+                        McpRefreshErrorCategory::MaterializationFailed,
+                    )
                     .await
                     .unwrap_or(result));
             };
+            // Re-read after worker resolution. The earlier read is status-only;
+            // settings may have changed while affinity was being resolved.
             let servers = match read_coding_agent_mcp_servers(&agent).await {
                 Ok(servers) => servers.into_iter().collect(),
                 Err(_) => {
                     return Ok(self
                         .mcp_refresh_coordinator
-                        .fail(session_id, McpRefreshErrorCategory::MaterializationFailed)
+                        .fail(
+                            session_id,
+                            result.generation,
+                            McpRefreshErrorCategory::MaterializationFailed,
+                        )
                         .await
                         .unwrap_or(result));
                 }
@@ -3136,7 +4527,11 @@ impl ContainerService for LocalContainerService {
                 Err(_) => {
                     return Ok(self
                         .mcp_refresh_coordinator
-                        .fail(session_id, McpRefreshErrorCategory::MaterializationFailed)
+                        .fail(
+                            session_id,
+                            result.generation,
+                            McpRefreshErrorCategory::MaterializationFailed,
+                        )
                         .await
                         .unwrap_or(result));
                 }
@@ -3144,7 +4539,11 @@ impl ContainerService for LocalContainerService {
             if snapshot.validate_size().is_err() {
                 return Ok(self
                     .mcp_refresh_coordinator
-                    .fail(session_id, McpRefreshErrorCategory::MaterializationFailed)
+                    .fail(
+                        session_id,
+                        result.generation,
+                        McpRefreshErrorCategory::MaterializationFailed,
+                    )
                     .await
                     .unwrap_or(result));
             }
@@ -3214,7 +4613,7 @@ impl ContainerService for LocalContainerService {
             };
             return Ok(self
                 .mcp_refresh_coordinator
-                .fail(session_id, failure)
+                .fail(session_id, result.generation, failure)
                 .await
                 .unwrap_or(result));
         }
@@ -3224,13 +4623,13 @@ impl ContainerService for LocalContainerService {
             .read()
             .await
             .get(&session_id)
-            .map(|(_, handle)| handle.clone());
+            .map(|(_, _, handle)| handle.clone());
         if let Some(control) = control
             && let Err(category) = control.0.queue_refresh().await
         {
             return Ok(self
                 .mcp_refresh_coordinator
-                .fail(session_id, category)
+                .fail(session_id, result.generation, category)
                 .await
                 .unwrap_or(result));
         }
@@ -3240,6 +4639,60 @@ impl ContainerService for LocalContainerService {
         // `register_mcp_refresh_control`, which reads the complete status and
         // atomically confirms this pending generation.
         Ok(result)
+    }
+
+    async fn prepare_mcp_restart(
+        &self,
+        workspace_id: Uuid,
+        session_id: Uuid,
+    ) -> Result<McpRefreshResult, ContainerError> {
+        let session = Session::find_by_id(&self.db.pool, session_id)
+            .await?
+            .ok_or(SessionError::NotFound)?;
+        if session.workspace_id != workspace_id {
+            return Err(ContainerError::Other(anyhow!(
+                "Session does not belong to workspace"
+            )));
+        }
+        let profile =
+            ExecutionProcess::latest_executor_profile_for_session(&self.db.pool, session_id)
+                .await?;
+        let configured_server_ids = if let Some(profile_id) = profile.as_ref()
+            && let Some(agent) = ExecutorConfigs::get_cached().get_coding_agent(profile_id)
+        {
+            read_coding_agent_mcp_servers(&agent)
+                .await
+                .map(|servers| servers.keys().cloned().collect())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        Ok(self
+            .mcp_refresh_coordinator
+            .request_restart(session_id, configured_server_ids)
+            .await)
+    }
+
+    async fn clear_mcp_restart_tracking(&self, session_id: Uuid) {
+        if let Some(state) = self.mcp_refresh_coordinator.status(session_id).await {
+            self.mcp_refresh_coordinator
+                .fail(
+                    session_id,
+                    state.generation,
+                    McpRefreshErrorCategory::ReloadFailed,
+                )
+                .await;
+        }
+    }
+
+    async fn fail_mcp_restart_generation(&self, session_id: Uuid, generation: u64) {
+        self.mcp_refresh_coordinator
+            .fail(
+                session_id,
+                generation,
+                McpRefreshErrorCategory::ReloadFailed,
+            )
+            .await;
     }
 
     async fn mcp_refresh_status(
@@ -3258,8 +4711,21 @@ impl ContainerService for LocalContainerService {
         Ok(self.mcp_refresh_coordinator.status(session_id).await)
     }
 
-    async fn resolve_org_env_vars(&self, workspace: &Workspace) -> HashMap<String, String> {
-        self.resolve_org_env_vars_inner(workspace).await
+    async fn resolve_org_env_vars(
+        &self,
+        workspace: &Workspace,
+    ) -> Result<HashMap<String, String>, ContainerError> {
+        let values = self.resolve_org_env_vars_inner(workspace).await;
+        // Machine-scoped GitHub owner tokens apply to every workspace, linked or
+        // not. They read the org map before resolution so its literal
+        // 1Password token keeps the same precedence it has for Env Vars.
+        let github =
+            services::services::github_owner_tokens::launch_environment(&self.db.pool, &values)
+                .await?;
+        let mut resolved =
+            services::services::environment_secrets::resolve_environment_secrets(values).await?;
+        resolved.extend(github);
+        Ok(resolved)
     }
 
     async fn touch(&self, workspace: &Workspace) -> Result<(), ContainerError> {
@@ -3362,6 +4828,15 @@ impl ContainerService for LocalContainerService {
         workspace: &Workspace,
     ) -> Result<ContainerRef, ContainerError> {
         self.touch(workspace).await?;
+
+        // A process crash after deletion was recorded but before the cleanup
+        // fence was released leaves a recoverable `cleaning` row. Repair only
+        // that proven-complete state; an in-progress cleanup still has
+        // `worktree_deleted = false` and remains fenced.
+        if self.cluster_config.enabled && workspace.worktree_deleted {
+            WorkspacePlacement::finish_cleanup(&self.db.pool, workspace.id).await?;
+        }
+
         let (repositories, workspace_inputs) = self.workspace_repo_inputs(workspace.id).await?;
 
         let workspace_dir = if let Some(container_ref) = &workspace.container_ref {
@@ -3518,6 +4993,11 @@ impl ContainerService for LocalContainerService {
         let worker_node_id = placement.worker_node_id.ok_or_else(|| {
             ContainerError::Other(anyhow!("Ready cluster workspace has no assigned worker"))
         })?;
+        // Before any worker-job record or network call: a worker the registry
+        // has already written off would only cost two transport timeouts and
+        // then an opaque error. Affinity stays sticky — refuse, never reroute.
+        let worker = WorkerNode::find_by_id(&self.db.pool, worker_node_id).await?;
+        dispatch_liveness(worker_node_id, worker.as_ref(), Utc::now())?;
         let coordinator_id = self.cluster_config.coordinator_id.ok_or_else(|| {
             ContainerError::Other(anyhow!("Cluster coordinator identity is missing"))
         })?;
@@ -3529,7 +5009,11 @@ impl ContainerService for LocalContainerService {
         })?;
 
         let mut environment = BTreeMap::new();
-        environment.extend(self.resolve_org_env_vars(workspace).await);
+        environment.extend(self.resolve_org_env_vars(workspace).await?);
+        // Send only workspace-relative Go state. The worker must construct PATH
+        // from its own supervised environment; coordinator Nix store paths are
+        // not necessarily valid on a heterogeneous worker.
+        environment.extend(workspace_go_environment(Path::new(&workspace_path), None));
         environment.insert("VK_WORKSPACE_ID".into(), workspace.id.to_string());
         environment.insert("VK_WORKSPACE_BRANCH".into(), workspace.branch.clone());
 
@@ -3687,23 +5171,27 @@ impl ContainerService for LocalContainerService {
                 "Execution worker job was not pending during acceptance"
             )));
         }
-        if dispatch.mcp_config_snapshot.is_some()
-            && self
-                .mcp_refresh_coordinator
-                .status(execution_process.session_id)
-                .await
-                .is_some_and(|state| {
-                    state.status == McpRefreshStatus::PendingNextTurn
-                        && state.requested_at <= execution_process.started_at
-                })
-        {
+        let pending_mcp_generation = self
+            .mcp_refresh_coordinator
+            .status(execution_process.session_id)
+            .await
+            .filter(|state| {
+                state.status == McpRefreshStatus::PendingNextTurn
+                    && state.requested_at <= execution_process.started_at
+            })
+            .map(|state| state.generation);
+        if let Some(snapshot) = dispatch.mcp_config_snapshot.clone() {
             let client = client.clone();
             let coordinator = self.mcp_refresh_coordinator.clone();
             let session_id = execution_process.session_id;
             let execution_id = execution_process.id;
-            let snapshot = dispatch.mcp_config_snapshot.clone().expect("checked above");
+            let execution_started_at = execution_process.started_at;
+            let configured_server_ids = snapshot.servers.keys().cloned().collect::<Vec<_>>();
+            let inventory_expected = snapshot.executor == BaseCodingAgent::Codex.to_string()
+                || snapshot.executor == BaseCodingAgent::ClaudeCode.to_string();
             tokio::spawn(async move {
-                for _ in 0..30 {
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+                while tokio::time::Instant::now() < deadline {
                     let request = McpRefreshRequest {
                         authority: RequestAuthority {
                             protocol_version: PROTOCOL_VERSION,
@@ -3716,25 +5204,114 @@ impl ContainerService for LocalContainerService {
                         execution_id,
                         snapshot: snapshot.clone(),
                     };
-                    if let Ok(status) = client.mcp_status(worker_node_id, &request).await
-                        && status.status == WorkerMcpRefreshStatus::Queued
+                    if let Ok(Ok(status)) = tokio::time::timeout_at(
+                        deadline,
+                        client.mcp_status(worker_node_id, &request),
+                    )
+                    .await
                     {
-                        let servers = status
-                            .servers
-                            .into_iter()
-                            .filter_map(|server| serde_json::from_value(server).ok())
-                            .collect();
-                        coordinator.confirm(session_id, servers).await;
-                        return;
+                        match status.status {
+                            WorkerMcpRefreshStatus::Queued => {
+                                let servers = status
+                                    .servers
+                                    .into_iter()
+                                    .filter_map(|server| serde_json::from_value(server).ok())
+                                    .collect();
+                                if let Some(expected_generation) = pending_mcp_generation {
+                                    coordinator
+                                        .confirm(session_id, expected_generation, servers)
+                                        .await;
+                                } else {
+                                    coordinator
+                                        .observe_inventory(
+                                            session_id,
+                                            execution_started_at,
+                                            configured_server_ids,
+                                            servers,
+                                        )
+                                        .await;
+                                }
+                                return;
+                            }
+                            WorkerMcpRefreshStatus::Unsupported => {
+                                if inventory_expected {
+                                    if tokio::time::Instant::now() < deadline {
+                                        tokio::time::sleep_until(std::cmp::min(
+                                            deadline,
+                                            tokio::time::Instant::now() + Duration::from_secs(1),
+                                        ))
+                                        .await;
+                                    }
+                                    continue;
+                                }
+                                if let Some(expected_generation) = pending_mcp_generation {
+                                    coordinator
+                                        .fail(
+                                            session_id,
+                                            expected_generation,
+                                            McpRefreshErrorCategory::Unsupported,
+                                        )
+                                        .await;
+                                }
+                                return;
+                            }
+                            WorkerMcpRefreshStatus::MaterializationFailed
+                            | WorkerMcpRefreshStatus::ReloadFailed => {
+                                let category = if status.status
+                                    == WorkerMcpRefreshStatus::MaterializationFailed
+                                {
+                                    McpRefreshErrorCategory::MaterializationFailed
+                                } else {
+                                    McpRefreshErrorCategory::ReloadFailed
+                                };
+                                if let Some(expected_generation) = pending_mcp_generation {
+                                    coordinator
+                                        .fail(session_id, expected_generation, category)
+                                        .await;
+                                } else {
+                                    coordinator
+                                        .observe_failure(
+                                            session_id,
+                                            execution_started_at,
+                                            configured_server_ids,
+                                            category,
+                                        )
+                                        .await;
+                                }
+                                return;
+                            }
+                            WorkerMcpRefreshStatus::Busy => {}
+                        }
                     }
-                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    if tokio::time::Instant::now() < deadline {
+                        tokio::time::sleep_until(std::cmp::min(
+                            deadline,
+                            tokio::time::Instant::now() + Duration::from_secs(1),
+                        ))
+                        .await;
+                    }
                 }
-                coordinator
-                    .fail(session_id, McpRefreshErrorCategory::Timeout)
-                    .await;
+                if let Some(expected_generation) = pending_mcp_generation {
+                    coordinator
+                        .fail(
+                            session_id,
+                            expected_generation,
+                            McpRefreshErrorCategory::Timeout,
+                        )
+                        .await;
+                } else {
+                    coordinator
+                        .observe_failure(
+                            session_id,
+                            execution_started_at,
+                            configured_server_ids,
+                            McpRefreshErrorCategory::Timeout,
+                        )
+                        .await;
+                }
             });
         }
-        self.track_worker_msgs_in_store(execution_process, worker_node_id)
+        self.track_worker_msgs_in_store(execution_process, worker_node_id, None)
             .await?;
         Ok(())
     }
@@ -3794,12 +5371,17 @@ impl ContainerService for LocalContainerService {
         // execution (initial, setup, follow-up) flows through — so all agent
         // processes in the workspace receive them. Applied BEFORE the VK_* context
         // below so an org var can never clobber the internal workspace contract.
-        // Best-effort: on any failure we log and start without them rather than
-        // block the workspace.
-        let org_env_vars = self.resolve_org_env_vars(workspace).await;
+        // Fetching settings remains best-effort. Once a value explicitly names a
+        // secret reference, resolution must succeed before any process starts.
+        let org_env_vars = self.resolve_org_env_vars(workspace).await?;
         if !org_env_vars.is_empty() {
             env.merge(&org_env_vars);
         }
+        let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+        env.merge(&workspace_go_environment(
+            &current_dir,
+            Some(&inherited_path),
+        ));
 
         // Always inject workspace/session context (wins over any org var above).
         env.insert("VK_WORKSPACE_ID", workspace.id.to_string());
@@ -3810,13 +5392,25 @@ impl ContainerService for LocalContainerService {
         // same tool always wins over an app-installed one. PATH is a reserved
         // env name (org vars can't set it), but base the merge on any PATH
         // already in the env so this stays correct if that ever changes.
+        // VK_AGENT_PATH carries the same value so a login shell (Codex runs
+        // `bash -lc`) can restore it after the host profile replaces PATH;
+        // the VK_ prefix is reserved, so org vars cannot spoof it either.
         let inherited = env
             .get("PATH")
             .map(std::ffi::OsString::from)
             .unwrap_or_else(|| std::env::var_os("PATH").unwrap_or_default());
-        if let Some(merged) = utils::shell::append_cli_tools_to_path(&inherited) {
-            env.insert("PATH", merged.to_string_lossy().into_owned());
-        }
+        env.insert(
+            "PATH",
+            utils::shell::agent_path(&inherited)
+                .to_string_lossy()
+                .into_owned(),
+        );
+        // Route `gh` and GitHub HTTPS Git to per-owner tokens (no-op when none
+        // are configured). Prepends a host-local shim, so it runs after the
+        // CLI tools step above.
+        utils::github_auth::apply_github_routing(&mut env.vars);
+        // Last PATH edit done: record it for login shells to restore.
+        utils::shell::sync_agent_path(&mut env.vars);
 
         // Persistent processes (dev servers, background helpers) write their
         // output straight to a raw log file (instead of pipes) so they can
@@ -3919,15 +5513,16 @@ impl ContainerService for LocalContainerService {
                 if matches!(
                     execution_process.run_reason,
                     ExecutionProcessRunReason::CodingAgent
-                ) && self
+                ) && let Some(state) = self
                     .mcp_refresh_coordinator
                     .status(execution_process.session_id)
                     .await
-                    .is_some_and(|state| state.status == McpRefreshStatus::PendingNextTurn)
+                    .filter(|state| state.status == McpRefreshStatus::PendingNextTurn)
                 {
                     self.mcp_refresh_coordinator
                         .fail(
                             execution_process.session_id,
+                            state.generation,
                             McpRefreshErrorCategory::ProcessLaunchFailed,
                         )
                         .await;
@@ -3945,24 +5540,41 @@ impl ContainerService for LocalContainerService {
         let keep_warm = spawned.keep_warm && self.warm_agents_enabled();
         let warm_reuse = spawned.warm_reuse.take();
         if let Some(signal) = spawned.mcp_refresh.take() {
+            let configured_server_ids = if let Some(profile) =
+                ExecutionProcess::latest_executor_profile_for_session(
+                    &self.db.pool,
+                    execution_process.session_id,
+                )
+                .await?
+                && let Some(agent) = ExecutorConfigs::get_cached().get_coding_agent(&profile)
+            {
+                read_coding_agent_mcp_servers(&agent)
+                    .await
+                    .map(|servers| servers.keys().cloned().collect())
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
             self.register_mcp_refresh_control(
                 execution_process.session_id,
                 execution_process.id,
                 execution_process.started_at,
+                configured_server_ids,
                 signal,
             );
         } else if matches!(
             execution_process.run_reason,
             ExecutionProcessRunReason::CodingAgent
-        ) && self
+        ) && let Some(state) = self
             .mcp_refresh_coordinator
             .status(execution_process.session_id)
             .await
-            .is_some_and(|state| state.status == McpRefreshStatus::PendingNextTurn)
+            .filter(|state| state.status == McpRefreshStatus::PendingNextTurn)
         {
             self.mcp_refresh_coordinator
                 .fail(
                     execution_process.session_id,
+                    state.generation,
                     McpRefreshErrorCategory::Unsupported,
                 )
                 .await;
@@ -3982,7 +5594,7 @@ impl ContainerService for LocalContainerService {
         }
 
         if let Some(path) = dev_server_raw_log {
-            self.track_raw_file_msgs_in_store(execution_process.id, path)
+            self.track_raw_file_msgs_in_store(execution_process.id, path, false)
                 .await;
         } else {
             self.track_child_msgs_in_store(execution_process.id, &mut spawned.child)
@@ -4105,9 +5717,7 @@ impl ContainerService for LocalContainerService {
                     mark_remote_execution_indeterminate(&self.db, execution_process.id).await?;
                 }
             }
-            if let Some(store) = self.msg_stores.write().await.remove(&execution_process.id) {
-                store.push_finished();
-            }
+            self.finish_msg_store(&execution_process.id).await;
             return Ok(());
         }
 
@@ -4175,9 +5785,7 @@ impl ContainerService for LocalContainerService {
         // Mark the process finished in the MsgStore and wait for DB persistence
         self.finish_raw_log_tailer(&execution_process.id).await;
         let db_stream_handle = self.take_db_stream_handle(&execution_process.id).await;
-        if let Some(msg) = self.msg_stores.write().await.remove(&execution_process.id) {
-            msg.push_finished();
-        }
+        self.finish_msg_store(&execution_process.id).await;
         if let Some(handle) = db_stream_handle {
             let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
         }
@@ -4372,6 +5980,56 @@ impl ContainerService for LocalContainerService {
         .map_err(|e| ContainerError::Other(anyhow!("Copy files task failed: {e}")))?
     }
 
+    async fn register_raw_log_writer(&self, execution_id: Uuid, writer: JoinHandle<()>) {
+        // Keep only writers of worker-tracked executions (their tracker has
+        // already registered a pushed sequence); a local writer is detached,
+        // as before.
+        if self
+            .worker_pushed_sequences
+            .read()
+            .await
+            .contains_key(&execution_id)
+        {
+            self.worker_log_writers
+                .write()
+                .await
+                .insert(execution_id, writer);
+        }
+    }
+
+    async fn reattach_worker_executions(&self) {
+        if self.worker_client.is_none() {
+            return;
+        }
+        let running = match ExecutionProcess::find_running(&self.db.pool).await {
+            Ok(running) => running,
+            Err(error) => {
+                tracing::error!(%error, "Failed to list running executions for worker re-attachment");
+                return;
+            }
+        };
+        let mut reattached = 0_usize;
+        for process in running {
+            match self.reattach_worker_execution(&process).await {
+                Ok(true) => reattached += 1,
+                Ok(false) => {}
+                // One unrecoverable row must not stop the others; it stays
+                // Running (never inferred terminal) and is named in the log.
+                Err(error) => tracing::warn!(
+                    execution_id = %process.id,
+                    %error,
+                    "Failed to re-attach worker-owned execution after restart"
+                ),
+            }
+        }
+        if reattached > 0 {
+            tracing::info!(
+                reattached,
+                "Re-attached worker-owned executions that ran across the restart"
+            );
+        }
+    }
+
     async fn try_adopt_execution(&self, process: &ExecutionProcess) -> bool {
         #[cfg(not(unix))]
         {
@@ -4403,7 +6061,7 @@ impl ContainerService for LocalContainerService {
                 .write()
                 .await
                 .insert(process.id, pgid as i32);
-            self.track_raw_file_msgs_in_store(process.id, raw_log_path)
+            self.track_raw_file_msgs_in_store(process.id, raw_log_path, true)
                 .await;
             let watcher = self.spawn_adopted_exit_watcher(process.id, pgid as i32);
             self.add_exit_monitor_handle(process.id, watcher).await;
@@ -4433,7 +6091,56 @@ impl ContainerService for LocalContainerService {
             running_processes.len()
         );
 
+        let mut handed_off = Vec::new();
         for process in running_processes {
+            // A worker-owned execution keeps running on its worker across this
+            // restart. Cancelling it here would undo the whole point of
+            // delegating it, and committing WIP would race the agent still
+            // writing that worktree. Stop only this process's tracker; the row
+            // stays Running and boot re-attaches from the acknowledged cursor.
+            match ExecutionWorkerJob::find_by_execution_id(&self.db.pool, process.id).await {
+                Ok(job) if should_hand_off_worker_job(job.as_ref()) => {
+                    if let Some(handle) = self.take_exit_monitor_handle(&process.id).await {
+                        handle.abort();
+                        // `abort` only requests cancellation; wait until the
+                        // tracker has actually stopped, so it cannot push output
+                        // or advance the pushed cursor after the store ends.
+                        let _ = handle.await;
+                    }
+                    // End the store so its raw-log writer drains everything
+                    // already pushed and exits; only then is the pushed cursor
+                    // an honest statement of what is on disk (below).
+                    if let Some(store) = self.msg_stores.write().await.remove(&process.id) {
+                        store.push_finished();
+                    }
+                    let pushed = self
+                        .worker_pushed_sequences
+                        .write()
+                        .await
+                        .remove(&process.id)
+                        .map(|pushed| pushed.load(std::sync::atomic::Ordering::Acquire) as i64);
+                    let writer = self.worker_log_writers.write().await.remove(&process.id);
+                    handed_off.push((process.id, pushed, writer));
+                    tracing::info!(
+                        execution_id = %process.id,
+                        run_reason = ?process.run_reason,
+                        "Leaving worker-owned execution running across coordinator restart"
+                    );
+                    continue;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    // Without the worker record we cannot prove the work is
+                    // remote; fall through to the local shutdown rules, which
+                    // for a worker row still route through stop_execution.
+                    tracing::error!(
+                        execution_id = %process.id,
+                        %error,
+                        "Failed to look up worker ownership during shutdown"
+                    );
+                }
+            }
+
             // On unix, persistent processes (dev servers, background helpers)
             // are detached (their output goes to a raw log file) and are left
             // running across the restart; the next boot re-adopts them via
@@ -4480,6 +6187,49 @@ impl ContainerService for LocalContainerService {
                     process.session_id,
                     error
                 );
+            }
+        }
+
+        if !handed_off.is_empty() {
+            tracing::info!(
+                handed_off = handed_off.len(),
+                "Handed worker-owned executions off; flushing their output before exit"
+            );
+            let deadline = tokio::time::Instant::now() + WORKER_HANDOFF_FLUSH_TIMEOUT;
+            for (execution_id, pushed, writer) in handed_off {
+                // The acknowledged cursor lags pushes by up to one batch, and
+                // re-attachment resumes after the persisted cursor. Advance it
+                // to the pushed sequence only once the writer has provably
+                // written those lines; otherwise they would be skipped for
+                // good. A writer that cannot flush in time leaves the cursor
+                // where it was (lines may then repeat, never vanish).
+                let flushed = match writer {
+                    Some(writer) => tokio::time::timeout_at(deadline, writer).await.is_ok(),
+                    // A persistent run writes its own raw log; nothing to wait for.
+                    None => true,
+                };
+                let Some(pushed) = pushed else { continue };
+                if !flushed {
+                    tracing::warn!(
+                        %execution_id,
+                        "Raw-log writer did not flush before shutdown; keeping the acknowledged cursor"
+                    );
+                    continue;
+                }
+                if let Err(error) = ExecutionWorkerJob::acknowledge_sequence(
+                    &self.db.pool,
+                    execution_id,
+                    pushed,
+                    pushed,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        %execution_id,
+                        %error,
+                        "Failed to persist flushed worker cursor at handoff; output may repeat after restart"
+                    );
+                }
             }
         }
 
@@ -4646,7 +6396,13 @@ mod mcp_snapshot_tests {
     use executors::executors::BaseCodingAgent;
     use serde_json::json;
 
-    use super::validated_mcp_snapshot;
+    use super::{supports_live_mcp_refresh, validated_mcp_snapshot};
+
+    #[test]
+    fn claude_code_live_mcp_refresh_is_explicitly_unsupported() {
+        assert!(!supports_live_mcp_refresh(BaseCodingAgent::ClaudeCode));
+        assert!(supports_live_mcp_refresh(BaseCodingAgent::Codex));
+    }
 
     #[test]
     fn snapshot_builder_preserves_non_codex_executor_identity_and_definition() {
@@ -4692,7 +6448,64 @@ mod worker_event_tests {
     use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
     use utils::{log_msg::LogMsg, msg_store::MsgStore};
 
-    use super::push_worker_bytes;
+    use super::{WorkerStructuredEvent, classify_worker_structured, push_worker_bytes};
+
+    fn diagnostic(json: &str) -> String {
+        match classify_worker_structured(json) {
+            WorkerStructuredEvent::Diagnostic(text) => text,
+            _ => panic!("expected a diagnostic for {json}"),
+        }
+    }
+
+    #[test]
+    fn structured_log_messages_pass_through_unchanged() {
+        let json = serde_json::to_string(&LogMsg::Stderr("boom".into())).unwrap();
+        assert!(matches!(
+            classify_worker_structured(&json),
+            WorkerStructuredEvent::Log(LogMsg::Stderr(message)) if message == "boom"
+        ));
+    }
+
+    #[test]
+    fn cancellation_phases_never_become_agent_output() {
+        for phase in [
+            "requested",
+            "terminating_process_group",
+            "killing_process_group",
+        ] {
+            let json = serde_json::json!({ "cancellation_phase": phase }).to_string();
+            assert!(matches!(
+                classify_worker_structured(&json),
+                WorkerStructuredEvent::CancellationPhase(value) if value == phase
+            ));
+        }
+    }
+
+    #[test]
+    fn worker_failures_become_readable_diagnostics() {
+        assert_eq!(
+            diagnostic(r#"{"worker_error":"spawn failed: No such file"}"#),
+            "Worker error: spawn failed: No such file"
+        );
+        assert_eq!(
+            diagnostic(r#"{"stream_error":"Broken pipe"}"#),
+            "Worker output stream error: Broken pipe"
+        );
+    }
+
+    #[test]
+    fn unrecognized_worker_metadata_is_kept_as_a_diagnostic() {
+        for json in [
+            r#"{"something_new":1}"#,
+            "not json",
+            r#"{"worker_error":7}"#,
+        ] {
+            assert_eq!(
+                diagnostic(json),
+                format!("Unrecognized worker event: {json}")
+            );
+        }
+    }
 
     #[test]
     fn worker_output_is_forwarded_to_msg_store_in_received_order() {
@@ -4786,7 +6599,7 @@ mod warm_tests {
         WARM_IDLE_TIMEOUT, WarmAppServer, WarmRegistry, WarmReuseHandle, is_reserved_env_name,
         parse_keep_warm, reap_all_warm_entries, reap_warm_entry, reap_warm_entry_if_unchanged,
         register_warm_entry, should_keep_warm, sweep_idle_warm_entries, take_live_warm_entry,
-        warm_entry_is_idle,
+        warm_entry_is_idle, workspace_go_environment,
     };
 
     #[test]
@@ -4794,16 +6607,54 @@ mod warm_tests {
         for name in [
             "VK_WORKSPACE_ID",
             "VK_WORKSPACE_BRANCH",
+            "GOBIN",
+            "GOCACHE",
+            "GOENV",
+            "GOMODCACHE",
+            "GOPATH",
+            "GOTOOLCHAIN",
             "PATH",
             "HOME",
             "LD_PRELOAD",
             "LD_LIBRARY_PATH",
             "OPENCODE_SERVER_PASSWORD",
+            // GitHub owner routing: an org Env Var must not spoof a token or
+            // the owner manifest the shim trusts.
+            utils::github_auth::OWNERS_ENV,
+            &utils::github_auth::token_env_name("some-org"),
         ] {
             assert!(is_reserved_env_name(name), "{name} must stay reserved");
         }
         assert!(!is_reserved_env_name("GITHUB_TOKEN"));
         assert!(!is_reserved_env_name("AZURE_CLIENT_ID"));
+    }
+
+    #[test]
+    fn go_environment_is_stable_and_workspace_scoped() {
+        let inherited = std::ffi::OsStr::new("/host/bin:/usr/bin");
+        let first =
+            workspace_go_environment(std::path::Path::new("/workspaces/first"), Some(inherited));
+        let first_again =
+            workspace_go_environment(std::path::Path::new("/workspaces/first"), Some(inherited));
+        let second =
+            workspace_go_environment(std::path::Path::new("/workspaces/second"), Some(inherited));
+
+        assert_eq!(first, first_again);
+        assert_eq!(first["GOTOOLCHAIN"], "auto");
+        for name in ["GOBIN", "GOCACHE", "GOENV", "GOMODCACHE", "GOPATH"] {
+            assert!(first[name].starts_with("/workspaces/first/.vibe-kanban/go/"));
+            assert!(second[name].starts_with("/workspaces/second/.vibe-kanban/go/"));
+            assert_ne!(first[name], second[name]);
+        }
+        assert_eq!(
+            std::env::split_paths(std::ffi::OsStr::new(&first["PATH"]))
+                .next()
+                .unwrap(),
+            std::path::PathBuf::from(&first["GOBIN"])
+        );
+
+        let dispatched = workspace_go_environment(std::path::Path::new("/workspaces/first"), None);
+        assert!(!dispatched.contains_key("PATH"));
     }
 
     // The exit-monitor keeps a persistent app-server warm only on a clean turn

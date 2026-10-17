@@ -57,6 +57,208 @@ survives server restarts like a dev server, and is stopped on workspace archive.
 Agents should use these instead of `setsid`/`nohup` tricks, which leak untracked
 orphans.
 
+Both modes also include the poller tools (`spawn_poller`, `list_pollers`,
+`stop_poller`, `src/task_server/tools/pollers.rs`). A poller *is* a background
+helper — the backend compiles the agent's command and interval into a loop
+script and starts it as the same tracked `BackgroundHelper` execution process —
+so it inherits the whole lifetime story above, and the two share one concurrency
+budget rather than getting a cap each. What pollers add is the repeating-interval
+shape agents otherwise reach for their CLI's own monitor/watch tools to get; those
+are terminated when the turn ends, so `spawn_poller` is the sanctioned
+replacement, exactly as the helper tools are for `setsid`/`nohup`. That durability
+sentence lives in the `spawn_poller` tool description on purpose: it is what makes
+an agent pick this over its CLI's mechanism, so keep it there if the wording is
+revised. `interval_secs` is required and never defaulted — a defaulted interval
+is a hot loop — and out-of-range values are refused rather than clamped.
+
+`list_pollers` reads `GET /api/workspaces/{id}/execution/pollers`, which filters
+on `run_reason == BackgroundHelper && poller.is_some()`, so plain helpers stay on
+their own endpoint and the two lists do not overlap. Stopping goes through the
+generic `POST /api/execution-processes/{id}/stop` — there is deliberately no
+poller-specific stop route. Note that `stop_poller` and `stop_background_helper`
+both skip the `resolve_workspace_id` + `scope_allows_workspace` check their
+spawn/list siblings run; that asymmetry is intentional parity between the two
+tools, tracked for a separate decision covering both rather than fixed on one
+side.
+
+## Reading a session before following up
+
+An orchestrator that calls `run_session_prompt` and then only polls
+`get_execution` for `status`/`exit_code` is driving blind — it never sees what
+the agent actually said, so a follow-up nudge can't respond to anything real.
+Two tools close that gap (`src/task_server/tools/sessions.rs`):
+
+- **`get_execution.final_message`** — the last non-empty `AssistantMessage`
+  text for that execution, or `null` if the turn never produced one (e.g. it
+  errored before responding). Populated on every `get_execution` call, so a
+  routine status poll is enough for "what did it just say?".
+- **`list_recent_messages`** — the last N normalized messages (newest last),
+  structured as `{ role, text, created_at, execution_id }` plus the same
+  `final_message`/`status`/`exit_code` `get_execution` returns. Accepts
+  `session_id` (resolves the session's latest `CodingAgent` execution) or
+  `execution_id` directly; `limit` defaults to 20 (max 100); `roles` optionally
+  filters to a comma-separated subset of `user`/`assistant`/`system`/`tool`.
+- **`list_all_messages`** — the same response and target/filter behavior, but
+  returns every message in the selected execution's available settled
+  normalized projection and always reports `has_more: false`. Use it when a
+  decision may be older than the recent reader's 100-message maximum. This is
+  “all normalized messages Vibe Kanban has available,” not an unbounded raw-log
+  replay: an oversized legacy execution without a materialized cache still uses
+  the historical normalizer's newest-2,000-raw-message safety window and
+  includes its explicit earlier-messages-omitted notice.
+
+- **`search_session_messages`** — the whole session, not one turn: every
+  non-dropped `CodingAgent` execution, oldest first, each message tagged with
+  `execution_id` and `turn_index`. Filters: `since`/`until` (RFC 3339,
+  inclusive), `query` (case-insensitive substring matched against the
+  *untruncated* text, with a `match_snippet` per hit), `roles`, and
+  `execution_id`. Paged with `limit` (default 50, max 200), `offset`, and
+  `order` (`asc`/`desc`); the response carries `total_matches` and `has_more`.
+  Served by `GET /api/sessions/{id}/history`
+  (`crates/server/src/routes/sessions/history.rs`). Most normalizers leave
+  entry timestamps unset, so a message's effective time falls back to its
+  turn's `started_at` (`created_at` stays null, `turn_started_at` is
+  explicit): time filtering is effectively per turn. Turns outside the window
+  are pruned from execution metadata before any log is read; the rest load
+  sequentially (cold legacy turns share the historical-normalization permit)
+  under a 20 s budget. A budget miss returns `complete: false` plus
+  `unscanned_execution_ids` instead of a silently partial answer; a turn
+  whose log cannot be read is listed in `unreadable_execution_ids` (also
+  `complete: false`) rather than counted as an empty, searched turn.
+
+All of these are read-only projections of the same normalized-logs pipeline the UI's
+conversation view and `.../normalized-logs/ws` already use
+(`ContainerService::normalized_entries`,
+`crates/services/src/services/container.rs`) — served via
+`GET /api/execution-processes/{id}/messages`,
+`GET /api/sessions/{id}/messages` and `GET /api/sessions/{id}/history`
+(`crates/server/src/routes/execution_processes.rs`,
+`crates/server/src/routes/sessions/`). None of them opens a websocket or
+adds a second store: for a finished process this reads the on-disk normalized
+log cache; for a running one it reads the in-memory `MsgStore`. Tool-result and
+message text is truncated (4000 chars) before it leaves the backend, so a
+large diff or command dump in the conversation can't blow up the response —
+use the logs websocket in the UI for the full untruncated transcript.
+
+Use `list_recent_messages` (or `get_execution.final_message`) before every
+follow-up `run_session_prompt`; use `list_all_messages` when the recent window
+does not contain enough context, and `search_session_messages` for earlier
+turns or to find something by time or keyword. A nudge that ignores the agent's messages is
+the same blind retry regardless of how it's phrased.
+
+## Recovering a wedged MCP session
+
+Two scoped tools restart executor state without replacing durable user state:
+
+- `restart_session(session_id?, workspace_id?)` queues a fresh coding-agent
+  process through the ordinary continuation handoff. In orchestrator mode both
+  IDs default to the current context. A session may call the tool on itself: the
+  backend commits the restart reservation before the current turn exits, then
+  the exit monitor starts the continuation with the existing transcript.
+- `restart_workspace(workspace_id?, session_id?)` is heavier. The backend stops
+  every workspace-owned process, cold-starts the selected coding-agent session,
+  and replays persistent dev-server/background-helper actions that have durable
+  launch definitions. Worktree files, Git state, sessions, and conversations
+  are not recreated or reset.
+
+Both return a structured recovery generation and per-server registry state.
+`connecting` is bounded: executor startup inventory must resolve within 30
+seconds or VK publishes a named terminal failure. A successful connection with
+zero registered tools is represented separately from a ready tool inventory.
+
+Codex supports `refresh_mcp_tools` through its app-server reload/status protocol.
+Claude Code does **not** support in-place refresh and returns `unsupported` with
+`restart_session` as remediation. A fresh Claude process does report its
+registered tool names in `system/init.tools`; VK captures that executor-owned
+inventory so configured-but-absent servers end in `not_registered` instead of
+“still connecting” indefinitely.
+
+### The recovery ladder (in the server instructions)
+
+`RECOVERY_LADDER` (`src/task_server/handler.rs`) is appended to the
+instructions in every mode. Before an agent abandons a VK tool for an
+out-of-band fallback, it must:
+
+1. retry the call;
+2. call `refresh_mcp_tools` (an `unsupported` result counts as done);
+3. call `restart_workspace`;
+4. only then fall back, and say so in the final report, naming the rung
+   reached.
+
+It also says that a harness "failed to connect" notice for a *differently
+named* entry is not evidence that this server is down. That is exactly how
+`vk/91d8` ended up on `gh`. Keep the rungs pointing at tools that both
+routers register. `recovery_ladder_is_given_in_order_in_every_mode` pins
+this.
+
+### Shadowed project `.mcp.json` entries
+
+A repository `.mcp.json` can define its own entry for a URL VK already
+provides through a deployment runtime route (`VIBE_MCP_RUNTIME_ROUTES`,
+public URL → loopback Caddy that adds the Cloudflare Access token).
+homelab's `vibe-kanban → https://vibe.vasandani.dev/mcp` is one. In a
+sandbox its `${VIBE_KANBAN_*}` header variables are unset, so Cloudflare
+answers `302 text/html`. Claude Code then reports
+`CLIENT_HTTP_UNEXPECTED_CONTENT`, while the managed `vibe_kanban` entry
+works fine. If the project entry uses the *same* name, it replaces the
+managed entry and the session gets zero VK tools.
+
+`ClaudeCode::spawn_internal` therefore appends
+`--settings {"disabledMcpjsonServers":[…]}` for project entries that meet
+two conditions:
+
+- the entry's `url`/`httpUrl` is either side of a runtime route;
+- the launched agent's own `$HOME/.claude.json` (the execution's scoped
+  home) already has a user-scope entry on the **same** route.
+
+Without that replacement the project entry may be the session's only
+connection, and it is kept. Claude Code reads `.mcp.json` from the launch
+directory and every ancestor, so all of them are scanned, which covers a
+nested `default_working_dir`. A profile that already passes `--settings` is
+left alone, with a warning. The repository file itself is never edited. See
+`shadowed_project_mcp_servers` and `routed_mcp_server_keys` in
+`crates/executors/src/mcp_config.rs`.
+
+## Pull request tools
+
+`create_pr`, `get_pr`, `list_pr_checks`, `merge_pr` and `update_pr`
+(`src/task_server/tools/pull_requests.rs`) are registered in both modes.
+They are workspace-scoped and pass `scope_allows_workspace`. `repo_id`
+defaults to the workspace's only repo. `create_pr` reuses the Create PR
+route. The others call `/api/workspaces/{id}/pull-requests/{status,checks,merge,update}`
+(`crates/server/src/routes/workspaces/pr.rs`), backed by the default-unsupported
+`GitHostProvider` PR methods, which only GitHub implements
+(`crates/git-host`). Things to know before changing them:
+
+- **Check coverage is explicit.** Check runs, commit statuses and Actions
+  jobs are read independently. Actions jobs stand in *only* when check runs
+  are unreadable. `complete` is true only when check runs and statuses were
+  both read in full, and a source that reports more entries than were
+  fetched is marked `truncated`. Fine-grained PATs commonly get 403 on check
+  runs and statuses but can read Actions. Never request GraphQL
+  `statusCheckRollup`: without the Checks permission the whole query fails.
+- **The merge gate needs two witnesses.** `merge_gate` wants VK's own
+  reading of the checks to be passing or none, *and* GitHub's
+  `mergeable_state` to be `clean` or `has_hooks`. That way a partially
+  readable check list is never enough by itself. `force` skips only this
+  gate. Drafts, conflicts (`dirty`) and non-open PRs are always refused.
+- **The merge is SHA-guarded.** `PUT pulls/{n}/merge` sends the evaluated
+  `head_sha`, so a push that lands in between gets a 409 rather than an
+  unchecked merge. Branch deletion is a remote `DELETE git/refs/heads/…`.
+  Never use `gh pr merge --delete-branch`, which switches branches in the
+  cwd.
+- **Credentials.** Every `gh` call runs with `cwd = repo.path`, and `gh pr`
+  subcommands pass `--repo`. The deployment's owner-routed `gh` wrapper
+  (homelab `vibe-kanban-rebuild.nix`) routes `gh api` by the
+  `repos/<owner>/<repo>/…` endpoint, since `gh api` has no `--repo`, so a PR
+  on another remote's owner uses that owner's token. A PR URL that none of
+  the checkout's remotes own is refused.
+- **Errors reach the agent.** Every route error uses
+  `error_with_data_and_message`. The MCP envelope decoder
+  (`decode_envelope`) also reports status, content type and a ≤ 500-char
+  body excerpt for non-2xx or non-JSON responses, and uses `error_data` when
+  a route sent no message.
+
 ## Backend resolution (important)
 
 `resolve_base_url` (`src/bin/vibe_kanban_mcp.rs:100-134`) decides which backend the
@@ -233,30 +435,55 @@ Arguments after `--mcp` are passed through to the `vibe-kanban-mcp` binary
 (e.g. `--mode orchestrator`). Add an `env` block with `VIBE_BACKEND_URL` to pin the
 backend as described above.
 
-## Remote access (claude.ai) — proposed, not implemented
+## Remote OAuth access (ChatGPT and other OAuth-only MCP clients)
 
-The stdio server is **local-only**: it cannot be reached over a public URL, so
-claude.ai (web) cannot connect to it as-is. claude.ai's remote-MCP support requires
-**Streamable HTTP** transport plus **OAuth 2.1 with dynamic client registration
-(RFC 7591) and PKCE** — neither of which this crate currently provides
-(`rmcp` is built here with `["server", "transport-io"]` only).
+Some remote MCP clients can only authenticate with OAuth: ChatGPT custom
+connectors, claude.ai and similar. They cannot hold the deployment's static
+bearer or Cloudflare Access service-token headers. For them, the VK
+**server** (not this crate) embeds a small OAuth 2.1 authorization server,
+`crates/server/src/mcp_oauth/`. The MCP transport itself is still the
+deployment's stdio→Streamable-HTTP bridge (supergateway) running this crate
+in `global` mode, so OAuth clients get the full global tool set.
 
-The current design sketch for closing that gap (no code yet):
+- **Opt-in.** `VK_MCP_OAUTH_PUBLIC_URL` (a bare `https` origin, or `http` on
+  loopback) names the issuer. Unset, every route below answers `404`.
+- **Endpoints.**
+  - Discovery: `/.well-known/oauth-protected-resource[/oauth/mcp]`
+    (RFC 9728) and `/.well-known/oauth-authorization-server` (RFC 8414).
+  - Dynamic registration: `POST /oauth/register` (RFC 7591).
+  - Consent: `GET/POST /oauth/authorize`, a server-rendered page.
+  - Tokens: `POST /oauth/token`.
+  - The reverse proxy's token check: `/api/mcp-oauth/verify`.
+  - Owner management: `GET /api/mcp-oauth/grants` and
+    `DELETE /api/mcp-oauth/grants/{id}`.
+- **Resource.** The protected resource is `<issuer>/oauth/mcp`. The reverse
+  proxy `forward_auth`s it to `/api/mcp-oauth/verify` (`204` or `401` with
+  `WWW-Authenticate: Bearer resource_metadata=…` and a JSON-RPC body), then
+  rewrites it to the bridge's `/mcp`. It is deliberately **not** the
+  existing `/mcp`. That route trusts Access-only headers, and an edge bypass
+  for OAuth clients would make those headers forgeable.
+- **Security properties.**
+  - Authorization codes need PKCE S256 and are single use, valid for 60 s.
+  - Access tokens last 1 h. Refresh tokens last 30 d and rotate on use.
+  - Reusing a rotated refresh token, or replaying a code, revokes the grant.
+  - Every secret is stored only as a SHA-256 hash.
+  - Unknown clients or unregistered redirect URIs get an error page and are
+    never redirected.
+  - The consent form carries a one-time server-side token and is
+    `no-store` and non-framable.
+  - Registration is bounded: at most 200 clients, and clients that never
+    obtain a grant are pruned after 24 h.
+- **Consent is the human gate.** `/oauth/authorize` must sit behind the
+  host's own login (Cloudflare Access SSO in the reference deployment). Only
+  discovery, registration, token and `/oauth/mcp` may skip it at the edge.
+- **Deployment.** For the reference deployment (`vibe.vasandani.dev`; edge
+  bypass restricted to OpenAI's published connector ranges, Caddy route on
+  think2), see homelab `docs/vibe-kanban-mcp-deployment.md`. Admitting
+  another vendor (e.g. claude.ai) needs only an edge allowlist for its
+  egress. VK's code is vendor-neutral.
 
-1. Add `transport-streamable-http-server` to `rmcp` and a second binary that serves
-   the existing `McpServer` over HTTP, retargeting tool calls from the local
-   `/api/*` to the hosted backend's `/v1/*`.
-2. Run it as a sidecar with **no public IP**, reachable only through a Cloudflare
-   Tunnel (`cloudflared`).
-3. Front it with a Cloudflare Worker (`@cloudflare/workers-oauth-provider`) that
-   terminates claude.ai's OAuth + DCR, gated at the edge by a Cloudflare Access
-   Service Token, and forwards a short-lived inner JWT to the origin.
-4. Validate that JWT at the origin into the same `RequestContext` the remote crate
-   already produces (`crates/remote/src/auth/middleware.rs`), so authorisation stays
-   at the existing backend boundary.
-
-The stdio path described above is unaffected by this work and remains the supported
-route for locally-running agents.
+The stdio path described above is unaffected and remains the supported route
+for locally running agents.
 
 ## Testing
 

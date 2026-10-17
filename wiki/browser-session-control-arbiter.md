@@ -157,6 +157,73 @@ just unit tests. The recipe generalizes to any headless VK smoke test:
   broadcast → disconnect auto-release (gen 6, reason `disconnected`) →
   audit rows with no URL/profile → plain close of uncontrolled session.
 
+## Cloudflare Access headers (origin-scoped)
+
+`access_headers.rs` lets managed browsers present a Cloudflare Access service
+token, so agents can open Access-gated apps without an email login. It is
+active only when `VIBE_BROWSER_CF_ACCESS_CLIENT_ID`, `_CLIENT_SECRET` and
+`_DOMAINS` are all set. If there are no domains, nothing is sent (fail closed).
+
+- Use `Fetch.enable` with URL patterns, not `Network.setExtraHTTPHeaders`.
+  The latter adds headers to every request, third parties included.
+- CDP `urlPattern` wildcards span any characters. A pattern like
+  `https://*.example.com/*` misses explicit ports (`:8443`) and trailing-dot
+  hosts, and it also matches `https://evil.net/?.example.com/`. So the driver
+  pauses `https://*example.com*` and decides per request with `applies_to`:
+  https only, no IP hosts, and an exact or label-boundary subdomain match. The
+  test `fetch_patterns_pause_every_in_scope_url` emulates CDP glob matching
+  to prove every in-scope URL form pauses.
+- Every paused request must get `Fetch.continueRequest` or it hangs. The
+  reader answers with `send_no_wait`, the same rule as screencast acks.
+- Header overrides do not carry across redirects. Each hop that matches a
+  pattern pauses again and gets the headers again.
+- Interception covers the attached page target only. Popups and new tabs are
+  not covered.
+- Live check (ignored by default):
+  `VK_BROWSER_LIVE_URL=https://<gated host>/ cargo test -p services --lib live_access_headers -- --ignored`.
+
+## Mobile keyboard and plain-text clipboard (vk/5c0e-vk-browser)
+
+A screencast image has no local editable DOM target. Focusing its wrapper
+cannot summon a software keyboard. Keep a real labeled textarea mounted and
+focus it synchronously during the touch gesture, before awaiting remote input.
+VK focuses it on touch taps inside the rendered frame and exposes Keyboard as
+an explicit alternative; taps on non-editable remote content can therefore
+also open the keyboard. Capture frame coordinates before focus changes the
+mobile viewport. A sentinel behind the local caret lets soft keyboards emit
+Backspace after each committed value has been cleared. Ignore intermediate
+composition events, commit once, and leave printable keys to native input in
+the textarea so keydown and input do not duplicate text.
+
+Clipboard operations use the existing WebSocket action acknowledgement and
+control gate. `copy_selection` evaluates a fixed expression, without enabling
+arbitrary Evaluate, and returns the selected plain text from a focused input,
+textarea, same-origin frame/open shadow root, or document selection. Password
+inputs are excluded. Copy fails above 65,536 UTF-16 code units instead of
+silently truncating; the UI applies the same bound to inserted text. Cross-origin
+frames are not readable through this expression. Paste uses Type / CDP
+`Input.insertText`, which replaces the remote selection but does not synthesize
+a remote paste event.
+
+Preserve the browser's local Ctrl/Cmd+V default and consume `clipboardData` in
+its paste event. A Paste button can call `navigator.clipboard.readText()`.
+Async clipboard permission can be denied, and Copy's remote response can
+outlive Safari's user activation, so offer a manual textarea fallback. Remount
+the bridge on session/connection/control-generation changes; unmount it on
+control loss/disconnection and reject late async results before clipboard or
+remote side effects. Do not persist or log text.
+
+Chromium needs virtual key codes for Select all, deletion and navigation.
+Avoid text payloads on Ctrl/Meta shortcuts, but preserve AltGr/Option-produced
+characters: the client OS already resolved them, so insert that text directly
+rather than treating Ctrl+Alt as a remote shortcut. Keep punctuation out of the
+ASCII virtual-key shortcut mapping (`.` is ASCII 46, the Delete virtual key).
+Use the ignored `live_keyboard_and_selection` Rust test with local Chromium to
+verify actual editing behavior. DOM/touch-event tests prove synchronous focus
+and forwarding, not whether a physical phone displays its OS keyboard.
+
 ## Contributed by
 
 - vk/57e0-add-shared-human
+- vk/5673-cloudflare-acces
+- vk/5c0e-vk-browser (workspace `5c0e77f9-1063-4612-9ac7-922daf57452b`)

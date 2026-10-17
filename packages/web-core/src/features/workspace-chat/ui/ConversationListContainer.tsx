@@ -19,8 +19,10 @@ import { deriveConversationEntries } from '../model/deriveConversationEntries';
 import { deriveConversationTimeline } from '../model/deriveConversationTimeline';
 import { useConversationVirtualizer } from '../model/useConversationVirtualizer';
 import { useScrollCommandExecutor } from '../model/useScrollCommandExecutor';
+import { coalesceConversationAddType } from '../model/plan-reveal-transition';
 
 import DisplayConversationEntry from './DisplayConversationEntry';
+import { EarlierHistoryControl } from './EarlierHistoryControl';
 import { ApprovalFormProvider } from '@/shared/hooks/ApprovalForm';
 import { useEntriesActions } from '../model/contexts/EntriesContext';
 import {
@@ -73,6 +75,7 @@ function renderRowContent(
   if (isAggregatedGroup(entry)) {
     return (
       <DisplayConversationEntry
+        displayEntry={entry}
         expansionKey={entry.patchKey}
         aggregatedGroup={entry}
         aggregatedDiffGroup={null}
@@ -89,6 +92,7 @@ function renderRowContent(
   if (isAggregatedDiffGroup(entry)) {
     return (
       <DisplayConversationEntry
+        displayEntry={entry}
         expansionKey={entry.patchKey}
         aggregatedGroup={null}
         aggregatedDiffGroup={entry}
@@ -105,6 +109,7 @@ function renderRowContent(
   if (isAggregatedThinkingGroup(entry)) {
     return (
       <DisplayConversationEntry
+        displayEntry={entry}
         expansionKey={entry.patchKey}
         aggregatedGroup={null}
         aggregatedDiffGroup={null}
@@ -128,6 +133,7 @@ function renderRowContent(
   if (entry.type === 'NORMALIZED_ENTRY') {
     return (
       <DisplayConversationEntry
+        displayEntry={entry}
         expansionKey={entry.patchKey}
         entry={entry.content}
         aggregatedGroup={null}
@@ -155,7 +161,9 @@ export const ConversationList = forwardRef<
   const repos = reposProp;
   const resetAction = useResetProcess(attempt.id, attempt.session?.id);
   const conversationScopeKey = `${attempt.id}:${sessionScopeId ?? attempt.session?.id ?? 'new'}`;
-  const [filteredEntries, setFilteredEntries] = useState<DisplayEntry[]>([]);
+  const [conversationRows, setConversationRows] = useState<ConversationRow[]>(
+    []
+  );
   const [dataVersion, setDataVersion] = useState(0);
   const [loading, setLoading] = useState(true);
   const [hasSetupScriptRun, setHasSetupScriptRun] = useState(false);
@@ -251,7 +259,6 @@ export const ConversationList = forwardRef<
     setHasSetupScriptRun(false);
     setHasCleanupScriptRun(false);
     setHasRunningProcess(false);
-    setFilteredEntries([]);
     setDataVersion(0);
     lastSettledTailStartIndexRef.current = null;
     reset();
@@ -344,6 +351,7 @@ export const ConversationList = forwardRef<
     rafIdRef.current = null;
     const pending = pendingUpdateRef.current;
     if (!pending) return;
+    pendingUpdateRef.current = null;
 
     const derivedEntries = deriveConversationEntries({
       source: pending.source,
@@ -364,7 +372,7 @@ export const ConversationList = forwardRef<
     prevEntriesRef.current = derivedTimeline.displayEntries;
     prevRowsRef.current = derivedTimeline.rows;
 
-    setFilteredEntries(derivedTimeline.displayEntries);
+    setConversationRows(derivedTimeline.rows);
     setDataVersion((current) => current + 1);
     setEntries(derivedEntries.entries);
 
@@ -380,9 +388,10 @@ export const ConversationList = forwardRef<
     addType: AddEntryType,
     newLoading: boolean
   ) => {
+    const pendingAddType = pendingUpdateRef.current?.addType;
     pendingUpdateRef.current = {
       source,
-      addType,
+      addType: coalesceConversationAddType(pendingAddType, addType),
       loading: newLoading,
       isInitialLoad: addType === 'initial',
     };
@@ -408,10 +417,6 @@ export const ConversationList = forwardRef<
 
   const prevEntriesRef = useRef<DisplayEntry[]>([]);
   const prevRowsRef = useRef<ConversationRow[]>([]);
-  const conversationRows = useMemo(
-    () => prevRowsRef.current,
-    [filteredEntries]
-  );
 
   const clearHistoryAnchor = useCallback(() => {
     if (historyAnchorFrameRef.current !== null) {
@@ -786,12 +791,7 @@ export const ConversationList = forwardRef<
     };
 
     correctScroll();
-  }, [
-    conversationRows,
-    firstUnvirtualizedRowIndex,
-    conversationVirtualizer,
-    scrollToAbsoluteIndex,
-  ]);
+  }, [conversationRows, conversationVirtualizer]);
 
   useImperativeHandle(
     ref,
@@ -941,52 +941,11 @@ export const ConversationList = forwardRef<
 
           {(hasEarlierHistory || isLoadingEarlier || loadEarlierError) &&
             !showLoader && (
-              <div className="flex flex-col items-center gap-2 px-double py-3">
-                {isLoadingEarlier ? (
-                  <>
-                    <div className="flex w-full max-w-md flex-col gap-1.5">
-                      <div className="flex items-center gap-2">
-                        <div className="h-2.5 w-16 animate-pulse rounded-full bg-foreground/10" />
-                        <div className="h-2.5 flex-1 animate-pulse rounded-full bg-foreground/[0.06]" />
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <div
-                          className="h-2.5 w-24 animate-pulse rounded-full bg-foreground/[0.07]"
-                          style={{ animationDelay: '150ms' }}
-                        />
-                        <div
-                          className="h-2.5 w-32 animate-pulse rounded-full bg-foreground/[0.05]"
-                          style={{ animationDelay: '150ms' }}
-                        />
-                      </div>
-                    </div>
-                    <span className="text-xs text-low">
-                      {t('conversation.loadingEarlierMessages')}
-                    </span>
-                  </>
-                ) : (
-                  <button
-                    type="button"
-                    className="rounded px-base py-half text-xs text-low hover:text-normal focus:outline-none focus:ring-1 focus:ring-brand"
-                    onClick={() => void requestEarlierHistory()}
-                  >
-                    {loadEarlierError
-                      ? t('conversation.retryEarlierMessages', {
-                          defaultValue: 'Retry loading earlier messages',
-                        })
-                      : t('conversation.loadEarlierMessages', {
-                          defaultValue: 'Load earlier messages',
-                        })}
-                  </button>
-                )}
-                {loadEarlierError && !isLoadingEarlier && (
-                  <span className="text-xs text-error" role="status">
-                    {t('conversation.loadEarlierMessagesError', {
-                      defaultValue: 'Earlier messages could not be loaded.',
-                    })}
-                  </span>
-                )}
-              </div>
+              <EarlierHistoryControl
+                isLoading={isLoadingEarlier}
+                error={loadEarlierError}
+                onLoad={() => void requestEarlierHistory()}
+              />
             )}
 
           {showEmptyState && (

@@ -5,6 +5,8 @@ import type {
   NodeMetricsAvailability,
 } from 'shared/types';
 import { Meter } from '@vibe/ui/components/Meter';
+import { WarningIcon } from '@phosphor-icons/react';
+import type { NodeDiskAlert } from './diskAlerts';
 
 import { cn } from '@/shared/lib/utils';
 import {
@@ -12,6 +14,7 @@ import {
   formatPercent,
   formatTimestamp,
   ratioPercent,
+  formatBytes,
 } from './format';
 import { MetricsRow } from './MetricsSection';
 
@@ -19,6 +22,10 @@ export interface NodeStripProps {
   node: MetricsNode;
   selected: boolean;
   onSelect: (nodeId: string) => void;
+  diskAlert?: NodeDiskAlert | null;
+  onResolveDiskAlert?: (nodeId: string) => void;
+  resolvingDiskAlert?: boolean;
+  diskAlertActionDisabledReason?: string | null;
 }
 
 /** True when the node's readings are retained but no longer current. */
@@ -165,7 +172,15 @@ export function HealthBadge({ health }: { health: NodeHealth | null }) {
  * Renders **both** health and availability, and a `null` reading as an em
  * dash rather than a zero.
  */
-export function NodeStrip({ node, selected, onSelect }: NodeStripProps) {
+export function NodeStrip({
+  node,
+  selected,
+  onSelect,
+  diskAlert,
+  onResolveDiskAlert,
+  resolvingDiskAlert,
+  diskAlertActionDisabledReason,
+}: NodeStripProps) {
   const { t } = useTranslation('common');
 
   const stale = isStale(node.availability);
@@ -182,68 +197,109 @@ export function NodeStrip({ node, selected, onSelect }: NodeStripProps) {
       : t('metrics.role.worker', { defaultValue: 'Worker' });
 
   return (
-    <button
-      type="button"
-      data-testid="metrics-node-strip"
-      data-node-id={node.node_id}
-      aria-pressed={selected}
-      onClick={() => onSelect(node.node_id)}
+    <div
+      data-alert-severity={diskAlert?.severity}
       className={cn(
-        'flex flex-col gap-half w-full p-half rounded-sm text-left',
-        'hover:bg-panel focus:outline-none focus:ring-1 focus:ring-brand',
-        selected && 'bg-panel'
+        'flex flex-col rounded-sm border border-transparent',
+        diskAlert?.severity === 'warning' && 'border-brand bg-brand/5',
+        diskAlert?.severity === 'critical' && 'border-error bg-error/5'
       )}
     >
-      <span className="flex items-baseline justify-between gap-half min-w-0">
-        <span className="text-high truncate">{node.hostname}</span>
-        <span className="text-sm text-low shrink-0">{roleLabel}</span>
-      </span>
-      <span className="flex items-center justify-between gap-half min-w-0">
-        <HealthBadge health={node.health} />
-        <AvailabilityBadge availability={node.availability} />
-      </span>
-      {stale && (
-        <span
-          data-testid="metrics-node-stale"
-          className="text-sm text-low truncate"
-        >
-          {t('metrics.staleReadings', {
-            defaultValue: 'Readings captured {{captured}}',
-            captured: formatTimestamp(
-              readings?.captured_at ?? node.last_contact_at
-            ),
-          })}
-        </span>
-      )}
-      <span
-        data-testid="metrics-node-readings"
-        data-stale={stale ? 'true' : undefined}
-        className={cn('flex flex-col gap-half', stale && 'opacity-60')}
+      <button
+        type="button"
+        data-testid="metrics-node-strip"
+        data-node-id={node.node_id}
+        aria-pressed={selected}
+        onClick={() => onSelect(node.node_id)}
+        className={cn(
+          'flex flex-col gap-half w-full p-half rounded-sm text-left',
+          'hover:bg-panel focus:outline-none focus:ring-1 focus:ring-brand',
+          selected && 'bg-panel'
+        )}
       >
-        <Meter
-          label={t('metrics.cpu.title', { defaultValue: 'CPU' })}
-          value={cpuPercent}
-          valueText={formatPercent(cpuPercent)}
-        />
-        <Meter
-          label={t('metrics.memory.title', { defaultValue: 'Memory' })}
-          value={memoryPercent}
-          valueText={formatPercent(memoryPercent)}
-        />
-        {/*
-         * A row rather than a Meter: load average is unbounded, so there is no
-         * honest denominator to fill a 0..100 bar with. Saturation is load
-         * relative to core count, which the CPU panel spells out; here the
-         * three windows are shown raw so a rising or falling trend is visible
-         * without expanding the node.
-         */}
-        <MetricsRow
-          label={t('metrics.cpu.loadShort', { defaultValue: 'Load' })}
-          value={`${formatLoad(readings?.cpu.load_1m)} / ${formatLoad(
-            readings?.cpu.load_5m
-          )} / ${formatLoad(readings?.cpu.load_15m)}`}
-        />
-      </span>
-    </button>
+        <span className="flex items-baseline justify-between gap-half min-w-0">
+          <span className="text-high truncate">{node.hostname}</span>
+          <span className="text-sm text-low shrink-0">{roleLabel}</span>
+        </span>
+        <span className="flex items-center justify-between gap-half min-w-0">
+          <HealthBadge health={node.health} />
+          <AvailabilityBadge availability={node.availability} />
+        </span>
+        {stale && (
+          <span
+            data-testid="metrics-node-stale"
+            className="text-sm text-low truncate"
+          >
+            {t('metrics.staleReadings', {
+              defaultValue: 'Readings captured {{captured}}',
+              captured: formatTimestamp(
+                readings?.captured_at ?? node.last_contact_at
+              ),
+            })}
+          </span>
+        )}
+        <span
+          data-testid="metrics-node-readings"
+          data-stale={stale ? 'true' : undefined}
+          className={cn('flex flex-col gap-half', stale && 'opacity-60')}
+        >
+          <Meter
+            label={t('metrics.cpu.title', { defaultValue: 'CPU' })}
+            value={cpuPercent}
+            valueText={formatPercent(cpuPercent)}
+          />
+          <Meter
+            label={t('metrics.memory.title', { defaultValue: 'Memory' })}
+            value={memoryPercent}
+            valueText={formatPercent(memoryPercent)}
+          />
+          {/*
+           * A row rather than a Meter: load average is unbounded, so there is no
+           * honest denominator to fill a 0..100 bar with. Saturation is load
+           * relative to core count, which the CPU panel spells out; here the
+           * three windows are shown raw so a rising or falling trend is visible
+           * without expanding the node.
+           */}
+          <MetricsRow
+            label={t('metrics.cpu.loadShort', { defaultValue: 'Load' })}
+            value={`${formatLoad(readings?.cpu.load_1m)} / ${formatLoad(
+              readings?.cpu.load_5m
+            )} / ${formatLoad(readings?.cpu.load_15m)}`}
+          />
+        </span>
+      </button>
+      {diskAlert && (
+        <button
+          type="button"
+          data-testid="metrics-disk-alert"
+          disabled={!onResolveDiskAlert || resolvingDiskAlert}
+          title={diskAlertActionDisabledReason ?? undefined}
+          onClick={() => onResolveDiskAlert?.(node.node_id)}
+          className={cn(
+            'flex items-start gap-half mx-half mb-half p-half rounded-sm text-left',
+            'focus:outline-none focus:ring-1 focus:ring-brand disabled:cursor-not-allowed',
+            diskAlert.severity === 'critical'
+              ? 'text-error'
+              : 'text-brand-secondary'
+          )}
+          aria-label={`${diskAlert.severity === 'critical' ? 'Critical disk' : 'Low disk'} on ${node.hostname}. ${diskAlertActionDisabledReason ?? 'Create or open remediation issue'}`}
+        >
+          <WarningIcon weight="fill" className="shrink-0" aria-hidden="true" />
+          <span className="flex flex-col min-w-0 text-sm">
+            <span className="font-medium">
+              {diskAlert.severity === 'critical' ? 'Critical disk' : 'Low disk'}
+            </span>
+            {diskAlert.filesystems.map(({ filesystem, usedPercent }) => (
+              <span key={`${filesystem.mount_point}:${filesystem.device}`}>
+                {filesystem.device} · {formatBytes(filesystem.available_bytes)}{' '}
+                available · {formatPercent(usedPercent)} used ·{' '}
+                {filesystem.mount_point}
+              </span>
+            ))}
+            {resolvingDiskAlert && <span>Resolving issue…</span>}
+          </span>
+        </button>
+      )}
+    </div>
   );
 }

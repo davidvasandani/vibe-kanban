@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use anyhow;
 use axum::{
     Extension, Router,
@@ -15,9 +17,11 @@ use db::models::{
     execution_worker_job::ExecutionWorkerJob,
 };
 use deployment::Deployment;
+use executors::logs::{NormalizedEntry, NormalizedEntryType};
 use futures_util::{StreamExt, TryStreamExt};
-use serde::Deserialize;
-use services::services::container::ContainerService;
+use serde::{Deserialize, Serialize};
+use services::services::container::{ContainerService, LogSnapshot};
+use ts_rs::TS;
 use utils::{log_msg::LogMsg, response::ApiResponse};
 use uuid::Uuid;
 
@@ -29,6 +33,249 @@ use crate::{
         signed_ws::{MaybeSignedWebSocket, SignedWsUpgrade},
     },
 };
+
+/// Default/maximum number of messages a `.../messages` request returns, and
+/// the per-message character cap. Kept small on purpose: this response is
+/// meant for an orchestrator to read in one shot, not to replace the
+/// normalized-logs websocket for full-transcript viewing.
+const DEFAULT_MESSAGE_LIMIT: usize = 20;
+const MAX_MESSAGE_LIMIT: usize = 100;
+const MAX_MESSAGE_CHARS: usize = 4000;
+
+#[derive(Debug, Deserialize)]
+pub struct RecentMessagesQuery {
+    pub limit: Option<usize>,
+    /// Return the complete available normalized projection instead of a
+    /// bounded recent tail. `limit` is ignored when this is true.
+    #[serde(default)]
+    pub all: bool,
+    /// Comma-separated subset of `user`, `assistant`, `system`, `tool`.
+    pub roles: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessagesSelection {
+    Recent(usize),
+    All,
+}
+
+impl RecentMessagesQuery {
+    pub fn selection(&self) -> MessagesSelection {
+        if self.all {
+            MessagesSelection::All
+        } else {
+            MessagesSelection::Recent(clamp_message_limit(self.limit))
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+pub struct SessionMessage {
+    pub id: String,
+    pub role: String,
+    pub text: String,
+    pub created_at: Option<String>,
+    pub execution_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+pub struct RecentMessagesResponse {
+    pub session_id: String,
+    pub execution_id: String,
+    pub status: ExecutionProcessStatus,
+    pub exit_code: Option<i64>,
+    /// Last non-empty assistant text for this execution, or `None` if the
+    /// turn never produced one (e.g. it errored before responding).
+    pub final_message: Option<String>,
+    pub messages: Vec<SessionMessage>,
+    /// True if there were more matching messages than `limit` allowed
+    /// through; `messages` holds the newest `limit` of them.
+    pub has_more: bool,
+}
+
+/// Maps a normalized entry's type to the coarse role an orchestrator asked
+/// to filter by. `None` means the entry isn't a message worth surfacing here
+/// (e.g. a loading spinner or token-usage telemetry frame).
+fn entry_role(entry_type: &NormalizedEntryType) -> Option<&'static str> {
+    match entry_type {
+        NormalizedEntryType::UserMessage
+        | NormalizedEntryType::UserFeedback { .. }
+        | NormalizedEntryType::UserAnsweredQuestions { .. } => Some("user"),
+        NormalizedEntryType::AssistantMessage | NormalizedEntryType::Thinking => Some("assistant"),
+        NormalizedEntryType::ToolUse { .. } => Some("tool"),
+        NormalizedEntryType::SystemMessage
+        | NormalizedEntryType::ErrorMessage { .. }
+        | NormalizedEntryType::NextAction { .. } => Some("system"),
+        NormalizedEntryType::Loading | NormalizedEntryType::TokenUsageInfo(_) => None,
+    }
+}
+
+fn truncate(text: &str) -> String {
+    if text.chars().count() <= MAX_MESSAGE_CHARS {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(MAX_MESSAGE_CHARS).collect();
+    format!("{head}\n… [truncated]")
+}
+
+/// The last non-empty assistant text among `entries`, truncated like any
+/// other message. This is what makes `get_execution.final_message` and
+/// `RecentMessagesResponse.final_message` non-null after a real turn.
+pub fn last_assistant_message(entries: &[NormalizedEntry]) -> Option<String> {
+    entries.iter().rev().find_map(|entry| {
+        if !matches!(entry.entry_type, NormalizedEntryType::AssistantMessage) {
+            return None;
+        }
+        let content = entry.content.trim();
+        (!content.is_empty()).then(|| truncate(content))
+    })
+}
+
+pub fn parse_roles(roles: Option<&str>) -> Option<HashSet<String>> {
+    let roles = roles?;
+    let set: HashSet<String> = roles
+        .split(',')
+        .map(|role| role.trim().to_ascii_lowercase())
+        .filter(|role| !role.is_empty())
+        .collect();
+    (!set.is_empty()).then_some(set)
+}
+
+/// Builds the `.../messages` response for `execution_process`, reusing
+/// `ContainerService::normalized_entries` (itself a `.collect()` over the
+/// same pipeline `stream_normalized_logs` serves to the websocket) rather
+/// than a second store.
+pub async fn build_recent_messages_response(
+    deployment: &DeploymentImpl,
+    execution_process: &ExecutionProcess,
+    selection: MessagesSelection,
+    roles: Option<&HashSet<String>>,
+) -> RecentMessagesResponse {
+    let entries = deployment
+        .container()
+        .normalized_entries(&execution_process.id)
+        .await
+        .unwrap_or_default();
+
+    let final_message = last_assistant_message(&entries);
+
+    let (messages, has_more) = project_messages(&entries, execution_process.id, selection, roles);
+
+    RecentMessagesResponse {
+        session_id: execution_process.session_id.to_string(),
+        execution_id: execution_process.id.to_string(),
+        status: execution_process.status.clone(),
+        exit_code: execution_process.exit_code,
+        final_message,
+        messages,
+        has_more,
+    }
+}
+
+/// Projects one normalized entry into a [`SessionMessage`], alongside its
+/// untruncated (trimmed) text so callers can filter on content the
+/// 4000-char cap would hide. `None` for entries that are not messages, are
+/// empty, or fall outside `roles`.
+pub fn project_entry<'a>(
+    index: usize,
+    entry: &'a NormalizedEntry,
+    execution_id: Uuid,
+    roles: Option<&HashSet<String>>,
+) -> Option<(SessionMessage, &'a str)> {
+    let role = entry_role(&entry.entry_type)?;
+    if roles.is_some_and(|roles| !roles.contains(role)) {
+        return None;
+    }
+    let text = entry.content.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let message = SessionMessage {
+        id: format!("{execution_id}:{index}"),
+        role: role.to_string(),
+        text: truncate(text),
+        created_at: entry.timestamp.clone(),
+        execution_id: execution_id.to_string(),
+    };
+    Some((message, text))
+}
+
+/// Characters of context kept on each side of a keyword hit.
+const SNIPPET_CONTEXT_CHARS: usize = 80;
+
+/// Lowercases per char, keeping one output char per input char so match
+/// positions map straight back onto `text` (multi-char lowercase forms such
+/// as `İ` keep only their first char).
+fn fold_chars(text: &str) -> Vec<char> {
+    text.chars()
+        .map(|c| c.to_lowercase().next().unwrap_or(c))
+        .collect()
+}
+
+/// True when `text` contains `needle` case-insensitively. `needle` must be
+/// non-empty.
+pub fn contains_folded(text: &str, needle: &str) -> bool {
+    find_folded(&fold_chars(text), &fold_chars(needle)).is_some()
+}
+
+fn find_folded(haystack: &[char], needle: &[char]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return None;
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+/// A window of `text` around the first case-insensitive occurrence of
+/// `needle`, with `…` marking clipped sides. `None` if there is no hit.
+pub fn match_snippet(text: &str, needle: &str) -> Option<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let start = find_folded(&fold_chars(text), &fold_chars(needle))?;
+    let end = start + needle.chars().count();
+    let from = start.saturating_sub(SNIPPET_CONTEXT_CHARS);
+    let to = (end + SNIPPET_CONTEXT_CHARS).min(chars.len());
+    let mut snippet = String::new();
+    if from > 0 {
+        snippet.push('…');
+    }
+    snippet.extend(&chars[from..to]);
+    if to < chars.len() {
+        snippet.push('…');
+    }
+    Some(snippet)
+}
+
+fn project_messages(
+    entries: &[NormalizedEntry],
+    execution_id: Uuid,
+    selection: MessagesSelection,
+    roles: Option<&HashSet<String>>,
+) -> (Vec<SessionMessage>, bool) {
+    let mut messages: Vec<SessionMessage> = entries
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| project_entry(index, entry, execution_id, roles))
+        .map(|(message, _)| message)
+        .collect();
+
+    match selection {
+        MessagesSelection::Recent(limit) => {
+            let has_more = messages.len() > limit;
+            if has_more {
+                messages = messages.split_off(messages.len() - limit);
+            }
+            (messages, has_more)
+        }
+        MessagesSelection::All => (messages, false),
+    }
+}
+
+pub fn clamp_message_limit(limit: Option<usize>) -> usize {
+    limit
+        .unwrap_or(DEFAULT_MESSAGE_LIMIT)
+        .clamp(1, MAX_MESSAGE_LIMIT)
+}
 
 #[derive(Debug, Deserialize)]
 struct SessionExecutionProcessQuery {
@@ -45,6 +292,19 @@ async fn get_execution_process_by_id(
     Ok(ResponseJson(ApiResponse::success(execution_process)))
 }
 
+async fn get_execution_process_messages(
+    Extension(execution_process): Extension<ExecutionProcess>,
+    State(deployment): State<DeploymentImpl>,
+    Query(query): Query<RecentMessagesQuery>,
+) -> Result<ResponseJson<ApiResponse<RecentMessagesResponse>>, ApiError> {
+    let selection = query.selection();
+    let roles = parse_roles(query.roles.as_deref());
+    let response =
+        build_recent_messages_response(&deployment, &execution_process, selection, roles.as_ref())
+            .await;
+    Ok(ResponseJson(ApiResponse::success(response)))
+}
+
 async fn get_execution_worker_job(
     State(deployment): State<DeploymentImpl>,
     Extension(execution_process): Extension<ExecutionProcess>,
@@ -52,6 +312,79 @@ async fn get_execution_worker_job(
     let job = ExecutionWorkerJob::find_by_execution_id(&deployment.db().pool, execution_process.id)
         .await?;
     Ok(ResponseJson(ApiResponse::success(job)))
+}
+
+/// An execution's conversation entries in one response: the `entries` array
+/// the matching `…/normalized-logs/ws` or `…/raw-logs/ws` replay converges
+/// to. Completed turns load this over plain HTTP so the chat does not pay a
+/// websocket handshake per turn (see `wiki/awaited-stream-settlement.md`).
+#[derive(Debug, Clone, Serialize, TS)]
+pub struct ExecutionProcessLogSnapshot {
+    #[ts(type = "Array<PatchType>")]
+    pub entries: Vec<serde_json::Value>,
+    /// True only when `entries` is settled. False while the process still has
+    /// a live log store or is running, or when the settled source ended early:
+    /// the caller must not treat those entries as the whole turn.
+    pub complete: bool,
+}
+
+impl From<LogSnapshot> for ExecutionProcessLogSnapshot {
+    fn from(snapshot: LogSnapshot) -> Self {
+        Self {
+            entries: snapshot.entries,
+            complete: snapshot.complete,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LogSnapshotKind {
+    Normalized,
+    Raw,
+}
+
+/// Builds the snapshot on a spawned task and waits for it. Detached on purpose:
+/// a cold historical normalization is cancelled when its stream is dropped, so
+/// a client that gives up on its deadline would otherwise cancel it every time
+/// and the turn would never get its sidecar. The per-execution lease and the
+/// global normalization permit still bound the work.
+async fn log_snapshot(
+    deployment: DeploymentImpl,
+    execution_process: &ExecutionProcess,
+    kind: LogSnapshotKind,
+) -> Result<ExecutionProcessLogSnapshot, ApiError> {
+    let id = execution_process.id;
+    let running = execution_process.status == ExecutionProcessStatus::Running;
+    let task = tokio::spawn(async move {
+        let container = deployment.container();
+        match kind {
+            LogSnapshotKind::Normalized => container.normalized_log_snapshot(&id, running).await,
+            LogSnapshotKind::Raw => container.raw_log_snapshot(&id, running).await,
+        }
+    });
+    let snapshot = task.await.map_err(|e| {
+        ApiError::Io(std::io::Error::other(format!(
+            "log snapshot task failed: {e}"
+        )))
+    })?;
+    Ok(snapshot.into())
+}
+
+async fn get_normalized_logs_snapshot(
+    Extension(execution_process): Extension<ExecutionProcess>,
+    State(deployment): State<DeploymentImpl>,
+) -> Result<ResponseJson<ApiResponse<ExecutionProcessLogSnapshot>>, ApiError> {
+    let snapshot =
+        log_snapshot(deployment, &execution_process, LogSnapshotKind::Normalized).await?;
+    Ok(ResponseJson(ApiResponse::success(snapshot)))
+}
+
+async fn get_raw_logs_snapshot(
+    Extension(execution_process): Extension<ExecutionProcess>,
+    State(deployment): State<DeploymentImpl>,
+) -> Result<ResponseJson<ApiResponse<ExecutionProcessLogSnapshot>>, ApiError> {
+    let snapshot = log_snapshot(deployment, &execution_process, LogSnapshotKind::Raw).await?;
+    Ok(ResponseJson(ApiResponse::success(snapshot)))
 }
 
 async fn stream_raw_logs_ws(
@@ -324,7 +657,10 @@ pub(super) fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
         .route("/stop", post(stop_execution_process))
         .route("/repo-states", get(get_execution_process_repo_states))
         .route("/worker-job", get(get_execution_worker_job))
+        .route("/messages", get(get_execution_process_messages))
+        .route("/raw-logs", get(get_raw_logs_snapshot))
         .route("/raw-logs/ws", get(stream_raw_logs_ws))
+        .route("/normalized-logs", get(get_normalized_logs_snapshot))
         .route("/normalized-logs/ws", get(stream_normalized_logs_ws))
         .layer(from_fn_with_state(
             deployment.clone(),
@@ -350,5 +686,285 @@ mod stream_close_tests {
         let frame = resnapshot_close_frame();
         assert_eq!(frame.code, 1011);
         assert!(frame.reason.contains("requires resnapshot"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use executors::logs::{ActionType, ToolStatus};
+
+    use super::*;
+
+    fn entry(entry_type: NormalizedEntryType, content: &str) -> NormalizedEntry {
+        NormalizedEntry {
+            timestamp: None,
+            entry_type,
+            content: content.to_string(),
+            metadata: None,
+        }
+    }
+
+    #[test]
+    fn last_assistant_message_skips_trailing_non_assistant_entries() {
+        let entries = vec![
+            entry(NormalizedEntryType::AssistantMessage, "first reply"),
+            entry(
+                NormalizedEntryType::ToolUse {
+                    tool_name: "bash".to_string(),
+                    action_type: ActionType::Search {
+                        query: "grep".to_string(),
+                    },
+                    status: ToolStatus::Success,
+                },
+                "ran a command",
+            ),
+        ];
+
+        assert_eq!(
+            last_assistant_message(&entries).as_deref(),
+            Some("first reply")
+        );
+    }
+
+    #[test]
+    fn last_assistant_message_ignores_empty_assistant_text() {
+        let entries = vec![
+            entry(NormalizedEntryType::AssistantMessage, "real answer"),
+            entry(NormalizedEntryType::AssistantMessage, "   "),
+        ];
+
+        assert_eq!(
+            last_assistant_message(&entries).as_deref(),
+            Some("real answer")
+        );
+    }
+
+    #[test]
+    fn last_assistant_message_is_none_without_any_assistant_entry() {
+        let entries = vec![entry(NormalizedEntryType::UserMessage, "do the thing")];
+        assert_eq!(last_assistant_message(&entries), None);
+    }
+
+    #[test]
+    fn last_assistant_message_truncates_huge_text() {
+        let huge = "x".repeat(MAX_MESSAGE_CHARS + 500);
+        let entries = vec![entry(NormalizedEntryType::AssistantMessage, &huge)];
+
+        let message = last_assistant_message(&entries).unwrap();
+        assert!(message.len() < huge.len());
+        assert!(message.ends_with("[truncated]"));
+    }
+
+    #[test]
+    fn entry_role_maps_conversational_types_and_drops_telemetry() {
+        assert_eq!(entry_role(&NormalizedEntryType::UserMessage), Some("user"));
+        assert_eq!(
+            entry_role(&NormalizedEntryType::AssistantMessage),
+            Some("assistant")
+        );
+        assert_eq!(
+            entry_role(&NormalizedEntryType::ToolUse {
+                tool_name: "bash".to_string(),
+                action_type: ActionType::Search {
+                    query: "grep".to_string()
+                },
+                status: ToolStatus::Success,
+            }),
+            Some("tool")
+        );
+        assert_eq!(
+            entry_role(&NormalizedEntryType::SystemMessage),
+            Some("system")
+        );
+        assert_eq!(entry_role(&NormalizedEntryType::Loading), None);
+    }
+
+    #[test]
+    fn parse_roles_lowercases_trims_and_drops_empty() {
+        let roles = parse_roles(Some(" Assistant, tool ,,")).unwrap();
+        assert_eq!(
+            roles,
+            HashSet::from(["assistant".to_string(), "tool".to_string()])
+        );
+    }
+
+    #[test]
+    fn parse_roles_is_none_for_absent_or_blank_input() {
+        assert_eq!(parse_roles(None), None);
+        assert_eq!(parse_roles(Some("  ,  ")), None);
+    }
+
+    #[test]
+    fn clamp_message_limit_defaults_and_caps() {
+        assert_eq!(clamp_message_limit(None), DEFAULT_MESSAGE_LIMIT);
+        assert_eq!(clamp_message_limit(Some(0)), 1);
+        assert_eq!(clamp_message_limit(Some(9999)), MAX_MESSAGE_LIMIT);
+        assert_eq!(clamp_message_limit(Some(5)), 5);
+    }
+
+    #[test]
+    fn query_selects_all_or_a_clamped_recent_tail() {
+        assert_eq!(
+            RecentMessagesQuery {
+                limit: Some(9999),
+                all: false,
+                roles: None,
+            }
+            .selection(),
+            MessagesSelection::Recent(MAX_MESSAGE_LIMIT)
+        );
+        assert_eq!(
+            RecentMessagesQuery {
+                limit: Some(1),
+                all: true,
+                roles: None,
+            }
+            .selection(),
+            MessagesSelection::All
+        );
+    }
+
+    #[test]
+    fn all_selection_returns_more_than_recent_cap_in_order() {
+        let execution_id = Uuid::new_v4();
+        let entries: Vec<_> = (0..125)
+            .map(|index| {
+                entry(
+                    NormalizedEntryType::AssistantMessage,
+                    &format!("message {index}"),
+                )
+            })
+            .collect();
+
+        let (all, all_has_more) =
+            project_messages(&entries, execution_id, MessagesSelection::All, None);
+        let (recent, recent_has_more) = project_messages(
+            &entries,
+            execution_id,
+            MessagesSelection::Recent(MAX_MESSAGE_LIMIT),
+            None,
+        );
+
+        assert_eq!(all.len(), 125);
+        assert_eq!(
+            all.first().map(|message| message.text.as_str()),
+            Some("message 0")
+        );
+        assert_eq!(
+            all.last().map(|message| message.text.as_str()),
+            Some("message 124")
+        );
+        assert!(!all_has_more);
+        assert_eq!(recent.len(), MAX_MESSAGE_LIMIT);
+        assert_eq!(
+            recent.first().map(|message| message.text.as_str()),
+            Some("message 25")
+        );
+        assert_eq!(
+            recent.last().map(|message| message.text.as_str()),
+            Some("message 124")
+        );
+        assert!(recent_has_more);
+    }
+
+    #[test]
+    fn match_snippet_centres_on_the_first_case_insensitive_hit() {
+        let text = format!("{}Needle here{}", "a".repeat(200), "b".repeat(200));
+        let snippet = match_snippet(&text, "nEEDLE").unwrap();
+        assert!(snippet.starts_with('…'));
+        assert!(snippet.ends_with('…'));
+        assert!(snippet.contains("Needle here"));
+        assert_eq!(
+            snippet.chars().count(),
+            2 + "needle".len() + 2 * SNIPPET_CONTEXT_CHARS
+        );
+    }
+
+    #[test]
+    fn match_snippet_is_unclipped_for_short_text_and_none_without_hit() {
+        assert_eq!(
+            match_snippet("Short TEXT", "text").as_deref(),
+            Some("Short TEXT")
+        );
+        assert_eq!(match_snippet("Short", "missing"), None);
+        assert_eq!(match_snippet("Short", ""), None);
+    }
+
+    #[test]
+    fn match_snippet_keeps_multibyte_boundaries() {
+        let text = format!("{}ÄÖÜ İstanbul café{}", "é".repeat(100), "ü".repeat(100));
+        let snippet = match_snippet(&text, "CAFÉ").unwrap();
+        assert!(snippet.contains("café"));
+        assert!(contains_folded(&text, "istanbul"));
+        assert!(!contains_folded(&text, "zzz"));
+    }
+
+    #[test]
+    fn project_entry_returns_untruncated_text_for_filtering() {
+        let execution_id = Uuid::new_v4();
+        let long = format!("{} tail-marker", "x".repeat(MAX_MESSAGE_CHARS + 10));
+        let entry = entry(
+            NormalizedEntryType::ToolUse {
+                tool_name: "bash".to_string(),
+                action_type: executors::logs::ActionType::Other {
+                    description: "run".to_string(),
+                },
+                status: executors::logs::ToolStatus::Success,
+            },
+            &long,
+        );
+
+        let (message, untruncated) = project_entry(3, &entry, execution_id, None).unwrap();
+
+        assert_eq!(message.id, format!("{execution_id}:3"));
+        assert_eq!(message.role, "tool");
+        assert!(message.text.ends_with("… [truncated]"));
+        assert!(untruncated.ends_with("tail-marker"));
+        let roles = HashSet::from(["user".to_string()]);
+        assert!(project_entry(3, &entry, execution_id, Some(&roles)).is_none());
+    }
+
+    #[test]
+    fn all_selection_filters_roles_without_marking_more() {
+        let execution_id = Uuid::new_v4();
+        let entries = vec![
+            entry(NormalizedEntryType::UserMessage, "question"),
+            entry(NormalizedEntryType::AssistantMessage, "answer"),
+            entry(NormalizedEntryType::SystemMessage, "notice"),
+        ];
+        let roles = HashSet::from(["assistant".to_string()]);
+
+        let (messages, has_more) =
+            project_messages(&entries, execution_id, MessagesSelection::All, Some(&roles));
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, "assistant");
+        assert_eq!(messages[0].text, "answer");
+        assert!(!has_more);
+    }
+}
+
+#[cfg(test)]
+mod log_snapshot_wire_tests {
+    use serde_json::json;
+    use services::services::container::LogSnapshot;
+
+    use super::ExecutionProcessLogSnapshot;
+
+    #[test]
+    fn snapshot_serializes_entries_and_completeness_for_the_chat() {
+        let wire: ExecutionProcessLogSnapshot = LogSnapshot {
+            entries: vec![json!({"type": "STDOUT", "content": "hi"})],
+            complete: false,
+        }
+        .into();
+
+        assert_eq!(
+            serde_json::to_value(&wire).unwrap(),
+            json!({
+                "entries": [{"type": "STDOUT", "content": "hi"}],
+                "complete": false
+            })
+        );
     }
 }

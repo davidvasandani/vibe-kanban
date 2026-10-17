@@ -39,12 +39,33 @@ pub struct DiffStats {
     pub lines_removed: usize,
 }
 
+/// Diff stats plus whether every repo contributed to them.
+#[derive(Debug, Clone, Default)]
+pub struct DiffStatsOutcome {
+    pub stats: DiffStats,
+    /// False when any repo's base-commit lookup or diff failed and was skipped,
+    /// so the totals may be partial.
+    pub complete: bool,
+}
+
 /// Computes diff stats for a workspace by comparing against target branches.
 pub async fn compute_diff_stats(
     pool: &SqlitePool,
     git: &GitService,
     workspace: &Workspace,
 ) -> Option<DiffStats> {
+    compute_diff_stats_outcome(pool, git, workspace)
+        .await
+        .map(|outcome| outcome.stats)
+}
+
+/// Like [`compute_diff_stats`], but reports whether any repo was skipped, so
+/// a cache can avoid retaining partial totals from a transient failure.
+pub async fn compute_diff_stats_outcome(
+    pool: &SqlitePool,
+    git: &GitService,
+    workspace: &Workspace,
+) -> Option<DiffStatsOutcome> {
     let container_ref = workspace.container_ref.as_ref()?;
 
     let workspace_repos =
@@ -53,6 +74,7 @@ pub async fn compute_diff_stats(
             .ok()?;
 
     let mut stats = DiffStats::default();
+    let mut complete = true;
 
     for repo_with_branch in workspace_repos {
         let worktree_path = PathBuf::from(container_ref).join(&repo_with_branch.repo.name);
@@ -69,7 +91,10 @@ pub async fn compute_diff_stats(
 
         let base_commit = match base_commit_result {
             Ok(Ok(commit)) => commit,
-            _ => continue,
+            _ => {
+                complete = false;
+                continue;
+            }
         };
 
         let diffs_result = tokio::task::spawn_blocking({
@@ -85,10 +110,12 @@ pub async fn compute_diff_stats(
                 stats.lines_added += diff.additions.unwrap_or(0);
                 stats.lines_removed += diff.deletions.unwrap_or(0);
             }
+        } else {
+            complete = false;
         }
     }
 
-    Some(stats)
+    Some(DiffStatsOutcome { stats, complete })
 }
 
 /// Maximum cumulative diff bytes to stream before omitting content (200MB)

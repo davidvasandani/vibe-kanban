@@ -1,89 +1,37 @@
-# Research: Close Stale Execution Follow-up Gaps
+# Research Notes
 
-## Existing failure shapes
+## Existing URL authority
 
-`ExecutionProcessesProvider.tsx` omits `setupscript` in its inline visible
-predicate even though `useExecutionProcesses.ts` includes it. The provider value
-is what `useWorkspaceExecution` consumes, so the pure helper test is not a test
-of runtime composer truth.
+`devtools_script.js` already reports `location.href`, listens for `hashchange`,
+and detects URL changes on an interval. `usePreviewNavigation` already rejects
+stale per-document sequence numbers and timestamps. The missing behavior is not
+event detection; it is durable synchronization after the event reaches the
+container.
 
-The execution-process stream now subscribes before its snapshot, but sibling
-snapshot streams still query first and ignore `BroadcastStreamRecvError`.
-`MsgStore::history_plus_stream` reads history before subscribing and logs then
-drops lag. Both patterns can create permanently incomplete state.
+## Existing persistence authority
 
-`useJsonPatchWsStream` allocates `dataRef.current = initialData()` before any
-connection. Its failure check tests `!dataRef.current`, so it cannot fire. The
-socket-open handler resets retries even if the connection never reaches Ready,
-allowing repeated lag/resnapshot cycles at the shortest delay.
+`usePreviewSettings` stores preview state in a workspace-scoped scratch payload.
+Its `url` field currently means a user override and therefore cannot safely be
+reused for ordinary navigation: doing so would pin the previous server's origin
+and disable normal auto-detection semantics. A separate optional route field is
+the smallest compatible representation.
 
-Codex emits `turn/completed` through its app-server client, and the local
-container races executor exit signal against child exit before calling
-`ExecutionProcess::update_completion`. Several worker event branches discard
-completion-write errors. A final normalized message is separately extractable
-from the message store, but presently does not arm recovery when terminal
-signaling disappears.
+## Fragment handling
 
-## Decisions
+`transformProxyUrlToDevUrl` and same-port URL submission already preserve hash
+fragments, but initial proxy iframe construction currently uses only pathname and
+query. Adding the fragment to the browser-side iframe URL is required for
+hash-routed selections and does not alter the HTTP request sent to the proxy.
 
-### Subscribe first and fail authority on lag
+## Alternatives rejected
 
-Receiver acquisition before an awaited snapshot is the minimum lossless
-handoff. Query-twice and client polling were rejected because each adds work
-without making a missing patch explicit. Lag is an authority error, not a
-diagnostic-only warning.
+- Persist the full navigated URL in `url`: rejected because it silently converts
+  auto-detected navigation into a manual override and pins a possibly stale port.
+- Keep the latest route only in React/local storage: rejected because existing
+  preview settings already provide durable, workspace-scoped server persistence.
+- Persist full browser history: rejected as unnecessary for restoring the last
+  selected worksheet.
 
-### Owner-specific liveness, shared reconciliation decision
+## Dependencies
 
-Local OS/process-monitor evidence and remote worker job/lease/event evidence
-cannot be collapsed into one probe without weakening the distributed authority
-model. They can implement one decision contract: positive liveness permits
-continued running; terminal evidence classifies exactly; absent evidence after
-the bound becomes indeterminate after preservation.
-
-### Forty-five seconds
-
-The worker lease is normally 30 seconds. A 45-second testable bound covers one
-lease plus event polling/scheduling margin. It is short enough to prevent the
-confirmed indefinite spinner and does not turn final text into immediate exit.
-
-### Indeterminate is the unknown-evidence terminal
-
-The schema and UI already support `indeterminate`. It states exactly that the
-coordinator cannot prove outcome. `completed` would overclaim; `failed` or
-`interrupted` require evidence absent in this case.
-
-### Ready resets health; open does not
-
-A TCP/WebSocket handshake is transport availability, not stream authority.
-Only the server's Ready boundary proves the connection supplied a complete
-snapshot and should reset consecutive unhealthy retry pressure.
-
-### Relay metadata is consumer-facing
-
-The relay shim decodes a signed server close payload and currently calls the raw
-browser socket's `close(code, reason)`. Reserved code 1011 cannot be originated
-by browser script. The decoded envelope remains authoritative; close the raw
-transport legally and synthesize one shim-facing CloseEvent with the decoded
-metadata.
-
-### No new dependencies
-
-Tokio synchronization/time, existing broadcast wrappers, Vitest fake timers,
-and current relay event helpers cover the needed behavior.
-
-## Sibling stream audit disposition
-
-- Execution processes, scratch, workspaces, and browser sessions all combine a
-  DB snapshot with the shared event broadcast. They now call the same
-  subscribe-before-snapshot helper and the same lag-to-error live adapter.
-- `MsgStore::history_plus_stream` is history plus live state, not a DB snapshot,
-  but has the same lossless boundary. `push` publishes while holding the history
-  write lock; a subscriber takes the receiver while holding the read lock, so a
-  message appears exactly once across history/live. Lag returns an I/O error.
-- Raw and normalized live log WebSockets preserve that error through their
-  filters. Stdout/stderr chunk streams now preserve it as well.
-- The temporary historical-normalization store is exempt from resnapshot: it is
-  a private, single-producer replay with the normal 100,000-message broadcast
-  capacity and a Ready sentinel, not a concurrently changing authoritative DB
-  snapshot. Its consumer owns and aborts the producer tasks if dropped.
+No new library or service dependency is needed.

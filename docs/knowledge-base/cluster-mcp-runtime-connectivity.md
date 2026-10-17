@@ -1,6 +1,7 @@
 # Cluster MCP runtime connectivity
 
-Contributing tasks: `VAS-356`, `VAS-375`, `268b-debug-vk-error`
+Contributing tasks: `VAS-356`, `VAS-375`, `268b-debug-vk-error`,
+`vk/f558-update-vk-to-aut`, `vk/1d23-vk-worker-output`
 
 An MCP configuration can be valid, persisted, and successfully tested by the
 coordinator while remaining unusable by an executor on a worker. Treat these as
@@ -46,6 +47,30 @@ the source of linked authentication/runtime assets rather than a write target.
 Because a crash bypasses teardown and recovery interrupts rather than resumes
 old jobs, worker startup clears and recreates the dedicated `mcp-config` root
 with owner-only permissions before accepting executions.
+
+For Codex, the worker also writes one exact project trust entry into the scoped
+`config.toml` before launch. The key is the canonical action directory after any
+initial, follow-up, or review offset has been authorised; do not trust a broader
+workspace or inferred Git root. Keep the original workspace directory separately
+for repository discovery and commit reminders.
+
+Use native TOML values while adding trust. Preserve unrelated settings, other
+project entries, and fields beside the selected project's `trust_level`. An
+absent MCP snapshot preserves source MCP definitions, while a supplied empty
+snapshot clears them. Refresh must read the existing scoped file and replace
+only MCP settings so it cannot erase trust or recreate state after terminal
+cleanup.
+
+The scoped home remains disposable, but conversation data does not. Create the
+persistent source `sessions` directory before building the overlay, then link it
+into the scoped home. This ensures a first execution on a fresh worker does not
+lose its rollout when the execution-owned directory is removed.
+
+<Note>
+Writing and parsing the scoped trust entry proves materialisation. Only a launch
+with the deployed Codex executable proves that Codex adopted project-local
+configuration, hooks, and execution policies.
+</Note>
 
 Treat repository skill errors separately from scoped-home routing. A skill must
 start and end YAML frontmatter with `---`; commit `efe4dd7e` fixed the historical
@@ -97,3 +122,58 @@ accept rules by consumer. Adding VK workers for Firecrawl TCP 3410 must not gran
 those workers access to logmein ports 8189/8190. Keep the final targeted drop and
 add a CI invariant that positively asserts the intended accepts and negatively
 asserts the forbidden cross-port access.
+
+## Keep Codex SQLite indices out of disposable path aliases
+
+Contributed by: `vk/1d23-vk-worker-output`.
+
+Linking persistent `sessions` into an execution-scoped Codex home preserves the
+files, but not the absolute alias paths recorded in a shared Codex state database.
+Once `PreparedMcpConfig` removes that execution root, indexed paths through it
+become stale. For a reported thread, an on-host check found the old alias absent
+and the corresponding persistent rollout still present. Codex's rollout lookup
+logs `state db returned stale rollout path` and falls back to file discovery.
+
+Initial scoped configuration sets `sqlite_home` to a private `sqlite` child of
+that execution home, overriding source configuration and the vendor environment
+fallback. The worker reserves a real owner-only directory there: if its generic
+overlay linked a same-named source entry, it removes only that alias before
+creating the private directory. Database files and WAL/SHM sidecars then share one
+execution lifetime. MCP refresh preserves `sqlite_home`; persistent sessions and
+authentication remain linked, and source configuration/databases remain untouched.
+
+The native key and precedence were verified in the pinned Codex `rust-v0.144.1`
+source (`44918ea`, `core/config.schema.json` and `core/src/config/mod.rs`). Rollout
+fallback behavior is in `rollout/src/list.rs`. Fresh indices can incur backfill
+cost. This change applies to new scoped executions and deliberately does not
+rewrite existing vendor databases or claim that every stale path means a deleted
+transcript. Preserve the error diagnostic rather than merely hiding it.
+
+## Codex continuation history can overflow the worker output journal
+
+Contributed by: `vk/669e-mcp-blocks-progr`.
+
+An rmcp `worker quit with fatal: Transport channel closed` line describes one
+MCP transport worker, not necessarily the coding-agent process. Correlate it
+with the execution's worker-job record and coordinator logs. In the reported
+FAIKE execution, the actual transition to indeterminate followed a replay gap:
+the coordinator had consumed sequence 41 while the earliest retained worker
+event was already 5358. The retained stdout ended partway through the
+`thread/fork` response; preceding MCP errors were merely the last complete
+messages the UI could display.
+
+The Codex fork/resume parameter helpers now set `exclude_turns: true`
+(`excludeTurns` on the wire). This requests thread metadata without hydrating
+historical turns into the response. Codex still reads the conversation history
+for model context, and explicit fallback `history` inputs remain unchanged.
+VK's response normalizer needs thread identity/model/reasoning metadata, not
+those historical turns; existing experimental-API initialization permits the
+field. Chat and review share the fork helper.
+
+The contract was checked in pinned protocol/source revision `44918ea`
+(`rust-v0.144.1`, `protocol/v2/thread.rs` and `thread_processor.rs`) and exercised
+against the deployed Codex 0.154.0 protocol with isolated synthetic history.
+Wire regressions cover fork, resume, and explicit-history resume. This removes
+the unnecessary continuation-history burst; it does not make the bounded worker
+journal lossless for arbitrary output, repair external MCP connectivity, or
+recover already-missing output. Preserve genuine replay-gap indeterminacy.

@@ -28,7 +28,10 @@ pub enum WorkerClientError {
     EndpointNotFound(Uuid),
     #[error("worker endpoint URL could not be constructed: {0}")]
     InvalidUrl(#[from] url::ParseError),
-    #[error("worker transport failed: {0}")]
+    /// Rendered with its cause chain: `reqwest` alone says only "error sending
+    /// request for url (…)", which hides whether the worker timed out, refused,
+    /// or reset — the difference between a wedged listener and a dead host.
+    #[error("worker transport failed: {}", error_chain(.0))]
     Transport(#[from] reqwest::Error),
     #[error("worker WebSocket transport failed: {0}")]
     WebSocket(String),
@@ -541,6 +544,21 @@ fn refresh_dispatch_authority(
     dispatch.authority.nonce = nonce.to_string();
 }
 
+fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut rendered = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let cause_text = cause.to_string();
+        // Some layers repeat their inner error verbatim; print it once.
+        if !rendered.ends_with(&cause_text) {
+            rendered.push_str(": ");
+            rendered.push_str(&cause_text);
+        }
+        source = cause.source();
+    }
+    rendered
+}
+
 fn retryable_dispatch_error(error: &WorkerClientError) -> bool {
     match error {
         WorkerClientError::Transport(_) => true,
@@ -668,6 +686,31 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[tokio::test]
+    async fn transport_error_names_its_underlying_cause() {
+        // A just-released port refuses the connection. The top-level reqwest
+        // message is only "error sending request for url (…)"; the cause is
+        // what tells an operator a refused port from a wedged listener.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let error = Client::new()
+            .get(format!("http://127.0.0.1:{port}/health"))
+            .send()
+            .await
+            .unwrap_err();
+        let top_level = error.to_string();
+        let rendered = WorkerClientError::Transport(error).to_string();
+
+        assert!(rendered.starts_with(&format!("worker transport failed: {top_level}: ")));
+        assert!(
+            rendered.to_lowercase().contains("refused"),
+            "cause missing from {rendered:?}"
+        );
     }
 
     #[test]

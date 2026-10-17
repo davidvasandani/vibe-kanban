@@ -72,3 +72,14 @@ describe('AppBar deployment controls', () => {
     expect(onUpdateClick).toHaveBeenCalledTimes(1);
   });
 });
+
+it('opens global search from an accessible rail control', () => {
+  const open = vi.fn();
+  renderAppBar({ onOpenGlobalSearch: open });
+  const button = container.querySelector<HTMLButtonElement>(
+    'button[aria-label="Global Search"]'
+  );
+  expect(button).not.toBeNull();
+  act(() => button!.click());
+  expect(open).toHaveBeenCalledOnce();
+});

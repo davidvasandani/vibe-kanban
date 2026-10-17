@@ -323,6 +323,7 @@ impl Deployment for LocalDeployment {
                 jobs_missing = report.jobs_missing,
                 jobs_quarantined = report.jobs_quarantined,
                 conflicts = report.conflicts,
+                jobs_deferred = report.jobs_deferred,
                 "Cluster execution reconciliation completed before cleanup"
             );
         }
@@ -366,6 +367,8 @@ impl Deployment for LocalDeployment {
             let rc = remote_client.clone().ok();
             PrMonitorService::spawn(db, analytics, container, rc, pr_sync_notify.clone()).await;
         }
+        // Unattended re-auth sweep; a no-op unless VK_AUTO_REAUTH_INTERVAL_SECS is set.
+        services::services::reauth::sweep::spawn_sweep(shutdown.child_token());
 
         let deployment = Self {
             config,

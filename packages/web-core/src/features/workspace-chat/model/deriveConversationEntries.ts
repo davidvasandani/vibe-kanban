@@ -28,12 +28,14 @@ interface DeriveConversationEntriesParams {
 function patchWithKey(
   patch: PatchType,
   executionProcessId: string,
-  index: number | 'user' | 'script'
+  index: number | 'user' | 'script',
+  processCreatedAt: string
 ): PatchTypeWithKey {
   return {
     ...patch,
     patchKey: `${executionProcessId}:${index}`,
     executionProcessId,
+    processCreatedAt,
   };
 }
 
@@ -45,14 +47,15 @@ function appendAgentTurnEntries(
     const userNormalizedEntry: NormalizedEntry = {
       entry_type: { type: 'user_message' },
       content: turn.prompt,
-      timestamp: null,
+      timestamp: turn.process.executionProcess.created_at,
     };
 
     turnEntries.push(
       patchWithKey(
         { type: 'NORMALIZED_ENTRY', content: userNormalizedEntry },
         turn.process.executionProcess.id,
-        'user'
+        'user',
+        turn.process.executionProcess.created_at
       )
     );
   }
@@ -104,14 +107,15 @@ function appendScriptTurnEntries(
         status: process.toolStatus,
       },
       content: process.toolName,
-      timestamp: null,
+      timestamp: process.process.executionProcess.created_at,
     };
 
     turnEntries.push(
       patchWithKey(
         { type: 'NORMALIZED_ENTRY', content: toolNormalizedEntry },
         processId,
-        'script'
+        'script',
+        process.process.executionProcess.created_at
       )
     );
 
@@ -126,11 +130,12 @@ function appendScriptTurnEntries(
             content: {
               entry_type: { type: 'user_message' },
               content: process.initialPromptAfterSetup,
-              timestamp: null,
+              timestamp: process.process.executionProcess.created_at,
             },
           },
           processId,
-          'user'
+          'user',
+          process.process.executionProcess.created_at
         )
       );
     }

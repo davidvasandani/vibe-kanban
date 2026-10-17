@@ -8,6 +8,7 @@ use db::models::{
     coding_agent_turn::CodingAgentTurn,
     execution_process::{ExecutionProcess, ExecutionProcessStatus},
     workspace::{Workspace, WorkspaceError, WorkspacePlacement},
+    workspace_creation_progress::WorkspaceCreationProgress,
 };
 use deployment::Deployment;
 use serde::Deserialize;
@@ -200,4 +201,12 @@ pub async fn mark_seen(
     let pool = &deployment.db().pool;
     CodingAgentTurn::mark_seen_by_workspace_id(pool, workspace.id).await?;
     Ok(ResponseJson(ApiResponse::success(())))
+}
+
+pub async fn get_workspace_creation_progress(
+    Extension(workspace): Extension<Workspace>,
+    State(deployment): State<DeploymentImpl>,
+) -> Result<ResponseJson<ApiResponse<WorkspaceCreationProgress>>, ApiError> {
+    let progress = WorkspaceCreationProgress::find(&deployment.db().pool, workspace.id).await?;
+    Ok(ResponseJson(ApiResponse::success(progress)))
 }

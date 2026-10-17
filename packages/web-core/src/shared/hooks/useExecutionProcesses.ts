@@ -30,6 +30,23 @@ export function hasRunningAttempt(
 }
 
 /**
+ * The session process stream URL. Always the soft-deleted superset: the
+ * server's `show_soft_deleted=false` is exactly a `!dropped` filter, so every
+ * caller can share this one socket and filter locally (constitution XLIV).
+ */
+export function sessionExecutionProcessesEndpoint(
+  sessionId: string,
+  hostId: string | null
+): string {
+  const apiBasePath = hostId ? `/api/host/${hostId}` : '/api';
+  const params = new URLSearchParams({
+    session_id: sessionId,
+    show_soft_deleted: 'true',
+  });
+  return `${apiBasePath}/execution-processes/stream/session/ws?${params.toString()}`;
+}
+
+/**
  * Stream execution processes for a session via WebSocket (JSON Patch) and expose as array + map.
  * Server sends initial snapshot: replace /execution_processes with an object keyed by id.
  * Live updates arrive at /execution_processes/<id> via add/replace/remove operations.
@@ -39,17 +56,10 @@ export const useExecutionProcesses = (
   opts?: { showSoftDeleted?: boolean }
 ): UseExecutionProcessesResult => {
   const hostId = useHostId();
-  const showSoftDeleted = opts?.showSoftDeleted;
-  let endpoint: string | undefined;
-
-  if (sessionId) {
-    const apiBasePath = hostId ? `/api/host/${hostId}` : '/api';
-    const params = new URLSearchParams({ session_id: sessionId });
-    if (typeof showSoftDeleted === 'boolean') {
-      params.set('show_soft_deleted', String(showSoftDeleted));
-    }
-    endpoint = `${apiBasePath}/execution-processes/stream/session/ws?${params.toString()}`;
-  }
+  const showSoftDeleted = opts?.showSoftDeleted === true;
+  const endpoint = sessionId
+    ? sessionExecutionProcessesEndpoint(sessionId, hostId)
+    : undefined;
 
   const initialData = useCallback(
     (): ExecutionProcessState => ({ execution_processes: {} }),
@@ -71,12 +81,13 @@ export const useExecutionProcesses = (
       new Date(b.created_at as unknown as string).getTime()
   );
 
-  // Guard against stale buffered stream data when switching sessions quickly.
-  const executionProcesses = sessionId
-    ? streamedExecutionProcesses.filter(
-        (executionProcess) => executionProcess.session_id === sessionId
-      )
-    : streamedExecutionProcesses;
+  // Guard against stale buffered stream data when switching sessions quickly,
+  // and apply the soft-delete filter the server would have applied.
+  const executionProcesses = streamedExecutionProcesses.filter(
+    (executionProcess) =>
+      (!sessionId || executionProcess.session_id === sessionId) &&
+      (showSoftDeleted || !executionProcess.dropped)
+  );
 
   const executionProcessesById = executionProcesses.reduce<
     Record<string, ExecutionProcess>

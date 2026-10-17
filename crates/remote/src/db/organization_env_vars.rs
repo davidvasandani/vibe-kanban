@@ -1,4 +1,5 @@
 use api_types::OrganizationEnvVar;
+use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use thiserror::Error;
 use uuid::Uuid;
@@ -11,6 +12,29 @@ pub enum OrganizationEnvVarError {
     NotFound,
     #[error(transparent)]
     Database(#[from] sqlx::Error),
+}
+
+/// Row shape for `query_as!`; mapped into the API type, whose `reference` is
+/// derived from the decrypted value by the route layer rather than stored.
+struct OrganizationEnvVarRow {
+    id: Uuid,
+    organization_id: Uuid,
+    name: String,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+impl From<OrganizationEnvVarRow> for OrganizationEnvVar {
+    fn from(row: OrganizationEnvVarRow) -> Self {
+        Self {
+            id: row.id,
+            organization_id: row.organization_id,
+            name: row.name,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+            reference: None,
+        }
+    }
 }
 
 pub struct OrganizationEnvVarRepository<'a> {
@@ -27,7 +51,7 @@ impl<'a> OrganizationEnvVarRepository<'a> {
         organization_id: Uuid,
     ) -> Result<Vec<OrganizationEnvVar>, OrganizationEnvVarError> {
         let rows = sqlx::query_as!(
-            OrganizationEnvVar,
+            OrganizationEnvVarRow,
             r#"
             SELECT
                 id              AS "id!: Uuid",
@@ -44,7 +68,7 @@ impl<'a> OrganizationEnvVarRepository<'a> {
         .fetch_all(self.pool)
         .await?;
 
-        Ok(rows)
+        Ok(rows.into_iter().map(Into::into).collect())
     }
 
     /// Fetch all env vars for an organization as `(name, encrypted_value)`
@@ -79,7 +103,7 @@ impl<'a> OrganizationEnvVarRepository<'a> {
         encrypted_value: &str,
     ) -> Result<OrganizationEnvVar, OrganizationEnvVarError> {
         let row = sqlx::query_as!(
-            OrganizationEnvVar,
+            OrganizationEnvVarRow,
             r#"
             INSERT INTO organization_env_vars (organization_id, name, encrypted_value)
             VALUES ($1, $2, $3)
@@ -105,7 +129,7 @@ impl<'a> OrganizationEnvVarRepository<'a> {
             OrganizationEnvVarError::from(e)
         })?;
 
-        Ok(row)
+        Ok(row.into())
     }
 
     pub async fn update_value(
@@ -115,7 +139,7 @@ impl<'a> OrganizationEnvVarRepository<'a> {
         encrypted_value: &str,
     ) -> Result<OrganizationEnvVar, OrganizationEnvVarError> {
         let row = sqlx::query_as!(
-            OrganizationEnvVar,
+            OrganizationEnvVarRow,
             r#"
             UPDATE organization_env_vars
             SET encrypted_value = $3, updated_at = now()
@@ -135,7 +159,7 @@ impl<'a> OrganizationEnvVarRepository<'a> {
         .await?
         .ok_or(OrganizationEnvVarError::NotFound)?;
 
-        Ok(row)
+        Ok(row.into())
     }
 
     pub async fn delete(

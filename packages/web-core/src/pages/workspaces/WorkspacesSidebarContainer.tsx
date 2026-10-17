@@ -46,6 +46,7 @@ import {
   DialogTitle,
 } from '@vibe/ui/components/Dialog';
 import {
+  EyeSlashIcon,
   FunnelIcon,
   FolderIcon,
   GitPullRequestIcon,
@@ -54,6 +55,15 @@ import {
   XIcon,
 } from '@phosphor-icons/react';
 import { useRemoteCloudHostsAppBarModel } from '@/shared/hooks/useRemoteCloudHosts';
+import { sortWorkspaces } from './workspaceSort';
+import {
+  NO_ISSUE_STATUS_FILTER,
+  NO_PROJECT_FILTER,
+  buildIssueStatusFilterOptions,
+  filterSidebarWorkspaces,
+  type RemoteWorkspaceLink,
+} from './workspaceSidebarFilters';
+import { useProjectsIssueStatuses } from './useProjectsIssueStatuses';
 
 export type WorkspaceLayoutMode = 'flat' | 'accordion';
 
@@ -61,7 +71,6 @@ export type WorkspaceLayoutMode = 'flat' | 'accordion';
 const DRAFT_WORKSPACE_ID = '00000000-0000-0000-0000-000000000001';
 
 const PAGE_SIZE = 50;
-const NO_PROJECT_ID = '__no_project__';
 const DEFAULT_WORKSPACE_SORT = {
   sortBy: 'updated_at' as WorkspaceSortBy,
   sortOrder: 'desc' as WorkspaceSortOrder,
@@ -158,9 +167,12 @@ interface WorkspacesFilterDialogProps {
   projectOptions: MultiSelectDropdownOption<string>[];
   projectIds: string[];
   prFilter: WorkspacePrFilter;
+  issueStatusOptions: MultiSelectDropdownOption<string>[];
+  hiddenIssueStatusNames: string[];
   hasActiveFilters: boolean;
   onProjectFilterChange: (projectIds: string[]) => void;
   onPrFilterChange: (prFilter: WorkspacePrFilter) => void;
+  onHiddenIssueStatusNamesChange: (names: string[]) => void;
   onClearFilters: () => void;
 }
 
@@ -170,9 +182,12 @@ function WorkspacesFilterDialog({
   projectOptions,
   projectIds,
   prFilter,
+  issueStatusOptions,
+  hiddenIssueStatusNames,
   hasActiveFilters,
   onProjectFilterChange,
   onPrFilterChange,
+  onHiddenIssueStatusNamesChange,
   onClearFilters,
 }: WorkspacesFilterDialogProps) {
   const { t } = useTranslation('common');
@@ -215,6 +230,16 @@ function WorkspacesFilterDialog({
               icon={GitPullRequestIcon}
               label={t('kanban.workspaceSidebar.prFilterLabel')}
             />
+            <MultiSelectDropdown
+              values={hiddenIssueStatusNames}
+              options={issueStatusOptions}
+              onChange={onHiddenIssueStatusNamesChange}
+              icon={EyeSlashIcon}
+              label={t('kanban.workspaceSidebar.issueStatusFilterLabel')}
+              menuLabel={t(
+                'kanban.workspaceSidebar.issueStatusFilterMenuLabel'
+              )}
+            />
             {hasActiveFilters && (
               <div className="self-end">
                 <PrimaryButton
@@ -230,26 +255,6 @@ function WorkspacesFilterDialog({
       </DialogContent>
     </Dialog>
   );
-}
-
-function toTimestamp(value: string | undefined): number | null {
-  if (!value) {
-    return null;
-  }
-
-  const timestamp = new Date(value).getTime();
-  return Number.isNaN(timestamp) ? null : timestamp;
-}
-
-function getWorkspaceSortTimestamp(
-  workspace: Workspace,
-  sortBy: WorkspaceSortBy
-): number | null {
-  if (sortBy === 'updated_at') {
-    return toTimestamp(workspace.latestProcessCompletedAt);
-  }
-
-  return toTimestamp(workspace.createdAt);
 }
 
 export function WorkspacesSidebarContainer({
@@ -298,6 +303,9 @@ export function WorkspacesSidebarContainer({
   const setWorkspacePrFilter = useUiPreferencesStore(
     (s) => s.setWorkspacePrFilter
   );
+  const setWorkspaceHiddenIssueStatusFilter = useUiPreferencesStore(
+    (s) => s.setWorkspaceHiddenIssueStatusFilter
+  );
   const clearWorkspaceFilters = useUiPreferencesStore(
     (s) => s.clearWorkspaceFilters
   );
@@ -316,16 +324,35 @@ export function WorkspacesSidebarContainer({
     [orgsData?.organizations]
   );
 
-  // Map local workspace ID → remote project ID
-  const remoteProjectByLocalId = useMemo(() => {
-    const map = new Map<string, string>();
+  // Map local workspace ID → remote project + linked issue
+  const remoteByLocalId = useMemo(() => {
+    const map = new Map<string, RemoteWorkspaceLink>();
     for (const rw of remoteWorkspaces) {
       if (rw.local_workspace_id) {
-        map.set(rw.local_workspace_id, rw.project_id);
+        map.set(rw.local_workspace_id, {
+          projectId: rw.project_id,
+          issueId: rw.issue_id,
+        });
       }
     }
     return map;
   }, [remoteWorkspaces]);
+
+  const linkedProjectIds = useMemo(
+    () =>
+      Array.from(
+        new Set(Array.from(remoteByLocalId.values(), (link) => link.projectId))
+      ),
+    [remoteByLocalId]
+  );
+
+  // Issue statuses are only synced while they can matter: the filter dialog
+  // is open, or a status is hidden.
+  const hiddenIssueStatusNames = workspaceFilters.hiddenIssueStatusNames;
+  const { statuses: linkedProjectStatuses, issueStatusNameById } =
+    useProjectsIssueStatuses(linkedProjectIds, {
+      enabled: isFilterDialogOpen || hiddenIssueStatusNames.length > 0,
+    });
 
   // Build org name lookup
   const orgNameById = useMemo(() => {
@@ -338,9 +365,9 @@ export function WorkspacesSidebarContainer({
 
   // Group projects by org, only including projects with linked workspaces
   const projectGroups = useMemo(() => {
-    const linkedProjectIds = new Set(remoteProjectByLocalId.values());
+    const linkedProjectIdSet = new Set(linkedProjectIds);
     const relevant = allRemoteProjects.filter((p) =>
-      linkedProjectIds.has(p.id)
+      linkedProjectIdSet.has(p.id)
     );
 
     const groupMap = new Map<string, Project[]>();
@@ -357,13 +384,13 @@ export function WorkspacesSidebarContainer({
         projects: projects.sort((a, b) => a.name.localeCompare(b.name)),
       }))
       .sort((a, b) => a.orgName.localeCompare(b.orgName));
-  }, [allRemoteProjects, remoteProjectByLocalId, orgNameById]);
+  }, [allRemoteProjects, linkedProjectIds, orgNameById]);
 
   // Build flat project options for MultiSelectDropdown
   const projectOptions = useMemo<MultiSelectDropdownOption<string>[]>(
     () => [
       {
-        value: NO_PROJECT_ID,
+        value: NO_PROJECT_FILTER,
         label: t('kanban.workspaceSidebar.noProject'),
       },
       ...projectGroups.flatMap((g) =>
@@ -385,9 +412,25 @@ export function WorkspacesSidebarContainer({
     [projectGroups, t]
   );
 
+  // Status options for the hide-status filter; "No issue" comes first
+  const issueStatusOptions = useMemo<MultiSelectDropdownOption<string>[]>(
+    () => [
+      {
+        value: NO_ISSUE_STATUS_FILTER,
+        label: t('kanban.workspaceSidebar.noIssue'),
+      },
+      ...buildIssueStatusFilterOptions(
+        linkedProjectStatuses,
+        hiddenIssueStatusNames
+      ),
+    ],
+    [linkedProjectStatuses, hiddenIssueStatusNames, t]
+  );
+
   const hasActiveFilters =
     workspaceFilters.projectIds.length > 0 ||
-    workspaceFilters.prFilter !== 'all';
+    workspaceFilters.prFilter !== 'all' ||
+    hiddenIssueStatusNames.length > 0;
   const hasNonDefaultSort =
     workspaceSort.sortBy !== DEFAULT_WORKSPACE_SORT.sortBy ||
     workspaceSort.sortOrder !== DEFAULT_WORKSPACE_SORT.sortOrder;
@@ -403,122 +446,50 @@ export function WorkspacesSidebarContainer({
   const searchLower = searchQuery.toLowerCase();
   const isSearching = searchQuery.length > 0;
 
-  // Apply sidebar filters (project + PR), then search
-  const filteredActiveWorkspaces = useMemo(() => {
-    let result = activeWorkspaces;
+  // Apply sidebar filters (project, PR, issue status), then search
+  const filterCriteria = useMemo(
+    () => ({
+      projectIds: workspaceFilters.projectIds,
+      prFilter: workspaceFilters.prFilter,
+      hiddenIssueStatusNames,
+      searchLower,
+      remoteByLocalId,
+      issueStatusNameById,
+    }),
+    [
+      workspaceFilters.projectIds,
+      workspaceFilters.prFilter,
+      hiddenIssueStatusNames,
+      searchLower,
+      remoteByLocalId,
+      issueStatusNameById,
+    ]
+  );
 
-    // Project filter
-    if (workspaceFilters.projectIds.length > 0) {
-      const includeNoProject =
-        workspaceFilters.projectIds.includes(NO_PROJECT_ID);
-      const realProjectIds = workspaceFilters.projectIds.filter(
-        (id) => id !== NO_PROJECT_ID
-      );
-      result = result.filter((ws) => {
-        const projectId = remoteProjectByLocalId.get(ws.id);
-        if (!projectId) return includeNoProject;
-        return realProjectIds.includes(projectId);
-      });
-    }
+  const filteredActiveWorkspaces = useMemo(
+    () => filterSidebarWorkspaces(activeWorkspaces, filterCriteria),
+    [activeWorkspaces, filterCriteria]
+  );
 
-    // PR filter
-    if (workspaceFilters.prFilter === 'has_pr') {
-      result = result.filter((ws) => !!ws.prStatus);
-    } else if (workspaceFilters.prFilter === 'no_pr') {
-      result = result.filter((ws) => !ws.prStatus);
-    }
+  const filteredArchivedWorkspaces = useMemo(
+    () => filterSidebarWorkspaces(archivedWorkspaces, filterCriteria),
+    [archivedWorkspaces, filterCriteria]
+  );
 
-    // Search filter
-    if (searchLower) {
-      result = result.filter(
-        (ws) =>
-          ws.name.toLowerCase().includes(searchLower) ||
-          ws.branch.toLowerCase().includes(searchLower)
-      );
-    }
-
-    return result;
-  }, [activeWorkspaces, workspaceFilters, remoteProjectByLocalId, searchLower]);
-
-  const filteredArchivedWorkspaces = useMemo(() => {
-    let result = archivedWorkspaces;
-
-    if (workspaceFilters.projectIds.length > 0) {
-      const includeNoProject =
-        workspaceFilters.projectIds.includes(NO_PROJECT_ID);
-      const realProjectIds = workspaceFilters.projectIds.filter(
-        (id) => id !== NO_PROJECT_ID
-      );
-      result = result.filter((ws) => {
-        const projectId = remoteProjectByLocalId.get(ws.id);
-        if (!projectId) return includeNoProject;
-        return realProjectIds.includes(projectId);
-      });
-    }
-
-    if (workspaceFilters.prFilter === 'has_pr') {
-      result = result.filter((ws) => !!ws.prStatus);
-    } else if (workspaceFilters.prFilter === 'no_pr') {
-      result = result.filter((ws) => !ws.prStatus);
-    }
-
-    if (searchLower) {
-      result = result.filter(
-        (ws) =>
-          ws.name.toLowerCase().includes(searchLower) ||
-          ws.branch.toLowerCase().includes(searchLower)
-      );
-    }
-
-    return result;
-  }, [
-    archivedWorkspaces,
-    workspaceFilters,
-    remoteProjectByLocalId,
-    searchLower,
-  ]);
-
-  const sortWorkspaces = useCallback(
+  const sortVisibleWorkspaces = useCallback(
     (workspaces: Workspace[]) =>
-      [...workspaces].sort((a, b) => {
-        // Always keep pinned workspaces at the top.
-        if (a.isPinned !== b.isPinned) {
-          return a.isPinned ? -1 : 1;
-        }
-
-        const aTimestamp = getWorkspaceSortTimestamp(a, workspaceSort.sortBy);
-        const bTimestamp = getWorkspaceSortTimestamp(b, workspaceSort.sortBy);
-
-        // Workspaces without the selected timestamp are always sorted first.
-        if (aTimestamp === null && bTimestamp === null) {
-          return a.name.localeCompare(b.name);
-        }
-        if (aTimestamp === null) {
-          return -1;
-        }
-        if (bTimestamp === null) {
-          return 1;
-        }
-
-        if (aTimestamp === bTimestamp) {
-          return a.name.localeCompare(b.name);
-        }
-
-        return workspaceSort.sortOrder === 'asc'
-          ? aTimestamp - bTimestamp
-          : bTimestamp - aTimestamp;
-      }),
+      sortWorkspaces(workspaces, workspaceSort.sortBy, workspaceSort.sortOrder),
     [workspaceSort.sortBy, workspaceSort.sortOrder]
   );
 
   const sortedActiveWorkspaces = useMemo(
-    () => sortWorkspaces(filteredActiveWorkspaces),
-    [filteredActiveWorkspaces, sortWorkspaces]
+    () => sortVisibleWorkspaces(filteredActiveWorkspaces),
+    [filteredActiveWorkspaces, sortVisibleWorkspaces]
   );
 
   const sortedArchivedWorkspaces = useMemo(
-    () => sortWorkspaces(filteredArchivedWorkspaces),
-    [filteredArchivedWorkspaces, sortWorkspaces]
+    () => sortVisibleWorkspaces(filteredArchivedWorkspaces),
+    [filteredArchivedWorkspaces, sortVisibleWorkspaces]
   );
 
   // Apply pagination (only when not searching)
@@ -615,6 +586,7 @@ export function WorkspacesSidebarContainer({
     raisedHand: PERSIST_KEYS.workspacesSidebarRaisedHand,
     notRunning: PERSIST_KEYS.workspacesSidebarNotRunning,
     running: PERSIST_KEYS.workspacesSidebarRunning,
+    polling: PERSIST_KEYS.workspacesSidebarPolling,
   };
 
   const searchControls = (
@@ -662,9 +634,12 @@ export function WorkspacesSidebarContainer({
         projectOptions={projectOptions}
         projectIds={workspaceFilters.projectIds}
         prFilter={workspaceFilters.prFilter}
+        issueStatusOptions={issueStatusOptions}
+        hiddenIssueStatusNames={hiddenIssueStatusNames}
         hasActiveFilters={hasActiveFilters}
         onProjectFilterChange={setWorkspaceProjectFilter}
         onPrFilterChange={setWorkspacePrFilter}
+        onHiddenIssueStatusNamesChange={setWorkspaceHiddenIssueStatusFilter}
         onClearFilters={clearWorkspaceFilters}
       />
     </>

@@ -9,7 +9,7 @@ use std::os::unix::io::{FromRawFd, IntoRawFd, OwnedFd};
 use std::os::windows::io::{FromRawHandle, IntoRawHandle, OwnedHandle};
 
 use command_group::AsyncGroupChild;
-use tokio::io::AsyncWrite;
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 use workspace_utils::command_ext::GroupSpawnNoWindowExt;
 
 use crate::executors::{ExecutorError, SpawnedChild};
@@ -31,6 +31,38 @@ pub fn create_stdout_pipe_writer<'b>(
 
     // Return async writer to the caller
     wrap_fd_as_tokio_writer(pipe_writer)
+}
+
+/// Put a Vibe Kanban notice at the front of the child's stderr.
+///
+/// The child's stderr is replaced with a fresh pipe. A background task writes
+/// `notice` as the first line and then copies the child's real stderr through,
+/// so the stream still ends when the child exits. Stderr is VK's diagnostic
+/// channel; agent stdout carries only what the agent wrote (constitution IX).
+pub fn prepend_child_stderr(
+    child: &mut AsyncGroupChild,
+    notice: String,
+) -> Result<(), ExecutorError> {
+    let original = child.inner().stderr.take();
+    let (pipe_reader, pipe_writer) = os_pipe::pipe().map_err(|e| {
+        ExecutorError::Io(std::io::Error::other(format!("Failed to create pipe: {e}")))
+    })?;
+    child.inner().stderr = Some(wrap_fd_as_child_stderr(pipe_reader)?);
+    let mut writer = wrap_fd_as_tokio_writer(pipe_writer)?;
+
+    tokio::spawn(async move {
+        if let Err(e) = writer.write_all(format!("{notice}\n").as_bytes()).await {
+            tracing::warn!("Failed to write stderr notice: {e}");
+        }
+        if let Some(mut original) = original
+            && let Err(e) = tokio::io::copy(&mut original, &mut writer).await
+        {
+            tracing::warn!("Failed to forward child stderr: {e}");
+        }
+        let _ = writer.flush().await;
+    });
+
+    Ok(())
 }
 
 /// Create a helper child process to be used only for stdout duplication.
@@ -115,6 +147,27 @@ fn wrap_fd_as_child_stdout(
     }
 }
 
+/// Convert os_pipe::PipeReader to tokio::process::ChildStderr
+fn wrap_fd_as_child_stderr(
+    pipe_reader: os_pipe::PipeReader,
+) -> Result<tokio::process::ChildStderr, ExecutorError> {
+    #[cfg(unix)]
+    {
+        let raw_fd = pipe_reader.into_raw_fd();
+        let owned_fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+        let std_stderr = std::process::ChildStderr::from(owned_fd);
+        tokio::process::ChildStderr::from_std(std_stderr).map_err(ExecutorError::Io)
+    }
+
+    #[cfg(windows)]
+    {
+        let raw_handle = pipe_reader.into_raw_handle();
+        let owned_handle = unsafe { OwnedHandle::from_raw_handle(raw_handle) };
+        let std_stderr = std::process::ChildStderr::from(owned_handle);
+        tokio::process::ChildStderr::from_std(std_stderr).map_err(ExecutorError::Io)
+    }
+}
+
 /// Convert os_pipe::PipeWriter to a tokio file for async writing
 fn wrap_fd_as_tokio_writer(
     pipe_writer: os_pipe::PipeWriter,
@@ -135,5 +188,38 @@ fn wrap_fd_as_tokio_writer(
         let owned_handle = unsafe { OwnedHandle::from_raw_handle(raw_handle) };
         let std_file = std::fs::File::from(owned_handle);
         Ok(tokio::fs::File::from_std(std_file))
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use tokio::io::AsyncReadExt;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn prepended_notice_precedes_child_stderr_and_stream_ends() {
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command
+            .args(["-c", "echo inner >&2"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped());
+        let mut child = command.group_spawn_no_window().unwrap();
+
+        prepend_child_stderr(&mut child, "Vibe Kanban: notice".to_string()).unwrap();
+
+        let mut stderr = child.inner().stderr.take().unwrap();
+        let mut output = String::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            stderr.read_to_string(&mut output),
+        )
+        .await
+        .expect("stderr must reach EOF once the child exits")
+        .unwrap();
+        child.wait().await.unwrap();
+
+        assert_eq!(output, "Vibe Kanban: notice\ninner\n");
     }
 }

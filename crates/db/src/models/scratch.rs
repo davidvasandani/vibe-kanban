@@ -30,11 +30,44 @@ pub struct DraftFollowUpData {
 pub struct PreviewSettingsData {
     pub url: String,
     #[serde(default)]
+    pub current_route: Option<String>,
+    #[serde(default)]
     pub screen_size: Option<String>,
     #[serde(default)]
     pub responsive_width: Option<i32>,
     #[serde(default)]
     pub responsive_height: Option<i32>,
+}
+
+#[cfg(test)]
+mod preview_settings_tests {
+    use super::PreviewSettingsData;
+
+    #[test]
+    fn deserializes_legacy_preview_settings_without_current_route() {
+        let settings: PreviewSettingsData =
+            serde_json::from_str(r#"{"url":"http://localhost:3000","screen_size":"desktop"}"#)
+                .expect("legacy preview settings should remain valid");
+
+        assert_eq!(settings.current_route, None);
+    }
+
+    #[test]
+    fn preserves_current_route_components() {
+        let settings = PreviewSettingsData {
+            url: String::new(),
+            current_route: Some("/worksheet/7?mode=timed#problem-3".to_string()),
+            screen_size: None,
+            responsive_width: None,
+            responsive_height: None,
+        };
+
+        let json = serde_json::to_string(&settings).expect("settings should serialize");
+        let restored: PreviewSettingsData =
+            serde_json::from_str(&json).expect("settings should deserialize");
+
+        assert_eq!(restored.current_route, settings.current_route);
+    }
 }
 
 /// Data for workspace notes scratch
@@ -85,6 +118,43 @@ pub struct WorkspaceFilterStateData {
     pub project_ids: Vec<String>,
     #[serde(default)]
     pub pr_filter: WorkspacePrFilterData,
+    /// Issue statuses whose workspaces are hidden, stored by normalized
+    /// (trimmed, lower-cased) name since status ids are per-project and this
+    /// preference is global. May include the `__no_issue__` sentinel.
+    #[serde(default)]
+    pub hidden_issue_status_names: Vec<String>,
+}
+
+#[cfg(test)]
+mod workspace_filter_state_tests {
+    use super::WorkspaceFilterStateData;
+
+    #[test]
+    fn deserializes_legacy_filters_without_hidden_issue_statuses() {
+        let filters: WorkspaceFilterStateData =
+            serde_json::from_str(r#"{"project_ids":["p1"],"pr_filter":"has_pr"}"#)
+                .expect("legacy workspace filters should remain valid");
+
+        assert_eq!(filters.project_ids, vec!["p1".to_string()]);
+        assert!(filters.hidden_issue_status_names.is_empty());
+    }
+
+    #[test]
+    fn preserves_hidden_issue_status_names() {
+        let filters: WorkspaceFilterStateData = serde_json::from_str(
+            r#"{"project_ids":[],"pr_filter":"all","hidden_issue_status_names":["in review","__no_issue__"]}"#,
+        )
+        .expect("filters should deserialize");
+
+        let json = serde_json::to_string(&filters).expect("filters should serialize");
+        let restored: WorkspaceFilterStateData =
+            serde_json::from_str(&json).expect("filters should deserialize");
+
+        assert_eq!(
+            restored.hidden_issue_status_names,
+            vec!["in review".to_string(), "__no_issue__".to_string()]
+        );
+    }
 }
 
 /// Workspace sidebar sort state

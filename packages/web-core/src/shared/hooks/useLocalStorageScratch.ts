@@ -80,7 +80,9 @@ export function localStorageScratchUpdate(
         storageArea: localStorage,
       })
     );
-  } catch {}
+  } catch {
+    // Notifying other listeners is best-effort; the write already landed.
+  }
 
   return true;
 }
@@ -146,6 +148,7 @@ export const useLocalStorageScratch = (
       const next = buildScratchEntry(id, update, readFromStorage(storageKey));
       writeToStorage(storageKey, next);
       setScratch(next);
+      return next;
     },
     [storageKey, id]
   );

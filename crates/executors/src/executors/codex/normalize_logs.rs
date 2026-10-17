@@ -1629,15 +1629,18 @@ async fn handle_direct_notification(
             true
         }
         ServerNotification::Error(notification) => {
+            let message = &notification.error.message;
+            let (error_type, content) = match refresh_failure_setup_message(message) {
+                Some(guidance) => (NormalizedEntryError::SetupRequired, guidance),
+                None => (NormalizedEntryError::Other, format!("Error: {message}")),
+            };
             add_normalized_entry(
                 msg_store,
                 entry_index,
                 NormalizedEntry {
                     timestamp: None,
-                    entry_type: NormalizedEntryType::ErrorMessage {
-                        error_type: NormalizedEntryError::Other,
-                    },
-                    content: format!("Error: {}", notification.error.message),
+                    entry_type: NormalizedEntryType::ErrorMessage { error_type },
+                    content,
                     metadata: None,
                 },
             );
@@ -1678,6 +1681,33 @@ const SUPPRESSED_STDERR_PATTERNS: &[&str] = &[
 ];
 
 /// Codex-specific stderr normalizer that filters noisy internal messages.
+/// When Codex's error is a failed credential refresh, the actionable text to
+/// show instead of the raw message (which is kept, verbatim, at the front).
+///
+/// Matches Codex's own wording: `Failed to refresh token: <status>: <message>`
+/// for unclassified refresh failures, and the canned "Your access token could
+/// not be refreshed because …" for expired/reused/revoked refresh tokens. The
+/// common cluster case is a node holding another node's login with the
+/// refresh token blanked on purpose, where OpenAI answers
+/// `400 Invalid 'refresh_token': empty string`.
+fn refresh_failure_setup_message(message: &str) -> Option<String> {
+    let lower = message.to_ascii_lowercase();
+    if !(lower.contains("failed to refresh token")
+        || lower.contains("access token could not be refreshed"))
+    {
+        return None;
+    }
+    Some(format!(
+        "Codex could not renew its sign-in: {message}\n\n\
+         Codex's access token was rejected and could not be refreshed on this machine. \
+         If this machine uses a Codex login copied from another node (its refresh token \
+         is intentionally blank), make sure the node's refresh endpoint \
+         (CODEX_REFRESH_TOKEN_URL_OVERRIDE) is configured and reachable, or renew the \
+         login on the node that owns it. Otherwise run `codex login` here. Then retry \
+         the turn."
+    ))
+}
+
 fn normalize_codex_stderr_logs(
     msg_store: Arc<MsgStore>,
     entry_index_provider: EntryIndexProvider,
@@ -2419,15 +2449,20 @@ pub fn normalize_logs(
                     message,
                     codex_error_info,
                 }) => {
+                    let (error_type, content) = match refresh_failure_setup_message(&message) {
+                        Some(guidance) => (NormalizedEntryError::SetupRequired, guidance),
+                        None => (
+                            NormalizedEntryError::Other,
+                            format!("Error: {message} {codex_error_info:?}"),
+                        ),
+                    };
                     add_normalized_entry(
                         &msg_store,
                         &entry_index,
                         NormalizedEntry {
                             timestamp: None,
-                            entry_type: NormalizedEntryType::ErrorMessage {
-                                error_type: NormalizedEntryError::Other,
-                            },
-                            content: format!("Error: {message} {codex_error_info:?}"),
+                            entry_type: NormalizedEntryType::ErrorMessage { error_type },
+                            content,
                             metadata: None,
                         },
                     );
@@ -2899,6 +2934,42 @@ mod tests {
     use crate::logs::{
         ActionType, NormalizedEntryType, utils::patch::extract_normalized_entry_from_patch,
     };
+
+    #[test]
+    fn refresh_failures_become_actionable_setup_errors() {
+        let blank = "Failed to refresh token: 400 Bad Request: Invalid 'refresh_token': empty string. Expected a string with minimum length 1, but got an empty string instead.";
+        let guidance = refresh_failure_setup_message(blank).expect("blank-token failure");
+        assert!(
+            guidance.starts_with("Codex could not renew its sign-in: Failed to refresh token: 400")
+        );
+        assert!(guidance.contains("CODEX_REFRESH_TOKEN_URL_OVERRIDE"));
+        assert!(guidance.contains("codex login"));
+
+        let broker = "Failed to refresh token: 503 Service Unavailable: Could not fetch the current Codex credential from think2.";
+        assert!(
+            refresh_failure_setup_message(broker)
+                .unwrap()
+                .contains("from think2")
+        );
+
+        let reused = "Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.";
+        assert!(refresh_failure_setup_message(reused).is_some());
+    }
+
+    #[test]
+    fn other_errors_are_not_reclassified() {
+        for message in [
+            "stream disconnected before completion",
+            "unexpected status 401 Unauthorized: Could not parse your authentication token.",
+            "Quota exceeded. Check your plan and billing details.",
+            "",
+        ] {
+            assert!(
+                refresh_failure_setup_message(message).is_none(),
+                "{message}"
+            );
+        }
+    }
 
     fn latest_normalized_entries(msg_store: &MsgStore) -> Vec<NormalizedEntry> {
         let mut entries = BTreeMap::new();

@@ -4,6 +4,10 @@
 
 // If you are an AI, and you absolutely have to edit this file, please confirm with the user first.
 
+export type WorkspaceCreationPhase = "repositories" | "context" | "placement" | "worktrees" | "execution" | "finalizing";
+
+export type WorkspaceCreationProgress = { workspace_id: string, status: WorkspaceCreationStatus, phase: WorkspaceCreationPhase | null, updated_at: string | null, };
+
 export type Repo = { id: string, path: string, name: string, display_name: string, setup_script: string | null, cleanup_script: string | null, archive_script: string | null, copy_files: string | null, parallel_setup_script: boolean, dev_server_script: string | null, default_target_branch: string | null, default_working_dir: string | null, created_at: Date, updated_at: Date, };
 
 export type Project = { id: string, name: string, default_agent_working_dir: string | null, remote_project_id: string | null, created_at: Date, updated_at: Date, };
@@ -56,11 +60,11 @@ export type BrowserSessionLiveState = { session_id: string, workspace_id: string
 
 export type MouseButton = "left" | "middle" | "right";
 
-export type BrowserAction = { "type": "navigate", url: string, } | { "type": "back" } | { "type": "forward" } | { "type": "reload" } | { "type": "click", x: number, y: number, button: MouseButton | null, } | { "type": "mouse_move", x: number, y: number, } | { "type": "type", text: string, } | { "type": "key", key: string, modifiers: Array<string> | null, } | { "type": "set_viewport", width: number, height: number, } | { "type": "evaluate", expression: string, };
+export type BrowserAction = { "type": "navigate", url: string, } | { "type": "back" } | { "type": "forward" } | { "type": "reload" } | { "type": "click", x: number, y: number, button: MouseButton | null, } | { "type": "mouse_move", x: number, y: number, } | { "type": "type", text: string, } | { "type": "copy_selection" } | { "type": "key", key: string, modifiers: Array<string> | null, } | { "type": "set_viewport", width: number, height: number, } | { "type": "evaluate", expression: string, };
 
 export type BrowserActionResult = { command_id: string, generation: number, 
 /**
- * Present for Evaluate.
+ * Present for Evaluate and CopySelection.
  */
 value: JsonValue | null, current_url: string | null, };
 
@@ -69,6 +73,14 @@ export type BrowserPageInfo = { url: string | null, title: string | null, consol
 export type BrowserSessionError = { "code": "CONTROL_CONFLICT", controller: BrowserController, generation: number, } | { "code": "STALE_GENERATION", controller: BrowserController, generation: number, } | { "code": "CONTROL_LOST", controller: BrowserController, generation: number, } | { "code": "NO_RUNNING_EXECUTION" } | { "code": "SESSION_CLOSED" } | { "code": "NOT_FOUND" } | { "code": "BROWSER_UNAVAILABLE", message: string, } | { "code": "CAPABILITY_DENIED", capability: string, } | { "code": "DRIVER_ERROR", message: string, } | { "code": "TIMEOUT" } | { "code": "STORAGE_ERROR", message: string, } | { "code": "EXECUTION_NOT_IN_WORKSPACE" };
 
 export type BrowserSessionWithState = { session: BrowserSession, live: BrowserSessionLiveState | null, };
+
+export type ExecutionProcessLogSnapshot = { entries: Array<PatchType>, 
+/**
+ * True only when `entries` is settled. False while the process still has
+ * a live log store or is running, or when the settled source ended early:
+ * the caller must not treat those entries as the whole turn.
+ */
+complete: boolean, };
 
 export type BrowserSessionListQuery = { workspace_id: string, include_closed: boolean, };
 
@@ -119,7 +131,7 @@ project_id: string,
  */
 parent_issue_id: string | null, };
 
-export type PreviewSettingsData = { url: string, screen_size: string | null, responsive_width: number | null, responsive_height: number | null, };
+export type PreviewSettingsData = { url: string, current_route: string | null, screen_size: string | null, responsive_width: number | null, responsive_height: number | null, };
 
 export type WorkspaceNotesData = { content: string, };
 
@@ -131,7 +143,13 @@ export type WorkspaceSortByData = "updated_at" | "created_at";
 
 export type WorkspaceSortOrderData = "asc" | "desc";
 
-export type WorkspaceFilterStateData = { project_ids: Array<string>, pr_filter: WorkspacePrFilterData, };
+export type WorkspaceFilterStateData = { project_ids: Array<string>, pr_filter: WorkspacePrFilterData, 
+/**
+ * Issue statuses whose workspaces are hidden, stored by normalized
+ * (trimmed, lower-cased) name since status ids are per-project and this
+ * preference is global. May include the `__no_issue__` sentinel.
+ */
+hidden_issue_status_names: Array<string>, };
 
 export type WorkspaceSortStateData = { sort_by: WorkspaceSortByData, sort_order: WorkspaceSortOrderData, };
 
@@ -307,7 +325,26 @@ total_busy_percent: number | null,
  * wholesale, never patched per element, so a core count change cannot
  * misalign it.
  */
-per_core_busy: Array<CoreBusy> | null, load_1m: number | null, load_5m: number | null, load_15m: number | null, frequency_mhz: number | null, temperature_celsius: number | null, };
+per_core_busy: Array<CoreBusy> | null, load_1m: number | null, load_5m: number | null, load_15m: number | null, frequency_mhz: number | null, temperature_celsius: number | null, 
+/**
+ * Processes in uninterruptible sleep (state `D`), counted from the
+ * `/proc/[pid]/stat` walk. `None` when the process table is unreadable.
+ *
+ * Counted directly rather than read from `/proc/stat`'s `procs_blocked`,
+ * which is only `nr_iowait`: NFS RPC waits put tasks in D state and raise
+ * the load without counting as I/O waiters, and without showing up in
+ * `/proc/pressure/io` — a host can sit at load 40 with both near zero.
+ * Defaulted so samples from older workers still deserialize.
+ */
+uninterruptible_tasks: number | null, 
+/**
+ * `/proc/pressure/io` "some" 60-second average, percent of wall time.
+ */
+io_pressure_some_avg60: number | null, 
+/**
+ * `/proc/pressure/io` "full" 60-second average, percent of wall time.
+ */
+io_pressure_full_avg60: number | null, };
 
 export type CoreBusy = { 
 /**
@@ -333,6 +370,8 @@ export type FilesystemSample = { mount_point: string, device: string, fs_type: s
  * about the one filesystem this panel most exists to watch.
  */
 total_bytes: bigint | null, used_bytes: bigint | null, available_bytes: bigint | null, };
+
+export type DiskAlertThresholds = { warning_free_percent: number, warning_free_bytes: bigint, critical_free_percent: number, critical_free_bytes: bigint, };
 
 export type NetworkSample = { interface: string, rx_bytes_total: bigint, tx_bytes_total: bigint, 
 /**
@@ -457,7 +496,7 @@ nodes: { [key in string]?: MetricsNode }, generated_at: string,
  * Served rather than hardcoded on the client, so the sparkline x-axis
  * stays correct if the cadence ever changes.
  */
-sample_interval_ms: bigint, };
+sample_interval_ms: bigint, disk_alert_thresholds: DiskAlertThresholds, };
 
 export type Session = { id: string, workspace_id: string, name: string | null, executor: string | null, agent_working_dir: string | null, created_at: string, updated_at: string, };
 
@@ -570,7 +609,7 @@ export type UpdateMemberRoleRequest = { role: MemberRole, };
 
 export type UpdateMemberRoleResponse = { user_id: string, role: MemberRole, };
 
-export type OrganizationEnvVar = { id: string, organization_id: string, name: string, created_at: string, updated_at: string, };
+export type OrganizationEnvVar = { id: string, organization_id: string, name: string, created_at: string, updated_at: string, reference?: string, };
 
 export type ListOrganizationEnvVarsResponse = { env_vars: Array<OrganizationEnvVar>, };
 
@@ -734,7 +773,33 @@ export type HostCopy = { path: string, version: string | null, };
 
 export type AppCopy = { version: string, outdated: boolean, installed_at: string, };
 
-export type CliToolStatus = { id: CliToolId, binary_name: string, display_name: string, description: string, catalog_version: string, supported: boolean, unsupported_reason: string | null, host: HostCopy | null, app: AppCopy | null, docs_url: string, login_supported: boolean, auth_state: CliToolAuthState, auth_message: string | null, };
+export type AgentToolState = "available" | "missing" | "login_shell_missing" | "login_shell_mismatch" | "runtime_unavailable" | "failed";
+
+export type AgentToolCheck = { state: AgentToolState, 
+/**
+ * `command -v` in a non-login agent shell.
+ */
+path: string | null, 
+/**
+ * `command -v` in a login agent shell.
+ */
+login_path: string | null, 
+/**
+ * First line of the version probe, when it ran and succeeded.
+ */
+version: string | null, 
+/**
+ * Actionable, sanitized reason when `state` is not `available`.
+ */
+message: string | null, };
+
+export type CliToolStatus = { id: CliToolId, binary_name: string, display_name: string, description: string, catalog_version: string, supported: boolean, unsupported_reason: string | null, host: HostCopy | null, app: AppCopy | null, docs_url: string, login_supported: boolean, auth_state: CliToolAuthState, auth_message: string | null, 
+/**
+ * Whether agents on this host can run the tool. Independent of
+ * `auth_state`: a tool can be signed in yet unreachable from agent
+ * shells, or reachable but unable to start.
+ */
+agent: AgentToolCheck, };
 
 export type AwsSsoProfile = { name: string, sso_start_url: string, sso_region: string, sso_account_id: string, sso_role_name: string, region: string | null, output: string | null, };
 
@@ -773,6 +838,47 @@ export type AwsProfileImportCandidate = { name: string, sso_account_id: string, 
 export type AwsProfileImportRequest = { session_name: string, region: string, output: string | null, profiles: Array<AwsProfileImportCandidate>, };
 
 export type AwsProfileImportResult = { created: Array<string>, updated: Array<string>, };
+
+export type ReauthKind = "aws_sso" | "cli_tool" | "sgsc";
+
+export type ReauthAuthState = "authenticated" | "unauthenticated" | "unknown" | "not_configured";
+
+export type ReauthRunOutcome = "running" | "succeeded" | "failed" | "verification_failed" | "refused";
+
+export type ReauthTrigger = "manual" | "agent" | "sweep";
+
+export type ReauthRun = { started_at: string, finished_at: string | null, outcome: ReauthRunOutcome, trigger: ReauthTrigger, 
+/**
+ * Named error or verification note, verbatim. Never holds a secret.
+ */
+message: string | null, 
+/**
+ * Redacted step log.
+ */
+transcript: Array<string>, 
+/**
+ * True in a response when the call joined a run already in progress.
+ */
+already_running: boolean, };
+
+export type ReauthTargetStatus = { id: string, kind: ReauthKind, label: string, 
+/**
+ * Whether the automatic sweep repairs this target.
+ */
+swept: boolean, auth_state: ReauthAuthState, auth_message: string | null, 
+/**
+ * Refused earlier: agents and the sweep will not retry until an
+ * operator re-runs it from Settings.
+ */
+refused: boolean, last_run: ReauthRun | null, };
+
+export type ReauthOverview = { 
+/**
+ * Sweep period, or `None` when the sweep is off.
+ */
+sweep_interval_secs: number | null, targets: Array<ReauthTargetStatus>, };
+
+export type ReauthRunReport = { id: string, run: ReauthRun, };
 
 export type CheckEditorAvailabilityQuery = { editor_type: EditorType, };
 
@@ -888,6 +994,34 @@ script: string,
  */
 working_dir: string | null, };
 
+export type StartPollerError = { "type": "missing_stop_rule" } | { "type": "empty_stop_command" } | { "type": "invalid_timeout" } | { "type": "empty_command" } | { "type": "invalid_interval" } | { "type": "invalid_working_dir" } | { "type": "too_many_helpers" };
+
+export type StartPollerRequest = { 
+/**
+ * Command to run on each tick.
+ */
+command: string, 
+/**
+ * Seconds between ticks.
+ */
+interval_secs: number, 
+/**
+ * Completion predicate: exit zero stops before the next tick.
+ */
+stop_command: string | null, 
+/**
+ * Positive total lifetime in seconds; required unless stop_command is set.
+ */
+timeout_secs: number | null, 
+/**
+ * Optional path to run the command in, relative to the workspace root.
+ */
+working_dir: string | null, };
+
+export type PollerSummary = { id: string, status: ExecutionProcessStatus, command: string, interval_secs: number, stop_command: string | null, timeout_secs: number | null, working_dir: string | null, started_at: string, };
+
+export type ListPollersResponse = { pollers: Array<PollerSummary>, count: number, };
+
 export type AssociateWorkspaceAttachmentsRequest = { attachment_ids: Array<string>, };
 
 export type ImportIssueAttachmentsRequest = { issue_id: string, };
@@ -976,6 +1110,10 @@ latest_process_status: ExecutionProcessStatus | null,
  */
 has_running_dev_server: boolean, 
 /**
+ * Is a periodic poller loop currently running (including between ticks)?
+ */
+has_running_poller: boolean, 
+/**
  * Does this workspace have unseen coding agent turns?
  */
 has_unseen_turns: boolean, 
@@ -1008,7 +1146,7 @@ export type Config = { config_version: string, theme: ThemeMode, executor_profil
  * restart. Off by default because it spawns agents (and spends
  * tokens) at boot without a human in the loop.
  */
-resume_interrupted_on_startup: boolean, };
+resume_interrupted_on_startup: boolean, auto_error_remediation: AutoErrorRemediationConfig, new_issue_pipelines: NewIssuePipelineDefaults, };
 
 export type NotificationConfig = { sound_enabled: boolean, push_enabled: boolean, sound_file: SoundFile, };
 
@@ -1029,6 +1167,59 @@ export type UiLanguage = "BROWSER" | "EN" | "FR" | "JA" | "ES" | "KO" | "ZH_HANS
 export type ShowcaseState = { seen_features: Array<string>, };
 
 export type SendMessageShortcut = "ModifierEnter" | "Enter";
+
+export type AutoErrorRemediationConfig = { enabled: boolean, 
+/**
+ * Remote project that receives the issue. `None` uses the failing
+ * workspace's own linked project (and skips when it has none).
+ */
+project_id: string | null, 
+/**
+ * Repositories for the remediation workspace. Empty uses the failing
+ * workspace's repositories.
+ */
+repo_ids: Array<string>, executor: BaseCodingAgent, 
+/**
+ * Executor profile variant. Falls back to the default variant when the
+ * named variant is not defined.
+ */
+variant: string | null, model_id: string | null, 
+/**
+ * Pipelines attached to the issue, each with its default stages.
+ */
+pipeline_ids: Array<string>, 
+/**
+ * Stage ids that make the run merge to the base branch. When none of
+ * them is already a default stage, the first one present in the selected
+ * pipelines is enabled, so an unattended run always ends in a merge.
+ */
+merge_stage_ids: Array<string>, 
+/**
+ * Global cap on launches per trailing hour; 0 disables launching.
+ */
+max_per_hour: number, };
+
+export type NewIssuePipelineDefaults = { 
+/**
+ * Machine-wide default pipeline ids, in compose order.
+ */
+pipeline_ids: Array<string>, 
+/**
+ * Organization id → pipeline ids. A present key overrides the machine
+ * default; an empty list means "no pipelines".
+ */
+organizations: { [key in string]?: Array<string> }, 
+/**
+ * Project id → pipeline ids. Overrides the organization and machine
+ * defaults; an empty list means "no pipelines".
+ */
+projects: { [key in string]?: Array<string> }, };
+
+export type GitHubOwnerToken = { id: string, owner: string, reference?: string, created_at: string, updated_at: string, };
+
+export type CreateGitHubOwnerTokenRequest = { owner: string, value: string, };
+
+export type UpdateGitHubOwnerTokenRequest = { value: string, };
 
 export type PipelineStep = { 
 /**
@@ -1076,6 +1267,10 @@ export type PipelineParseError = { message: string, line: number | null, column:
 export type PipelineValidation = { valid: boolean, error: PipelineParseError | null, };
 
 export type PipelineFileStatus = { id: string, name: string, stage_count: number | null, valid: boolean, error: PipelineParseError | null, };
+
+export type NewIssuePipelineSource = "project" | "organization" | "machine";
+
+export type NewIssuePipelineDefaultsResponse = { pipeline_ids: Array<string>, source: NewIssuePipelineSource, };
 
 export type PipelineRawBody = { content: string, };
 
@@ -1226,11 +1421,35 @@ export type McpRefreshErrorCategory = "executable_unavailable" | "process_launch
 
 export type McpRefreshError = { category: McpRefreshErrorCategory, message: string, remediation: string, retryable: boolean, };
 
-export type McpServerRefreshStatus = "ready" | "failed_retained" | "failed_unavailable" | "removed" | "disabled";
+export type McpDiscoveryObservation = { code: McpRefreshErrorCategory, observed_at: string, };
 
-export type McpServerRefreshSnapshot = { server_id: string, status: McpServerRefreshStatus, tool_count: number | null, resource_count: number | null, prompt_count: number | null, restart_occurred: boolean | null, error: McpRefreshError | null, };
+export type McpServerRefreshStatus = "connecting" | "ready" | "connected_no_tools" | "failed_retained" | "failed_unavailable" | "not_registered" | "removed" | "disabled";
 
-export type McpRefreshResult = { status: McpRefreshStatus, retryable: boolean, generation: bigint, requested_at: string, last_successful_refresh_at: string | null, servers: Array<McpServerRefreshSnapshot>, error: McpRefreshError | null, };
+export type McpServerRefreshSnapshot = { server_id: string, status: McpServerRefreshStatus, tool_count: number | null, 
+/**
+ * Sorted tool identifiers from the executor-owned, post-start inventory.
+ */
+tool_names: Array<string> | null, 
+/**
+ * SHA-256 of sorted tool identifiers and their input/output schemas.
+ */
+tool_schema_fingerprint: string | null, resource_count: number | null, prompt_count: number | null, restart_occurred: boolean | null, discovery_attempts: number, observed_errors: Array<McpDiscoveryObservation>, first_observed_at: string | null, last_observed_at: string | null, terminal_at: string | null, error: McpRefreshError | null, };
+
+export type McpRefreshResult = { status: McpRefreshStatus, retryable: boolean, generation: bigint, requested_at: string, last_successful_refresh_at: string | null, 
+/**
+ * Settings-owned server identifiers expected for the selected executor.
+ * This is definition metadata only; definitions, headers, and env values
+ * must never cross this status boundary.
+ */
+configured_server_ids: Array<string>, servers: Array<McpServerRefreshSnapshot>, error: McpRefreshError | null, };
+
+export type McpRecoveryScope = "session" | "workspace";
+
+export type McpRecoveryStatus = "accepted" | "in_progress" | "completed" | "partially_completed" | "failed";
+
+export type McpRestartDisposition = "queued" | "started" | "already_in_progress";
+
+export type McpRecoveryResult = { generation: bigint, scope: McpRecoveryScope, workspace_id: string, session_id: string | null, status: McpRecoveryStatus, disposition: McpRestartDisposition, requested_at: string, completed_at: string | null, executor: string, servers: Array<McpServerRefreshSnapshot>, error: McpRefreshError | null, };
 
 export type ExecutorActionType = { "type": "CodingAgentInitialRequest" } & CodingAgentInitialRequest | { "type": "CodingAgentFollowUpRequest" } & CodingAgentFollowUpRequest | { "type": "ScriptRequest" } & ScriptRequest | { "type": "ReviewRequest" } & ReviewRequest;
 
@@ -1260,6 +1479,25 @@ reasoning_id?: string | null,
  */
 permission_policy?: PermissionPolicy | null, };
 
+export type PollerSpec = { 
+/**
+ * The command run on each tick, as supplied by the agent.
+ */
+command: string, 
+/**
+ * Seconds between ticks. Validated to
+ * `[MIN_POLLER_INTERVAL_SECS, MAX_POLLER_INTERVAL_SECS]`; zero is rejected.
+ */
+interval_secs: number, 
+/**
+ * Completion predicate, checked before each tick. Exit zero stops polling.
+ */
+stop_command: string | null, 
+/**
+ * Total lifetime, including blocked commands and interval waits.
+ */
+timeout_secs: number | null, };
+
 export type ScriptContext = "SetupScript" | "CleanupScript" | "ArchiveScript" | "DevServer" | "ToolInstallScript" | "BackgroundHelper";
 
 export type ScriptRequest = { script: string, language: ScriptRequestLanguage, context: ScriptContext, 
@@ -1267,7 +1505,14 @@ export type ScriptRequest = { script: string, language: ScriptRequestLanguage, c
  * Optional relative path to execute the script in (relative to container_ref).
  * If None, uses the container_ref directory directly.
  */
-working_dir: string | null, };
+working_dir: string | null, 
+/**
+ * Set when this script is a generated poller loop; `None` for every other
+ * script. Absent from rows written before pollers existed, which is why it
+ * is `#[serde(default)]` — `executor_action` is JSON in a TEXT column, so
+ * this stays migration-free.
+ */
+poller: PollerSpec | null, };
 
 export type ScriptRequestLanguage = "Bash";
 
@@ -1313,7 +1558,16 @@ models?: Array<string>,
  */
 reasoning_by_model?: { [key in string]?: string }, };
 
-export type ExecutorProfile = { recently_used_models?: ExecutorRecentModels | null, } & ({ [key in string]?: { "CLAUDE_CODE": ClaudeCode } | { "AMP": Amp } | { "GEMINI": Gemini } | { "CODEX": Codex } | { "OPENCODE": Opencode } | { "CURSOR_AGENT": CursorAgent } | { "QWEN_CODE": QwenCode } | { "COPILOT": Copilot } | { "DROID": Droid } | { "GROK": Grok } });
+export type ExecutorProfile = { recently_used_models?: ExecutorRecentModels | null, 
+/**
+ * Model keys (`provider/model` or `model`) hidden from the model picker.
+ */
+disabled_models?: Array<string>, 
+/**
+ * Hidden from agent pickers. The agent stays configurable in Settings
+ * and can still run; this is a display preference, not access control.
+ */
+disabled?: boolean, } & ({ [key in string]?: { "CLAUDE_CODE": ClaudeCode } | { "AMP": Amp } | { "GEMINI": Gemini } | { "CODEX": Codex } | { "OPENCODE": Opencode } | { "CURSOR_AGENT": CursorAgent } | { "QWEN_CODE": QwenCode } | { "COPILOT": Copilot } | { "DROID": Droid } | { "GROK": Grok } });
 
 export type ExecutorConfigs = { executors: { [key in BaseCodingAgent]?: ExecutorProfile }, };
 
@@ -1329,7 +1583,7 @@ export type Grok = { append_prompt: AppendPrompt, model?: string | null, yolo?: 
 
 export type Amp = { append_prompt: AppendPrompt, dangerously_allow_all?: boolean | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
 
-export type Codex = { append_prompt: AppendPrompt, sandbox?: SandboxMode | null, ask_for_approval?: AskForApproval | null, oss?: boolean | null, model?: string | null, model_reasoning_effort?: ReasoningEffort | null, model_reasoning_summary?: ReasoningSummary | null, model_reasoning_summary_format?: ReasoningSummaryFormat | null, profile?: string | null, base_instructions?: string | null, include_apply_patch_tool?: boolean | null, model_provider?: string | null, compact_prompt?: string | null, developer_instructions?: string | null, plan: boolean, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
+export type Codex = { append_prompt: AppendPrompt, sandbox?: SandboxMode | null, ask_for_approval?: AskForApproval | null, oss?: boolean | null, model?: string | null, model_reasoning_effort?: ReasoningEffort | null, model_reasoning_summary?: ReasoningSummary | null, model_reasoning_summary_format?: ReasoningSummaryFormat | null, profile?: string | null, base_instructions?: string | null, model_provider?: string | null, compact_prompt?: string | null, developer_instructions?: string | null, plan: boolean, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
 
 export type SandboxMode = "auto" | "read-only" | "workspace-write" | "danger-full-access";
 
@@ -1503,7 +1757,13 @@ agents: Array<AgentInfo>,
 /**
  * Supported permission policies
  */
-permissions: Array<PermissionPolicy>, };
+permissions: Array<PermissionPolicy>, 
+/**
+ * Model IDs the executor still accepts but does not advertise (e.g. floating
+ * aliases), mapped to the catalog model they currently run. Lets saved
+ * selections resolve to a versioned entry with its reasoning options.
+ */
+model_aliases?: { [key in string]?: string }, };
 
 export type ExecutorDiscoveredOptions = { model_selector: ModelSelectorConfig, slash_commands: Array<SlashCommandDescription>, loading_models: boolean, loading_agents: boolean, loading_slash_commands: boolean, error: string | null, };
 

@@ -574,6 +574,19 @@
     },
     "session": {
       "forceCloseConfirm": "Un agente controla esta sesión. ¿Forzar el cierre?"
+    },
+    "textInput": {
+      "keyboard": "Teclado",
+      "selectAll": "Seleccionar todo",
+      "copy": "Copiar",
+      "paste": "Pegar",
+      "close": "Cerrar",
+      "failed": "No se pudo enviar la entrada. Inténtalo de nuevo.",
+      "tooLong": "El texto es demasiado largo (máximo 65.536 caracteres).",
+      "noSelection": "Primero selecciona texto en el navegador remoto.",
+      "copied": "Copiado al portapapeles.",
+      "copyManually": "Selecciona y copia este texto en tu dispositivo.",
+      "pasteManually": "Pega el texto aquí y pulsa Pegar."
     }
   }
 }

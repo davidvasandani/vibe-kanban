@@ -40,12 +40,12 @@ export async function requestLocalApiViaRelay(
   requestInit: LocalApiRequestOptions = {},
 ): Promise<Response> {
   const pathAndQuery = toPathAndQuery(pathOrUrl);
-  const {
-    relayHostId,
-    hostId: _hostId,
-    hostScope: _hostScope,
-    ...relayRequestInit
-  } = requestInit;
+  const { relayHostId } = requestInit;
+  // Routing fields pick the host; they are not part of the request itself.
+  const relayRequestInit: LocalApiRequestOptions = { ...requestInit };
+  delete relayRequestInit.relayHostId;
+  delete relayRequestInit.hostId;
+  delete relayRequestInit.hostScope;
 
   if (!shouldRelayApiPath(pathAndQuery)) {
     return fetch(pathOrUrl, relayRequestInit);

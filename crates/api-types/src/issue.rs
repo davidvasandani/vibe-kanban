@@ -77,6 +77,32 @@ pub struct CreateIssueRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct LowDiskFilesystemObservation {
+    pub device: String,
+    pub fs_type: String,
+    pub mount_point: String,
+    pub total_bytes: u64,
+    pub used_bytes: u64,
+    pub available_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct ResolveLowDiskIssueRequest {
+    pub project_id: Uuid,
+    pub node_id: Uuid,
+    pub hostname: String,
+    pub observed_at: DateTime<Utc>,
+    pub filesystems: Vec<LowDiskFilesystemObservation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct ResolveLowDiskIssueResponse {
+    pub issue: Issue,
+    pub txid: i64,
+    pub created: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct UpdateIssueRequest {
     #[serde(
         default,

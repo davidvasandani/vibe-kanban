@@ -1,21 +1,48 @@
 use std::collections::HashMap;
 
 use axum::{Json, extract::State, response::Json as ResponseJson};
+use chrono::{DateTime, Duration, Utc};
 use db::models::{
     coding_agent_turn::CodingAgentTurn,
-    execution_process::{ExecutionProcess, ExecutionProcessStatus},
+    execution_process::{ExecutionProcess, ExecutionProcessStatus, LatestProcessInfo},
     merge::MergeStatus,
     pull_request::PullRequest,
     worker_node::WorkerNode,
     workspace::{Workspace, WorkspacePlacement, WorkspacePlacementState},
 };
 use deployment::Deployment;
+use futures_util::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
+use services::services::workspace_diff_stats::{DiffStatsFreshness, WORKSPACE_DIFF_STATS};
 use ts_rs::TS;
 use utils::response::ApiResponse;
 use uuid::Uuid;
 
 use crate::{DeploymentImpl, error::ApiError};
+
+/// Maximum number of concurrent `git status --porcelain` / diff-stat jobs.
+/// Keeps I/O load bounded when many active workspaces are polled at once.
+const MAX_CONCURRENT_GIT_STATUS: usize = 4;
+
+/// Request-wide budget for the diff-stat phase. Every other summary field is a
+/// cheap bulk read and must not wait on NFS-bound git work: a workspace whose
+/// fresh stats are not ready by then reports its last known stats (or none),
+/// and its computation keeps running and publishes for the next poll.
+const SUMMARY_DIFF_STATS_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Time left before `deadline`, zero once it has passed.
+fn remaining_budget(
+    deadline: tokio::time::Instant,
+    now: tokio::time::Instant,
+) -> std::time::Duration {
+    deadline.saturating_duration_since(now)
+}
+
+/// Skip bulk `git status` for workspaces whose last real activity is older than this.
+/// Filesystem mtime is not used: the worktree poller keeps those timestamps fresh.
+fn git_status_idle_after() -> Duration {
+    Duration::days(14)
+}
 
 /// Request for fetching workspace summaries
 #[derive(Debug, Deserialize, Serialize, TS)]
@@ -44,6 +71,8 @@ pub struct WorkspaceSummary {
     pub latest_process_status: Option<ExecutionProcessStatus>,
     /// Is a dev server currently running?
     pub has_running_dev_server: bool,
+    /// Is a periodic poller loop currently running (including between ticks)?
+    pub has_running_poller: bool,
     /// Does this workspace have unseen coding agent turns?
     pub has_unseen_turns: bool,
     /// PR status for this workspace (if any PR exists)
@@ -103,6 +132,36 @@ pub struct DiffStats {
     pub lines_removed: usize,
 }
 
+/// Last time someone actually used this workspace.
+///
+/// Prefer the latest execution-process completion time (`LatestProcessInfo.completed_at`
+/// from `ExecutionProcess::find_latest_for_workspaces`). A still-running process is
+/// treated as current activity. If there is no process, fall back to
+/// `workspace.updated_at` (touched on editor open / workspace access — not worktree mtime).
+fn last_workspace_activity(
+    workspace_updated_at: DateTime<Utc>,
+    latest: Option<&LatestProcessInfo>,
+    now: DateTime<Utc>,
+) -> DateTime<Utc> {
+    match latest {
+        Some(info) if info.status == ExecutionProcessStatus::Running => now,
+        Some(info) => info.completed_at.unwrap_or(workspace_updated_at),
+        None => workspace_updated_at,
+    }
+}
+
+/// Staleness bound for a workspace's bulk diff stats (see `DiffStatsFreshness`).
+fn diff_stats_freshness(archived: bool, latest: Option<&LatestProcessInfo>) -> DiffStatsFreshness {
+    DiffStatsFreshness::for_workspace(
+        archived,
+        latest.is_some_and(|info| info.status == ExecutionProcessStatus::Running),
+    )
+}
+
+fn should_skip_idle_git_status(last_activity: DateTime<Utc>, now: DateTime<Utc>) -> bool {
+    now.signed_duration_since(last_activity) > git_status_idle_after()
+}
+
 /// Fetch summary information for workspaces filtered by archived status.
 /// This endpoint returns data that cannot be efficiently included in the streaming endpoint.
 #[axum::debug_handler]
@@ -133,6 +192,9 @@ pub async fn get_workspace_summaries(
     let dev_server_workspaces =
         ExecutionProcess::find_workspaces_with_running_dev_servers(pool, archived).await?;
 
+    let poller_workspaces =
+        ExecutionProcess::find_workspaces_with_running_pollers(pool, archived).await?;
+
     // 4. Check pending approvals for running processes
     let running_ep_ids: Vec<_> = latest_processes
         .values()
@@ -162,17 +224,50 @@ pub async fn get_workspace_summaries(
         .map(|worker| (worker.id, worker.hostname))
         .collect();
 
-    // 8. Compute diff stats for each workspace (in parallel)
+    // 8. Compute diff stats for each workspace (bounded concurrency), within
+    // SUMMARY_DIFF_STATS_BUDGET for the whole phase.
+    // Skip workspaces idle > 14 days so the sidebar poll does not `git status`
+    // every stale worktree. On-demand single-workspace status is unchanged.
+    // Stats come from the process-wide single-flight cache, so every client's
+    // poll shares one computation per workspace per freshness window and git
+    // work is bounded across all requests, not per request.
+    let now = Utc::now();
+    let diff_deadline = tokio::time::Instant::now() + SUMMARY_DIFF_STATS_BUDGET;
     let diff_futures: Vec<_> = workspaces
         .iter()
         .map(|ws| {
             let workspace = ws.clone();
             let deployment = deployment.clone();
+            let latest = latest_processes.get(&ws.id);
+            let skip_idle = should_skip_idle_git_status(
+                last_workspace_activity(ws.updated_at, latest, now),
+                now,
+            );
+            let max_age = diff_stats_freshness(ws.archived, latest).max_age();
             async move {
-                if workspace.container_ref.is_some() {
-                    compute_workspace_diff_stats(&deployment, &workspace)
+                if workspace.container_ref.is_some() && !skip_idle {
+                    let workspace_id = workspace.id;
+                    let pool = deployment.db().pool.clone();
+                    let git = deployment.git().clone();
+                    let budget = remaining_budget(diff_deadline, tokio::time::Instant::now());
+                    WORKSPACE_DIFF_STATS
+                        .get_within(workspace_id, max_age, budget, async move {
+                            services::services::diff_stream::compute_diff_stats_outcome(
+                                &pool, &git, &workspace,
+                            )
+                            .await
+                        })
                         .await
-                        .map(|stats| (workspace.id, stats))
+                        .map(|stats| {
+                            (
+                                workspace_id,
+                                DiffStats {
+                                    files_changed: stats.files_changed,
+                                    lines_added: stats.lines_added,
+                                    lines_removed: stats.lines_removed,
+                                },
+                            )
+                        })
                 } else {
                     None
                 }
@@ -180,9 +275,11 @@ pub async fn get_workspace_summaries(
         })
         .collect();
 
-    let diff_results: Vec<Option<(Uuid, DiffStats)>> =
-        futures_util::future::join_all(diff_futures).await;
-    let diff_stats: HashMap<Uuid, DiffStats> = diff_results.into_iter().flatten().collect();
+    let diff_stats: HashMap<Uuid, DiffStats> = stream::iter(diff_futures)
+        .buffer_unordered(MAX_CONCURRENT_GIT_STATUS)
+        .filter_map(|opt| async move { opt })
+        .collect()
+        .await;
 
     // 9. Assemble response
     let summaries: Vec<WorkspaceSummary> = workspaces
@@ -213,6 +310,7 @@ pub async fn get_workspace_summaries(
                 latest_process_completed_at: latest.and_then(|p| p.completed_at),
                 latest_process_status: latest.map(|p| p.status.clone()),
                 has_running_dev_server: dev_server_workspaces.contains(&id),
+                has_running_poller: poller_workspaces.contains(&id),
                 has_unseen_turns: unseen_workspaces.contains(&id),
                 pr_status: pr_statuses.get(&id).map(|pr| pr.pr_status.clone()),
                 pr_number: pr_statuses.get(&id).map(|pr| pr.pr_number),
@@ -237,12 +335,19 @@ pub async fn get_workspace_summaries(
 }
 
 #[cfg(test)]
-#[allow(clippy::items_after_test_module)]
 mod tests {
-    use db::models::workspace::{WorkspacePlacement, WorkspacePlacementState};
+    use chrono::{Duration, TimeZone, Utc};
+    use db::models::{
+        execution_process::{ExecutionProcessStatus, LatestProcessInfo},
+        workspace::{WorkspacePlacement, WorkspacePlacementState},
+    };
+    use services::services::workspace_diff_stats::DiffStatsFreshness;
     use uuid::Uuid;
 
-    use super::{WorkspaceAffinityKind, affinity_kind};
+    use super::{
+        WorkspaceAffinityKind, affinity_kind, diff_stats_freshness, last_workspace_activity,
+        remaining_budget, should_skip_idle_git_status,
+    };
 
     fn placement(
         state: WorkspacePlacementState,
@@ -258,6 +363,58 @@ mod tests {
             requested_worker_node_id,
             placement_constraints: None,
         }
+    }
+
+    fn latest_process(
+        status: ExecutionProcessStatus,
+        completed_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> LatestProcessInfo {
+        LatestProcessInfo {
+            workspace_id: Uuid::new_v4(),
+            execution_process_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            status,
+            completed_at,
+        }
+    }
+
+    #[test]
+    fn remaining_budget_saturates_at_zero_after_the_deadline() {
+        let start = tokio::time::Instant::now();
+        let deadline = start + std::time::Duration::from_secs(3);
+
+        assert_eq!(
+            remaining_budget(deadline, start),
+            std::time::Duration::from_secs(3)
+        );
+        assert_eq!(
+            remaining_budget(deadline, start + std::time::Duration::from_secs(2)),
+            std::time::Duration::from_secs(1)
+        );
+        assert_eq!(
+            remaining_budget(deadline, start + std::time::Duration::from_secs(5)),
+            std::time::Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn diff_stats_freshness_follows_archive_and_running_state() {
+        let running = latest_process(ExecutionProcessStatus::Running, None);
+        let done = latest_process(ExecutionProcessStatus::Completed, Some(Utc::now()));
+
+        assert_eq!(
+            diff_stats_freshness(false, Some(&running)),
+            DiffStatsFreshness::Running
+        );
+        assert_eq!(
+            diff_stats_freshness(false, Some(&done)),
+            DiffStatsFreshness::Idle
+        );
+        assert_eq!(diff_stats_freshness(false, None), DiffStatsFreshness::Idle);
+        assert_eq!(
+            diff_stats_freshness(true, Some(&running)),
+            DiffStatsFreshness::Archived
+        );
     }
 
     #[test]
@@ -289,23 +446,51 @@ mod tests {
             WorkspaceAffinityKind::Unassigned
         );
     }
-}
 
-/// Compute diff stats for a workspace.
-pub async fn compute_workspace_diff_stats(
-    deployment: &DeploymentImpl,
-    workspace: &Workspace,
-) -> Option<DiffStats> {
-    let stats = services::services::diff_stream::compute_diff_stats(
-        &deployment.db().pool,
-        deployment.git(),
-        workspace,
-    )
-    .await?;
+    #[test]
+    fn skips_git_status_when_last_process_completed_over_14_days_ago() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 15, 21, 0, 0).unwrap();
+        let completed = now - Duration::days(15);
+        // Even a recently-touched workspace.updated_at is ignored when a process exists.
+        let updated_at = now - Duration::hours(1);
+        let latest = latest_process(ExecutionProcessStatus::Completed, Some(completed));
+        let last = last_workspace_activity(updated_at, Some(&latest), now);
+        assert_eq!(last, completed);
+        assert!(should_skip_idle_git_status(last, now));
+    }
 
-    Some(DiffStats {
-        files_changed: stats.files_changed,
-        lines_added: stats.lines_added,
-        lines_removed: stats.lines_removed,
-    })
+    #[test]
+    fn does_not_skip_git_status_when_last_process_completed_within_14_days() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 15, 21, 0, 0).unwrap();
+        let completed = now - Duration::days(14);
+        let updated_at = now - Duration::days(30);
+        let latest = latest_process(ExecutionProcessStatus::Completed, Some(completed));
+        let last = last_workspace_activity(updated_at, Some(&latest), now);
+        assert!(!should_skip_idle_git_status(last, now));
+    }
+
+    #[test]
+    fn does_not_skip_git_status_while_latest_process_is_running() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 15, 21, 0, 0).unwrap();
+        let updated_at = now - Duration::days(40);
+        let latest = latest_process(ExecutionProcessStatus::Running, None);
+        let last = last_workspace_activity(updated_at, Some(&latest), now);
+        assert_eq!(last, now);
+        assert!(!should_skip_idle_git_status(last, now));
+    }
+
+    #[test]
+    fn falls_back_to_workspace_updated_at_when_no_process() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 15, 21, 0, 0).unwrap();
+        let stale = now - Duration::days(15);
+        let recent = now - Duration::days(2);
+        assert!(should_skip_idle_git_status(
+            last_workspace_activity(stale, None, now),
+            now
+        ));
+        assert!(!should_skip_idle_git_status(
+            last_workspace_activity(recent, None, now),
+            now
+        ));
+    }
 }

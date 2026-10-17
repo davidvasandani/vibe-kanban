@@ -6,6 +6,10 @@ import type {
   ExecutorProfileId,
 } from 'shared/types';
 import { getVariantOptions } from '@/shared/lib/executor';
+import {
+  filterEnabledAgents,
+  isAgentDisabled,
+} from '@/shared/lib/disabledAgents';
 import { usePresetOptions } from '@/shared/hooks/usePresetOptions';
 
 function getProfileKey(
@@ -24,9 +28,37 @@ const OVERRIDE_FIELDS = [
 ] as const;
 
 /**
- * Resolves effective executor.
- * userSelections.executor → scratch → lastUsedConfig → configDefault → first available
+ * Resolves the effective executor and the agent options to offer.
+ * userSelection → scratch → lastUsed → configDefault → first enabled.
+ * Implicit fallbacks (last used, config default) skip disabled agents; an
+ * explicit selection or draft is honoured. The effective agent always stays
+ * in the options so the trigger never names an agent missing from its menu.
  */
+export function resolveEffectiveExecutor(
+  profiles: Record<string, ExecutorProfile> | null,
+  userExecutor: BaseCodingAgent | undefined,
+  scratchExecutor: BaseCodingAgent | undefined,
+  lastUsedExecutor: BaseCodingAgent | undefined,
+  configExecutor: BaseCodingAgent | undefined
+): { effective: BaseCodingAgent | null; options: BaseCodingAgent[] } {
+  const all = Object.keys(profiles ?? {}) as BaseCodingAgent[];
+  const ifEnabled = (agent: BaseCodingAgent | undefined) =>
+    agent && !isAgentDisabled(profiles, agent) ? agent : undefined;
+
+  const effective =
+    userExecutor ??
+    scratchExecutor ??
+    ifEnabled(lastUsedExecutor) ??
+    ifEnabled(configExecutor) ??
+    filterEnabledAgents(all, profiles)[0] ??
+    null;
+
+  return {
+    effective,
+    options: filterEnabledAgents(all, profiles, [effective]),
+  };
+}
+
 function useEffectiveExecutor(
   userSelections: Partial<ExecutorConfig>,
   profiles: Record<string, ExecutorProfile> | null,
@@ -34,29 +66,23 @@ function useEffectiveExecutor(
   lastUsedConfig: ExecutorConfig | null,
   configExecutorProfile: ExecutorProfileId | null | undefined
 ) {
-  const options = useMemo(
-    () => Object.keys(profiles ?? {}) as BaseCodingAgent[],
-    [profiles]
-  );
-
-  const effective = useMemo(
+  return useMemo(
     () =>
-      userSelections.executor ??
-      scratchConfig?.executor ??
-      lastUsedConfig?.executor ??
-      configExecutorProfile?.executor ??
-      options[0] ??
-      null,
+      resolveEffectiveExecutor(
+        profiles,
+        userSelections.executor,
+        scratchConfig?.executor,
+        lastUsedConfig?.executor,
+        configExecutorProfile?.executor
+      ),
     [
+      profiles,
       userSelections.executor,
-      scratchConfig,
-      lastUsedConfig,
-      configExecutorProfile,
-      options,
+      scratchConfig?.executor,
+      lastUsedConfig?.executor,
+      configExecutorProfile?.executor,
     ]
   );
-
-  return { effective, options };
 }
 
 /**

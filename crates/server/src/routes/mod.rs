@@ -1,7 +1,8 @@
 use axum::{Router, extract::connect_info::IntoMakeServiceWithConnectInfo, routing::get};
+use deployment::Deployment;
 use tower_http::{compression::CompressionLayer, validate_request::ValidateRequestHeaderLayer};
 
-use crate::{DeploymentImpl, mcp_gateway, middleware};
+use crate::{DeploymentImpl, mcp_gateway, mcp_oauth, middleware};
 
 pub mod approvals;
 pub mod aws;
@@ -16,6 +17,8 @@ pub mod attachments;
 pub mod events;
 pub mod execution_processes;
 pub mod frontend;
+pub mod github_owner_tokens;
+pub mod global_search;
 pub mod health;
 pub mod host_relay;
 pub mod mcp_auth;
@@ -23,6 +26,7 @@ pub mod oauth;
 pub mod organizations;
 pub mod pipelines;
 pub mod preview;
+pub mod reauth;
 pub mod relay_auth;
 pub mod releases;
 pub mod remote;
@@ -30,6 +34,7 @@ pub mod repo;
 pub mod scratch;
 pub mod search;
 pub mod sessions;
+pub mod skills;
 pub mod speckit;
 pub mod ssh_session;
 pub mod tags;
@@ -41,14 +46,21 @@ pub mod workspaces;
 pub fn router(
     deployment: DeploymentImpl,
 ) -> IntoMakeServiceWithConnectInfo<Router, std::net::SocketAddr> {
+    let mcp_oauth_state = mcp_oauth::McpOAuthState::new(
+        deployment.db().pool.clone(),
+        mcp_oauth::McpOAuthConfig::from_env(),
+    );
+
     let relay_signed_routes = Router::new()
         .route("/health", get(health::health_check))
         .merge(aws::router())
         .merge(cli_tools::router())
+        .merge(reauth::router())
         .merge(config::router())
         .merge(mcp_auth::router())
         .merge(mcp_gateway::management_router())
         .merge(pipelines::router())
+        .merge(skills::router())
         .merge(speckit::router())
         .merge(containers::router(&deployment))
         .merge(workspaces::router(&deployment))
@@ -58,6 +70,7 @@ pub fn router(
         .merge(organizations::router())
         .merge(filesystem::router())
         .merge(repo::router())
+        .merge(github_owner_tokens::router())
         .merge(events::router(&deployment))
         .merge(approvals::router())
         .merge(browser_sessions::router(&deployment))
@@ -65,6 +78,7 @@ pub fn router(
         .merge(workers::worker_router(&deployment))
         .merge(scratch::router(&deployment))
         .merge(search::router(&deployment))
+        .merge(global_search::router())
         .merge(preview::api_router())
         .merge(releases::router())
         .merge(sessions::router(&deployment))
@@ -73,6 +87,10 @@ pub fn router(
         .nest("/remote", remote::router())
         .merge(webrtc::router())
         .nest("/attachments", attachments::routes())
+        .nest_service(
+            "/mcp-oauth",
+            mcp_oauth::api_router().with_state(mcp_oauth_state.clone()),
+        )
         .layer(axum::middleware::from_fn_with_state(
             deployment.clone(),
             middleware::sign_relay_response,
@@ -95,6 +113,7 @@ pub fn router(
 
     Router::new()
         .merge(mcp_gateway::gateway_router().with_state(deployment.clone()))
+        .merge(mcp_oauth::public_router().with_state(mcp_oauth_state))
         .route("/", get(frontend::serve_frontend_root))
         .route("/{*path}", get(frontend::serve_frontend))
         .nest("/api", api_routes)

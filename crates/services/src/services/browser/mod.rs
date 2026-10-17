@@ -1,3 +1,4 @@
+pub mod access_headers;
 pub mod arbiter;
 pub mod cdp;
 pub mod driver;
@@ -48,7 +49,16 @@ pub fn select_driver(config: &BrowserSessionsConfig) -> Arc<dyn BrowserDriver> {
         return Arc::new(driver::MockDriver);
     }
     match cdp::discover_chromium(config.chromium_path.as_deref()) {
-        Some(path) => Arc::new(cdp::CdpDriver::new(path)),
+        Some(path) => {
+            let access = access_headers::AccessHeaders::from_env();
+            if let Some(access) = &access {
+                tracing::info!(
+                    domains = ?access.domains(),
+                    "browser sessions send Cloudflare Access service-token headers"
+                );
+            }
+            Arc::new(cdp::CdpDriver::new(path).with_access_headers(access))
+        }
         None => Arc::new(driver::UnavailableDriver {
             message: "no Chromium/Chrome binary found; set browser.chromium_path or VIBE_BROWSER_CHROMIUM_PATH".to_string(),
         }),

@@ -49,6 +49,7 @@ import {
 import { useDiffViewStore } from '@/shared/stores/useDiffViewStore';
 import { useWorkspaceDiffStore } from '@/shared/stores/useWorkspaceDiffStore';
 import {
+  selectIsLeftSidebarShown,
   useUiPreferencesStore,
   RIGHT_MAIN_PANEL_MODES,
 } from '@/shared/stores/useUiPreferencesStore';
@@ -72,10 +73,13 @@ import { EditorSelectionDialog } from '@/shared/dialogs/command-bar/EditorSelect
 import { StartReviewDialog } from '@/shared/dialogs/command-bar/StartReviewDialog';
 import posthog from 'posthog-js';
 import { WorkspacesGuideDialog } from '@/shared/dialogs/shared/WorkspacesGuideDialog';
-import { SettingsDialog } from '@/shared/dialogs/settings/SettingsDialog';
+import {
+  SettingsDialog,
+  toggleSettingsDrawer,
+} from '@/shared/dialogs/settings/SettingsDialog';
 import { CreateWorkspaceFromPrDialog } from '@/shared/dialogs/command-bar/CreateWorkspaceFromPrDialog';
 import { buildWorkspaceCreateInitialState } from '@/shared/lib/workspaceCreateState';
-import { setCreateModeSeedState } from '@/features/create-mode/model/createModeSeedStore';
+import { setCreateModeSeedState } from '@/shared/stores/createModeSeedStore';
 
 // Mirrored sidebar icon for right sidebar toggle
 const RightSidebarIcon: Icon = forwardRef<SVGSVGElement, IconProps>(
@@ -420,8 +424,9 @@ export const Actions = {
     shortcut: 'G S',
     requiresTarget: ActionTargetType.NONE,
     execute: async () => {
-      await SettingsDialog.show();
+      await toggleSettingsDrawer();
     },
+    isActive: (ctx) => ctx.isSettingsOpen,
   },
 
   ProjectSettings: {
@@ -586,7 +591,7 @@ export const Actions = {
   ToggleLeftSidebar: {
     id: 'toggle-left-sidebar',
     label: () =>
-      useUiPreferencesStore.getState().isLeftSidebarVisible
+      selectIsLeftSidebarShown(useUiPreferencesStore.getState())
         ? 'Hide Left Sidebar'
         : 'Show Left Sidebar',
     icon: SidebarSimpleIcon,

@@ -574,6 +574,19 @@
     },
     "session": {
       "forceCloseConfirm": "This session is controlled by an agent. Force close it?"
+    },
+    "textInput": {
+      "keyboard": "Keyboard",
+      "selectAll": "Select all",
+      "copy": "Copy",
+      "paste": "Paste",
+      "close": "Close",
+      "failed": "Browser input failed. Try again.",
+      "tooLong": "Text is too long (maximum 65,536 characters).",
+      "noSelection": "Select text in the remote browser first.",
+      "copied": "Copied to clipboard.",
+      "copyManually": "Select and copy this text on your device.",
+      "pasteManually": "Paste text here, then press Paste."
     }
   }
 }

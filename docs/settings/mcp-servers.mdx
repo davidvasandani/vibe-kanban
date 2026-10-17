@@ -66,6 +66,42 @@ These changes update the global configuration file for each assigned coding agen
 
 ## Conflicts and compatibility
 
+## Refreshing MCP tools in an existing task
+
+Saving or reconnecting a server updates the selected agent's native
+configuration, but an agent process that was already running may still hold its
+old tool registry. In the workspace toolbar, choose **Refresh MCP tools** for a
+Codex session. Vibe Kanban asks Codex to reload at a safe turn boundary and then
+reads Codex's next-turn server status; the request is not presented as complete
+until adoption is observed. The tooltip reports each configured server's live
+status and tool count.
+
+For an executor without a proven live-reload protocol, the same toolbar location
+offers **Restart agent for MCP changes**. A running turn finishes before the
+replacement process starts, and the existing task and chat remain intact.
+
+If Slack tests connected in Settings but the Codex refresh tooltip says it is
+absent from the active tool registry, these are different facts: the settings
+probe proved the saved endpoint from one host, while the live status proved that
+the current Codex process did not adopt it. Confirm that `slack` is assigned to
+Codex, refresh again, and check the worker that owns the workspace. A ready Slack
+server with zero tools is also unavailable, not connected.
+
+### Read-only Slack inventory searches
+
+The managed Vibe Kanban Slack service exposes only read tools. Its enabled set
+includes `conversations_search_messages`, conversation history/replies, channel
+and user lookup, unread/saved-item reads, and bounded attachment retrieval. It
+does not expose message posting, reactions, user-group mutation, or saved-item
+mutation tools. Search exact hostnames as quoted terms and inspect the returned
+channel, timestamp, and permalink; Slack continues to enforce the connected
+identity's channel visibility.
+
+For local generic templates, use a Slack identity with only the permissions
+needed by the chosen read tools. The managed deployment keeps its Slack token in
+the supervised server's credential boundary and writes only the private MCP URL
+to Codex configuration.
+
 ## Shared authentication gateway
 
 For an OAuth-protected HTTP MCP server, run **Test connection** and choose

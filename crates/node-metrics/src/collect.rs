@@ -111,6 +111,14 @@ mod platform {
                 "load averages",
                 &mut degraded,
             );
+            let io_pressure = optional(
+                read_to_string(&proc_path("pressure/io"))
+                    .ok()
+                    .as_deref()
+                    .and_then(parse::parse_pressure),
+                "io pressure",
+                &mut degraded,
+            );
             let cpu_info = read_to_string(&proc_path("cpuinfo"))
                 .ok()
                 .map(|raw| parse::parse_cpuinfo(&raw))
@@ -159,7 +167,7 @@ mod platform {
             let core_count = (!cpu_stat.per_core.is_empty())
                 .then(|| u32::try_from(cpu_stat.per_core.len()).unwrap_or(u32::MAX));
 
-            let (processes, process_ticks) =
+            let (processes, process_ticks, uninterruptible_tasks) =
                 self.collect_processes(previous, elapsed_ms, core_count, &mut degraded);
 
             let sample = HostSample {
@@ -181,6 +189,9 @@ mod platform {
                     load_15m: load.map(|l| l.fifteen),
                     frequency_mhz: cpu_info.frequency_mhz,
                     temperature_celsius: temperature_celsius(),
+                    uninterruptible_tasks,
+                    io_pressure_some_avg60: io_pressure.map(|p| p.some_avg60),
+                    io_pressure_full_avg60: io_pressure.and_then(|p| p.full_avg60),
                 },
                 memory,
                 filesystems,
@@ -212,7 +223,7 @@ mod platform {
             elapsed_ms: Option<u64>,
             core_count: Option<u32>,
             degraded: &mut Vec<String>,
-        ) -> (Vec<ProcessSample>, BTreeMap<ProcessKey, u64>) {
+        ) -> (Vec<ProcessSample>, BTreeMap<ProcessKey, u64>, Option<u32>) {
             let ticks_per_second = clock_ticks_per_second();
             let users = read_to_string(Path::new("/etc/passwd"))
                 .map(|raw| parse::parse_passwd(&raw))
@@ -222,7 +233,7 @@ mod platform {
                 Ok(entries) => entries,
                 Err(error) => {
                     degraded.push(format!("process table unavailable: {error}"));
-                    return (Vec::new(), BTreeMap::new());
+                    return (Vec::new(), BTreeMap::new(), None);
                 }
             };
 
@@ -232,6 +243,8 @@ mod platform {
             // a busy host would otherwise emit hundreds of notes into every
             // sample of a live stream.
             let mut unreadable = 0_usize;
+            // Every process walked, not just the reported top-N.
+            let mut uninterruptible = 0_u32;
 
             for entry in entries {
                 let entry = match entry {
@@ -272,6 +285,16 @@ mod platform {
                 let status = read_to_string(&dir.join("status"))
                     .map(|raw| parse::parse_process_status(&raw))
                     .unwrap_or_default();
+
+                // Load counts threads, and a multithreaded server blocks its
+                // worker threads (not the leader) on NFS; the process-level
+                // state reflects only the leader. Walk the threads when there
+                // is more than one — `task/` includes the leader once.
+                uninterruptible += if status.thread_count.unwrap_or(1) > 1 {
+                    count_uninterruptible_threads(&dir)
+                } else {
+                    u32::from(stat.state == 'D')
+                };
                 let command = read_to_string(&dir.join("cmdline"))
                     .ok()
                     .as_deref()
@@ -318,7 +341,7 @@ mod platform {
             });
             samples.truncate(self.config.max_processes as usize);
 
-            (samples, ticks)
+            (samples, ticks, Some(uninterruptible))
         }
     }
 
@@ -328,6 +351,20 @@ mod platform {
 
     fn read_to_string(path: &Path) -> std::io::Result<String> {
         fs::read_to_string(path)
+    }
+
+    /// Threads of one process in state `D`, from `/proc/[pid]/task/*/stat`.
+    /// A thread that exits mid-walk is simply not counted.
+    fn count_uninterruptible_threads(process_dir: &Path) -> u32 {
+        let Ok(tasks) = fs::read_dir(process_dir.join("task")) else {
+            return 0;
+        };
+        let blocked = tasks
+            .flatten()
+            .filter_map(|task| read_to_string(&task.path().join("stat")).ok())
+            .filter(|raw| parse::parse_stat_state(raw) == Some('D'))
+            .count();
+        u32::try_from(blocked).unwrap_or(u32::MAX)
     }
 
     fn optional<T>(value: Option<T>, what: &str, degraded: &mut Vec<String>) -> Option<T> {
@@ -488,6 +525,8 @@ mod tests {
         assert!(!collected.sample.hostname.is_empty());
         assert!(collected.sample.cpu.core_count.unwrap_or(0) >= 1);
         assert!(collected.counters.cpu.is_some());
+        // The process table is readable, so the D-state count is a reading.
+        assert!(collected.sample.cpu.uninterruptible_tasks.is_some());
     }
 
     /// FR-7, at the boundary where it is easiest to get wrong: the first sample

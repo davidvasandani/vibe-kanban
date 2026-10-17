@@ -70,6 +70,12 @@ The canonical contract lives in `utils::shell::append_cli_tools_to_path`:
 - append it after inherited PATH entries so a machine-provided copy wins;
 - reuse `merge_paths` so custom entries survive and duplicates are removed.
 
+The homelab managed cluster explicitly shares its managed CLI directory at one
+identical absolute path across nodes. That deployment contract does not prove
+that a machine-provided executable (or its Nix runtime closure) exists on a
+worker. Settings therefore labels host availability and unverified agent
+availability separately; see [AWS SSO agent state](aws-sso-agent-state.md).
+
 Never send the coordinator's absolute app-data path to a cluster worker. CLI
 Tools is machine-scoped, and worker state is node-local unless a separate
 deployment contract proves otherwise. The worker augments execution and
@@ -81,7 +87,18 @@ also launches machine-scoped managed CLI login flows with a deliberately small
 environment, so local workspace-terminal augmentation belongs in the terminal
 route after the remote-worker branch has been selected.
 
+## Unattended sign-in strategies
+
+`CliToolAuthStrategy` also has `ApiToken` (acli, with its probe built at
+runtime from deployment configuration). `unattended_login(id)` names the
+tools that [unattended re-auth](unattended-reauth.md) may drive. A tool whose
+probe cannot tell an outage from an expiry needs an `auth_failure_confirmed`
+rule there before the sweep acts on it.
+
 ## Contributed by
 
 - vk/fc47-atlassian-cli-to
 - vk/b2a2-add-vk-cli-tools
+
+- vk/c817-aws-sso-sign-in
+- vk/ba8f-auth-auth

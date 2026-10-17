@@ -105,12 +105,6 @@
         "null"
       ]
     },
-    "include_apply_patch_tool": {
-      "type": [
-        "boolean",
-        "null"
-      ]
-    },
     "model_provider": {
       "type": [
         "string",

@@ -50,6 +50,13 @@ interface ChatBoxBaseProps {
 
   // Dropzone props for drag-and-drop image uploads
   dropzone?: DropzoneProps;
+
+  // Fill and shrink within a height-constrained parent instead of sizing to
+  // content. The editor slot becomes the sole scroll owner, and the header,
+  // banner, error and footer rows stop shrinking so the footer controls stay
+  // inside the host's height. Off by default: SessionChatBox sits at the bottom
+  // of a conversation and is intrinsically sized.
+  fillHeight?: boolean;
 }
 
 /**
@@ -68,6 +75,7 @@ export function ChatBoxBase({
   visualVariant,
   isRunning,
   dropzone,
+  fillHeight = false,
 }: ChatBoxBaseProps) {
   const { t } = useTranslation(['common', 'tasks']);
 
@@ -78,6 +86,7 @@ export function ChatBoxBase({
       {...(dropzone?.getRootProps() ?? {})}
       className={cn(
         'relative flex w-chat max-w-full flex-col rounded-sm border border-border bg-secondary',
+        fillHeight && 'min-h-0',
         (visualVariant === VisualVariant.FEEDBACK ||
           visualVariant === VisualVariant.EDIT ||
           visualVariant === VisualVariant.PLAN) &&
@@ -104,17 +113,32 @@ export function ChatBoxBase({
       )}
       {/* Error alert */}
       {error && (
-        <div className="bg-error/10 border-b px-double py-base">
+        <div
+          className={cn(
+            'bg-error/10 border-b px-double py-base',
+            fillHeight && 'shrink-0'
+          )}
+        >
           <p className="text-error text-sm">{error}</p>
         </div>
       )}
 
-      {/* Banner content (queued indicator, feedback mode, etc.) */}
-      {banner}
+      {/*
+        Banner content (queued indicator, feedback mode, etc.). Boxed when
+        filling so it cannot become a second shrink target and steal height from
+        the footer; rendered bare otherwise, so the non-filling path keeps the
+        caller's own box and DOM shape.
+      */}
+      {fillHeight ? banner && <div className="shrink-0">{banner}</div> : banner}
 
       {/* Header - Stats and selector */}
       {visualVariant === VisualVariant.NORMAL && (
-        <div className="flex items-center gap-base border-b px-base py-base">
+        <div
+          className={cn(
+            'flex items-center gap-base border-b px-base py-base',
+            fillHeight && 'shrink-0'
+          )}
+        >
           <div className="flex flex-1 items-center gap-base text-sm min-w-0 overflow-hidden">
             {headerLeft}
           </div>
@@ -123,11 +147,37 @@ export function ChatBoxBase({
       )}
 
       {/* Editor area */}
-      <div className="flex flex-col gap-plusfifty px-base py-base rounded-md">
-        {editor}
+      <div
+        className={cn(
+          'flex flex-col gap-plusfifty px-base py-base rounded-md',
+          fillHeight && 'min-h-0'
+        )}
+      >
+        {/*
+          The editor slot is rendered unconditionally so the editor area keeps
+          the same flex-child count — and therefore the same `gap-plusfifty` —
+          in both height modes. When filling, it is the sole scroll owner and the
+          sole shrink target. Its floor is deliberate: the zero minimum belongs
+          on the intermediate items so the deficit reaches this slot, but the
+          slot itself stops at a couple of lines, because a composer shrunk to
+          nothing is no more usable than a hidden footer. Past that floor the
+          shell scrolls, so the footer stays reachable either way.
+        */}
+        <div
+          data-testid="chat-box-editor-slot"
+          className={cn(fillHeight && 'min-h-[3rem] overflow-y-auto')}
+        >
+          {editor}
+        </div>
 
-        {/* Footer - Controls */}
-        <div className="flex items-end justify-between gap-base">
+        {/* Footer - Controls. Must stay inside the host's height. */}
+        <div
+          data-testid="chat-box-footer"
+          className={cn(
+            'flex items-end justify-between gap-base',
+            fillHeight && 'shrink-0'
+          )}
+        >
           <Toolbar className="flex-1 min-w-0 flex-wrap !gap-half">
             {modelSelector}
             {footerLeft}

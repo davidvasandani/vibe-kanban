@@ -112,7 +112,7 @@ export function useRemoteCloudHostsAppBarModel(): {
 } {
   const { data } = useRemoteCloudHostsState();
 
-  const remoteHosts = data?.hosts ?? [];
+  const remoteHosts = useMemo(() => data?.hosts ?? [], [data?.hosts]);
 
   const hosts = useMemo<AppBarHost[]>(
     () =>

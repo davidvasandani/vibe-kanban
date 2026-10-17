@@ -140,6 +140,7 @@
     "noArchived": "沒有已封存的工作區",
     "noWorkspaces": "沒有工作區",
     "newWorkspace": "新工作區",
+    "polling": "輪詢中",
     "needsAttention": "需要關注",
     "idle": "閒置",
     "running": "執行中",
@@ -195,6 +196,23 @@
         "name": "名稱"
       },
       "columnError": "無法顯示此對話。請開啟完整檢視。"
+    },
+    "activeCount_one": "{{count}} 個活躍工作區",
+    "activeCount_other": "{{count}} 個活躍工作區",
+    "duplicateWarning": {
+      "title": "此議題已有活躍工作區",
+      "description": "開啟現有工作區以繼續工作，或在下方啟動另一個工作區。",
+      "dismiss": "關閉警告",
+      "branchUnavailable": "分支資訊無法取得",
+      "openPr": "有未合併的提取請求",
+      "changes": "有變更",
+      "open": "開啟工作區",
+      "activity": {
+        "creating": "正在建立",
+        "running": "執行中",
+        "idle": "未執行",
+        "unknown": "活動資訊無法取得"
+      }
     }
   },
   "fileTree": {
@@ -465,13 +483,16 @@
       "sortUpdatedAt": "Updated at",
       "sortCreatedAt": "Created at",
       "filterDialogTitle": "Filter workspaces",
-      "filterDialogDescription": "Narrow down workspaces by project and PR state.",
+      "filterDialogDescription": "Narrow down workspaces by project, PR state and issue status.",
       "projectFilterLabel": "Project",
       "prFilterLabel": "PR",
       "prFilterAll": "All",
       "prFilterHasPr": "Has PR",
       "prFilterNoPr": "No PR",
       "noProject": "No project",
+      "issueStatusFilterLabel": "Hide issue status",
+      "issueStatusFilterMenuLabel": "Hide workspaces whose issue is",
+      "noIssue": "No issue",
       "sortButtonTitle": "Sort workspaces",
       "filterButtonTitle": "Filter workspaces"
     },
@@ -620,13 +641,52 @@
     "addonPlaceholder": "Tick stages above to compose the pipeline block, or type your own.",
     "resetToGenerated": "Reset to generated",
     "updateIssue": "Update Issue",
-    "editModeDescription": "Stages are stored in the issue description. Changes here apply when you press Update Issue."
+    "editModeDescription": "Stages are stored in the issue description. Changes here apply when you press Update Issue.",
+    "collapsedSummary": "· {{names}}"
   },
   "workspaceCreation": {
     "creatingTitle": "正在建立工作區…",
     "creatingBody": "你可以離開此頁面，建立程序將在背景繼續。",
     "failedTitle": "工作區建立失敗",
-    "failedFallback": "請建立新的工作區後再試一次。"
+    "failedFallback": "請建立新的工作區後再試一次。",
+    "queued": "正在等待開始建立…",
+    "loading": "正在等待進度詳情…",
+    "unavailable": "進度更新無法取得。建立可能仍在進行，將自動重新連線。",
+    "stopped": "建立已停止。下方顯示最後回報的步驟。",
+    "opening": "建立完成。正在開啟工作區…",
+    "backgroundTask": "最後回報的背景工作：{{task}}",
+    "stepsLabel": "工作區建立步驟",
+    "lastReported": "最後更新：{{time}}",
+    "steps": {
+      "repositories": "關聯儲存庫",
+      "context": "準備附件和上下文",
+      "placement": "選擇執行位置",
+      "worktrees": "準備工作樹和設定",
+      "execution": "啟動設定指令碼和代理",
+      "finalizing": "完成工作區建立"
+    },
+    "tasks": {
+      "repositories": "正在註冊所選儲存庫。",
+      "context": "正在準備附件並匯入可用的上下文。",
+      "placement": "正在選擇並保留執行位置。",
+      "worktrees": "正在準備工作樹和檔案，可能需要等待儲存庫存取權限。",
+      "execution": "正在建立工作階段並啟動設定指令碼和／或程式代理。",
+      "finalizing": "正在儲存建立完成狀態。"
+    },
+    "states": {
+      "complete": "已完成",
+      "running": "進行中",
+      "failed": "失敗",
+      "pending": "未開始",
+      "lastReported": "最後回報",
+      "unknown": "未知"
+    }
+  },
+  "metricsDiskAlerts": {
+    "warning": "磁碟空間不足",
+    "critical": "磁碟空間嚴重不足",
+    "nodeCount_one": "{{severity}} · {{count}} 個節點",
+    "nodeCount_other": "{{severity}} · {{count}} 個節點"
   },
   "speckit": {
     "title": "SpecKit",

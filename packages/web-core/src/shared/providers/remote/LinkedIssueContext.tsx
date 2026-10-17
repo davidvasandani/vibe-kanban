@@ -6,17 +6,24 @@ import {
   SINGLE_ISSUE_SHAPE,
   PROJECT_PROJECT_STATUSES_SHAPE,
   PROJECT_ISSUES_SHAPE,
+  PROJECT_WORKSPACES_SHAPE,
   ISSUE_MUTATION,
   type Issue,
   type ProjectStatus,
   type UpdateIssueRequest,
 } from 'shared/remote-types';
 import { useAuth } from '@/shared/hooks/auth/useAuth';
+import { WorkspaceContext } from '@/shared/hooks/useWorkspaceContext';
+import {
+  normalizeLocalWorkspaceArchiveState,
+  useRemoteLocalArchiveReconciliation,
+} from '@/shared/providers/remote/useRemoteLocalArchiveReconciliation';
 
 /**
- * LinkedIssueContext syncs exactly one issue and its project's statuses.
+ * LinkedIssueContext syncs one issue, its project's statuses and ordering data,
+ * and linked workspace archive state when local workspace context is available.
  *
- * This is a lightweight context (2 SSE streams when enabled, 0 when disabled)
+ * This is a lightweight context
  * designed for the git panel's "Complete" button to know the current issue
  * status in real time without fetching the entire project board.
  *
@@ -71,6 +78,9 @@ export function LinkedIssueProvider({
   children,
 }: LinkedIssueProviderProps) {
   const { isSignedIn } = useAuth();
+  const workspaceContext = useContext(WorkspaceContext);
+  const activeLocalWorkspaces = workspaceContext?.activeWorkspaces;
+  const archivedLocalWorkspaces = workspaceContext?.archivedWorkspaces;
 
   const issueEnabled = isSignedIn && !!issueId;
   const statusesEnabled = isSignedIn && !!projectId;
@@ -98,6 +108,36 @@ export function LinkedIssueProvider({
   // Sync project issues (read-only) to compute accurate doneTopSortOrder
   const issuesResult = useShape(PROJECT_ISSUES_SHAPE, statusesParams, {
     enabled: statusesEnabled,
+  });
+
+  // Workspace routes do not mount ProjectProvider. Observe the persisted remote
+  // archive flag here too, rather than archiving from optimistic issue status.
+  const archiveEnabled =
+    issueEnabled && statusesEnabled && Boolean(workspaceContext);
+  const workspacesResult = useShape(PROJECT_WORKSPACES_SHAPE, statusesParams, {
+    enabled: archiveEnabled,
+  });
+  const linkedWorkspaces = useMemo(
+    () =>
+      workspacesResult.data.filter(
+        (workspace) => workspace.issue_id === issueId
+      ),
+    [workspacesResult.data, issueId]
+  );
+  const localWorkspaceArchiveState = useMemo(
+    () =>
+      activeLocalWorkspaces && archivedLocalWorkspaces
+        ? normalizeLocalWorkspaceArchiveState(
+            activeLocalWorkspaces,
+            archivedLocalWorkspaces
+          )
+        : [],
+    [activeLocalWorkspaces, archivedLocalWorkspaces]
+  );
+  useRemoteLocalArchiveReconciliation({
+    remoteWorkspaces: linkedWorkspaces,
+    localWorkspaces: localWorkspaceArchiveState,
+    enabled: archiveEnabled,
   });
 
   const issue = issueResult.data[0] as Issue | undefined;

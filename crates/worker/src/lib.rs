@@ -9,7 +9,16 @@ use std::{
 };
 
 use axum::{Json, Router, routing::get};
+use job_cgroup::{
+    JobCgroupConfig, JobCgroupStatus, MemoryLimit, WORKER_EXECUTION_MEMORY_HIGH_ENV,
+    WORKER_EXECUTION_MEMORY_MAX_ENV, WORKER_JOB_CGROUP_ENV, WORKER_JOB_CPU_WEIGHT_ENV,
+    WORKER_JOB_IO_WEIGHT_ENV, WORKER_JOB_MEMORY_HIGH_ENV, WORKER_JOB_MEMORY_MAX_ENV,
+};
 use node_metrics::{MetricsSampler, types::SamplerConfig};
+use pressure::{
+    AdmissionPressure, DEFAULT_ADMISSION_MAX_PRESSURE, PressureStatus,
+    WORKER_ADMISSION_MAX_PRESSURE_ENV,
+};
 use serde::Serialize;
 use thiserror::Error;
 use tokio::net::TcpListener;
@@ -19,9 +28,11 @@ use uuid::Uuid;
 pub mod cancellation;
 pub mod execution;
 pub mod interaction;
+pub mod job_cgroup;
 pub mod journal;
 pub mod mount_health;
 pub mod path_authority;
+pub mod pressure;
 pub mod preview;
 pub mod recovery;
 pub mod server;
@@ -40,6 +51,8 @@ pub const WORKER_EXPECTED_UID_ENV: &str = "VK_WORKER_EXPECTED_UID";
 pub const WORKER_EXPECTED_GID_ENV: &str = "VK_WORKER_EXPECTED_GID";
 pub const WORKER_EXECUTOR_PROFILES_ENV: &str = "VK_WORKER_EXECUTOR_PROFILES";
 pub const WORKER_STATE_DIR_ENV: &str = "VK_WORKER_STATE_DIR";
+pub const WORKER_STARTUP_STALL_SECONDS_ENV: &str = "VK_WORKER_STARTUP_STALL_SECONDS";
+pub const DEFAULT_STARTUP_STALL_SECONDS: u64 = 600;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerConfig {
@@ -55,6 +68,15 @@ pub struct WorkerConfig {
     pub expected_gid: u32,
     pub executor_profiles: Vec<String>,
     pub state_dir: PathBuf,
+    /// Isolate spawned children from the worker's own cgroup. `None` keeps
+    /// the historical single-cgroup layout (local and undelegated runs).
+    pub job_cgroup: Option<JobCgroupConfig>,
+    /// Refuse new dispatches while node memory or IO PSI `full avg60` is at
+    /// or above this percentage. `None` disables refusal.
+    pub admission_max_pressure: Option<u8>,
+    /// Reap a coding-agent execution that has produced no output this long
+    /// after it started. `None` disables the reaper.
+    pub startup_stall: Option<std::time::Duration>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -149,6 +171,26 @@ impl WorkerConfig {
                 value: state_dir.display().to_string(),
             });
         }
+        let job_cgroup = parse_job_cgroup(&lookup)?;
+        let admission_max_pressure = match lookup(WORKER_ADMISSION_MAX_PRESSURE_ENV)
+            .filter(|value| !value.trim().is_empty())
+        {
+            None => Some(DEFAULT_ADMISSION_MAX_PRESSURE),
+            Some(value) => {
+                AdmissionPressure::parse_threshold(&value).ok_or(WorkerConfigError::Invalid {
+                    name: WORKER_ADMISSION_MAX_PRESSURE_ENV,
+                    value,
+                })?
+            }
+        };
+        let startup_stall_seconds = match lookup(WORKER_STARTUP_STALL_SECONDS_ENV)
+            .filter(|value| !value.trim().is_empty())
+        {
+            None => DEFAULT_STARTUP_STALL_SECONDS,
+            Some(value) => parse(WORKER_STARTUP_STALL_SECONDS_ENV, value.trim().to_owned())?,
+        };
+        let startup_stall = (startup_stall_seconds > 0)
+            .then(|| std::time::Duration::from_secs(startup_stall_seconds));
         Ok(Self {
             worker_node_id,
             listen_addr,
@@ -162,8 +204,46 @@ impl WorkerConfig {
             expected_gid,
             executor_profiles,
             state_dir,
+            job_cgroup,
+            admission_max_pressure,
+            startup_stall,
         })
     }
+}
+
+fn parse_job_cgroup(
+    lookup: &impl Fn(&str) -> Option<String>,
+) -> Result<Option<JobCgroupConfig>, WorkerConfigError> {
+    let Some(name) = lookup(WORKER_JOB_CGROUP_ENV).filter(|value| !value.trim().is_empty()) else {
+        return Ok(None);
+    };
+    if !JobCgroupConfig::valid_name(&name) {
+        return Err(WorkerConfigError::Invalid {
+            name: WORKER_JOB_CGROUP_ENV,
+            value: name,
+        });
+    }
+    let limit = |env: &'static str| match lookup(env).filter(|value| !value.trim().is_empty()) {
+        None => Ok(MemoryLimit::Unlimited),
+        Some(value) => {
+            MemoryLimit::parse(&value).ok_or(WorkerConfigError::Invalid { name: env, value })
+        }
+    };
+    let weight = |env: &'static str| match lookup(env).filter(|value| !value.trim().is_empty()) {
+        None => Ok(None),
+        Some(value) => JobCgroupConfig::parse_weight(&value)
+            .map(Some)
+            .ok_or(WorkerConfigError::Invalid { name: env, value }),
+    };
+    Ok(Some(JobCgroupConfig {
+        name,
+        memory_high: limit(WORKER_JOB_MEMORY_HIGH_ENV)?,
+        memory_max: limit(WORKER_JOB_MEMORY_MAX_ENV)?,
+        execution_memory_high: limit(WORKER_EXECUTION_MEMORY_HIGH_ENV)?,
+        execution_memory_max: limit(WORKER_EXECUTION_MEMORY_MAX_ENV)?,
+        cpu_weight: weight(WORKER_JOB_CPU_WEIGHT_ENV)?,
+        io_weight: weight(WORKER_JOB_IO_WEIGHT_ENV)?,
+    }))
 }
 
 fn parse<T: FromStr>(name: &'static str, value: String) -> Result<T, WorkerConfigError> {
@@ -179,17 +259,31 @@ struct Health {
     active_execution_count: u32,
     admission_draining: bool,
     drain_safe: bool,
+    job_cgroup: JobCgroupStatus,
+    pressure: PressureStatus,
 }
 
 impl Health {
-    fn new(worker_node_id: Uuid, active_execution_count: u32, admission_draining: bool) -> Self {
+    fn new(
+        worker_node_id: Uuid,
+        active_execution_count: u32,
+        admission_draining: bool,
+        job_cgroup: JobCgroupStatus,
+    ) -> Self {
         Self {
             status: "ok",
             worker_node_id,
             active_execution_count,
             admission_draining,
             drain_safe: admission_draining && active_execution_count == 0,
+            job_cgroup,
+            pressure: PressureStatus::default(),
         }
+    }
+
+    fn with_pressure(mut self, pressure: PressureStatus) -> Self {
+        self.pressure = pressure;
+        self
     }
 }
 
@@ -218,6 +312,9 @@ pub async fn run_with_drain(
     shutdown: CancellationToken,
     admission_draining: Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
+    // Before recovery or any executor can spawn a child into the supervisor's
+    // cgroup; the sweeper keeps moving later children for the process lifetime.
+    let job_cgroup_handle = job_cgroup::start(config.job_cgroup.as_ref(), shutdown.child_token());
     let path_authority = path_authority::PathAuthority::new(&config.shared_root)?;
     let coordinator_url = reqwest::Url::parse(&config.coordinator_url)?;
     let mcp_config_root = config.state_dir.join("mcp-config");
@@ -231,7 +328,12 @@ pub async fn run_with_drain(
         mcp_config_root,
         coordinator_url,
     )
-    .await?;
+    .await?
+    .with_hardening(
+        job_cgroup_handle.clone(),
+        AdmissionPressure::from_host(config.admission_max_pressure),
+        config.startup_stall,
+    );
     let coordinator_task = tokio::spawn(server::registration_loop(
         config.clone(),
         supervisor.clone(),
@@ -254,16 +356,21 @@ pub async fn run_with_drain(
     let worker_node_id = config.worker_node_id;
     let health_supervisor = supervisor.clone();
     let health_admission_draining = admission_draining.clone();
+    let health_job_cgroup = job_cgroup_handle.clone();
     let router = Router::new()
         .route(
             "/health",
             get(move || async move {
                 let active_execution_count = health_supervisor.active_execution_count().await;
-                Json(Health::new(
-                    worker_node_id,
-                    active_execution_count,
-                    health_admission_draining.load(Ordering::Acquire),
-                ))
+                Json(
+                    Health::new(
+                        worker_node_id,
+                        active_execution_count,
+                        health_admission_draining.load(Ordering::Acquire),
+                        health_job_cgroup.status(),
+                    )
+                    .with_pressure(health_supervisor.pressure_status()),
+                )
             }),
         )
         .merge(worker_api::router(&config, supervisor, metrics.clone()).await?);
@@ -326,14 +433,188 @@ mod tests {
     #[test]
     fn health_is_drain_safe_only_without_owned_work() {
         let worker_node_id = Uuid::new_v4();
-        assert!(!Health::new(worker_node_id, 0, false).drain_safe);
-        assert!(Health::new(worker_node_id, 0, true).drain_safe);
-        assert!(!Health::new(worker_node_id, 1, true).drain_safe);
+        assert!(!Health::new(worker_node_id, 0, false, JobCgroupStatus::Disabled).drain_safe);
+        assert!(Health::new(worker_node_id, 0, true, JobCgroupStatus::Disabled).drain_safe);
+        assert!(!Health::new(worker_node_id, 1, true, JobCgroupStatus::Disabled).drain_safe);
 
-        let json = serde_json::to_value(Health::new(worker_node_id, 2, true)).unwrap();
+        let json = serde_json::to_value(Health::new(
+            worker_node_id,
+            2,
+            true,
+            JobCgroupStatus::Disabled,
+        ))
+        .unwrap();
         assert_eq!(json["active_execution_count"], 2);
         assert_eq!(json["admission_draining"], true);
         assert_eq!(json["drain_safe"], false);
+    }
+
+    fn required_env(coordinator_id: &str) -> Vec<(&'static str, String)> {
+        vec![
+            (WORKER_NODE_ID_ENV, Uuid::new_v4().to_string()),
+            (WORKER_COORDINATOR_URL_ENV, "http://think2:3333".into()),
+            (WORKER_COORDINATOR_ID_ENV, coordinator_id.into()),
+            (
+                WORKER_SIGNING_KEY_FILE_ENV,
+                "/run/credentials/worker.key".into(),
+            ),
+            (
+                COORDINATOR_PUBLIC_KEY_FILE_ENV,
+                "/run/credentials/coordinator.pub".into(),
+            ),
+            (WORKER_EXPECTED_UID_ENV, "1000".into()),
+            (WORKER_EXPECTED_GID_ENV, "100".into()),
+        ]
+    }
+
+    fn parse_with(extra: &[(&'static str, &str)]) -> Result<WorkerConfig, WorkerConfigError> {
+        let coordinator_id = Uuid::new_v4().to_string();
+        let mut values = required_env(&coordinator_id);
+        values.extend(extra.iter().map(|(key, value)| (*key, (*value).to_owned())));
+        let borrowed: Vec<(&str, &str)> = values
+            .iter()
+            .map(|(key, value)| (*key, value.as_str()))
+            .collect();
+        parse(&borrowed)
+    }
+
+    #[test]
+    fn job_cgroup_is_opt_in_and_limits_default_to_unlimited() {
+        assert_eq!(parse_with(&[]).unwrap().job_cgroup, None);
+
+        let config = parse_with(&[(WORKER_JOB_CGROUP_ENV, "jobs")]).unwrap();
+        assert_eq!(
+            config.job_cgroup,
+            Some(JobCgroupConfig {
+                name: "jobs".into(),
+                memory_high: MemoryLimit::Unlimited,
+                memory_max: MemoryLimit::Unlimited,
+                execution_memory_high: MemoryLimit::Unlimited,
+                execution_memory_max: MemoryLimit::Unlimited,
+                cpu_weight: None,
+                io_weight: None,
+            })
+        );
+
+        let config = parse_with(&[
+            (WORKER_JOB_CGROUP_ENV, "jobs"),
+            (WORKER_JOB_MEMORY_HIGH_ENV, "60%"),
+            (WORKER_JOB_MEMORY_MAX_ENV, "12G"),
+        ])
+        .unwrap();
+        let job_cgroup = config.job_cgroup.unwrap();
+        assert_eq!(job_cgroup.memory_high, MemoryLimit::PercentOfRam(60));
+        assert_eq!(job_cgroup.memory_max, MemoryLimit::Bytes(12 << 30));
+
+        let job_cgroup = parse_with(&[
+            (WORKER_JOB_CGROUP_ENV, "jobs"),
+            (WORKER_EXECUTION_MEMORY_HIGH_ENV, "40%"),
+            (WORKER_EXECUTION_MEMORY_MAX_ENV, "6G"),
+            (WORKER_JOB_CPU_WEIGHT_ENV, "50"),
+            (WORKER_JOB_IO_WEIGHT_ENV, "25"),
+        ])
+        .unwrap()
+        .job_cgroup
+        .unwrap();
+        assert_eq!(
+            job_cgroup.execution_memory_high,
+            MemoryLimit::PercentOfRam(40)
+        );
+        assert_eq!(job_cgroup.execution_memory_max, MemoryLimit::Bytes(6 << 30));
+        assert_eq!(job_cgroup.cpu_weight, Some(50));
+        assert_eq!(job_cgroup.io_weight, Some(25));
+        assert_eq!(
+            parse_with(&[
+                (WORKER_JOB_CGROUP_ENV, "jobs"),
+                (WORKER_JOB_CPU_WEIGHT_ENV, "0")
+            ])
+            .unwrap_err(),
+            WorkerConfigError::Invalid {
+                name: WORKER_JOB_CPU_WEIGHT_ENV,
+                value: "0".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn admission_pressure_and_startup_stall_default_on_and_zero_disables() {
+        let config = parse_with(&[]).unwrap();
+        assert_eq!(config.admission_max_pressure, Some(40));
+        assert_eq!(
+            config.startup_stall,
+            Some(std::time::Duration::from_secs(600))
+        );
+
+        let config = parse_with(&[
+            (WORKER_ADMISSION_MAX_PRESSURE_ENV, "0"),
+            (WORKER_STARTUP_STALL_SECONDS_ENV, "0"),
+        ])
+        .unwrap();
+        assert_eq!(config.admission_max_pressure, None);
+        assert_eq!(config.startup_stall, None);
+
+        let config = parse_with(&[
+            (WORKER_ADMISSION_MAX_PRESSURE_ENV, "25"),
+            (WORKER_STARTUP_STALL_SECONDS_ENV, "300"),
+        ])
+        .unwrap();
+        assert_eq!(config.admission_max_pressure, Some(25));
+        assert_eq!(
+            config.startup_stall,
+            Some(std::time::Duration::from_secs(300))
+        );
+        for (name, value) in [
+            (WORKER_ADMISSION_MAX_PRESSURE_ENV, "101"),
+            (WORKER_STARTUP_STALL_SECONDS_ENV, "-1"),
+        ] {
+            assert_eq!(
+                parse_with(&[(name, value)]).unwrap_err(),
+                WorkerConfigError::Invalid {
+                    name,
+                    value: value.into(),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_job_cgroup_paths_and_malformed_limits() {
+        assert_eq!(
+            parse_with(&[(WORKER_JOB_CGROUP_ENV, "../escape")]).unwrap_err(),
+            WorkerConfigError::Invalid {
+                name: WORKER_JOB_CGROUP_ENV,
+                value: "../escape".into(),
+            }
+        );
+        assert_eq!(
+            parse_with(&[
+                (WORKER_JOB_CGROUP_ENV, "jobs"),
+                (WORKER_JOB_MEMORY_MAX_ENV, "12GB"),
+            ])
+            .unwrap_err(),
+            WorkerConfigError::Invalid {
+                name: WORKER_JOB_MEMORY_MAX_ENV,
+                value: "12GB".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn health_reports_job_cgroup_state() {
+        let json = serde_json::to_value(Health::new(
+            Uuid::new_v4(),
+            0,
+            false,
+            JobCgroupStatus::Failed {
+                error: "memory controller is not delegated".into(),
+            },
+        ))
+        .unwrap();
+        assert_eq!(json["job_cgroup"]["state"], "failed");
+        assert_eq!(
+            json["job_cgroup"]["error"],
+            "memory controller is not delegated"
+        );
     }
 
     #[test]

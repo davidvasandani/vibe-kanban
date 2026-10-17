@@ -151,8 +151,8 @@ pub enum MouseButton {
     Right,
 }
 
-/// A mutating browser command. Read-only operations (screenshot, page info)
-/// are deliberately not part of this enum.
+/// A control-gated browser command. Selection reads share the input gate;
+/// observer operations (screenshot, page info) are deliberately separate.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BrowserAction {
@@ -175,6 +175,8 @@ pub enum BrowserAction {
     Type {
         text: String,
     },
+    /// Read the selected plain text through the same control gate as input.
+    CopySelection,
     Key {
         key: String,
         modifiers: Option<Vec<String>>,
@@ -201,7 +203,7 @@ pub struct BrowserActionResult {
     pub command_id: Uuid,
     #[ts(type = "number")]
     pub generation: u64,
-    /// Present for Evaluate.
+    /// Present for Evaluate and CopySelection.
     pub value: Option<serde_json::Value>,
     pub current_url: Option<String>,
 }

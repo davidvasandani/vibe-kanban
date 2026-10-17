@@ -24,7 +24,16 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, OwnedMutexGuard};
 use ts_rs::TS;
-use utils::{assets::cli_tools_dir, shell::resolve_executable_path};
+use utils::{
+    agent_tools::{
+        self, AgentToolCheck, CHECK_MODE_ENV, RUNTIME_DEPENDENCY_MESSAGE_PREFIX,
+        RUNTIME_DEPENDENCY_UNAVAILABLE_EXIT,
+    },
+    assets::cli_tools_dir,
+    shell::resolve_executable_path,
+};
+
+use crate::services::entra_mint;
 
 // Version pins. Bumping a version REQUIRES refreshing the matching
 // per-platform sha256 pins below — a stale hash makes installs fail loudly
@@ -54,6 +63,12 @@ const MICROSOFT_GRAPH_PS_VERSION: &str = "2.38.1";
 
 /// How long a `<tool> --version` probe of a host-provided copy may run.
 const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Auth checks get their own, longer budget: unlike `--version` they can start
+/// a whole runtime and talk to the network. `graph-powershell` in particular
+/// pays pwsh startup, a Graph SDK module import, and a token refresh before it
+/// can answer — comfortably past the version-probe budget, and timing out here
+/// would report a successful sign-in as unverified.
+const AUTH_PROBE_TIMEOUT: Duration = Duration::from_secs(45);
 
 #[derive(Debug, thiserror::Error)]
 pub enum CliToolError {
@@ -73,6 +88,12 @@ pub enum CliToolError {
     Extract(String),
     #[error("install failed: {0}")]
     Install(String),
+    #[error("sign-in failed: {0}")]
+    Login(String),
+    /// A failed Entra/1Password flow, kept typed so unattended re-auth can
+    /// tell a refusal (never retried) from a flow timeout (retryable).
+    #[error("sign-in failed: {0}")]
+    Entra(#[from] entra_mint::EntraError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -155,6 +176,16 @@ pub struct PlatformSource {
     pub binary_path_in_archive: &'static str,
 }
 
+/// Extra runtime a tool needs that a bare exec does not provide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeWrapper {
+    /// The .NET Graph CLI keeps its MSAL cache in the D-Bus secret service and
+    /// refuses to start without one, and NixOS ships no libicu for it. Every
+    /// invocation needs that environment, not just the sign-in, so `bin/`
+    /// points at a wrapper rather than the binary.
+    GraphCliSecretService,
+}
+
 pub struct CliToolCatalogEntry {
     pub id: CliToolId,
     pub binary_name: &'static str,
@@ -169,6 +200,8 @@ pub struct CliToolCatalogEntry {
     /// credentials for these tools.
     pub docs_url: &'static str,
     pub auth: CliToolAuthStrategy,
+    /// When set, `bin/<name>` is a generated wrapper instead of a symlink.
+    pub runtime_wrapper: Option<RuntimeWrapper>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -177,7 +210,88 @@ pub enum CliToolAuthStrategy {
         login_args: &'static [&'static str],
         probe_args: &'static [&'static str],
     },
+    /// The tool runs its OWN browser sign-in; vibe-kanban only supplies a
+    /// browser that can reach the loopback listener it opens.
+    ///
+    /// The remote browser cannot — it runs in a sandbox with no route to this
+    /// host — so this path drives a local one, seeded with the shared
+    /// profile's Entra session. The tool then writes its own native
+    /// credential store, so there is no cache format to reproduce here.
+    EntraNativeBrowser {
+        login_args: &'static [&'static str],
+        probe_args: &'static [&'static str],
+    },
+    /// Delegated Entra sign-in performed by [`crate::services::entra_mint`] and
+    /// then written into the tool's own credential store.
+    ///
+    /// Used where the tool's built-in headless login cannot work: this tenant's
+    /// Conditional Access refuses the device-code flow outright (AADSTS53003,
+    /// even from a Compliant device), so `az login --use-device-code` and
+    /// `Connect-MgGraph -UseDeviceAuthentication` are both dead ends. The
+    /// authorization-code flow is not restricted, so we run that instead.
+    EntraMint {
+        client_id: &'static str,
+        scope: &'static str,
+        probe_args: &'static [&'static str],
+    },
+    /// Signed in unattended from an API token held in 1Password (see
+    /// [`crate::services::reauth::acli`]). The probe is built at runtime because
+    /// it names deployment configuration (a readable page), and a site-specific
+    /// read is the only honest proof: acli's own `auth status` is not trusted.
+    ApiToken {
+        probe: fn() -> Result<Vec<String>, String>,
+    },
     Unsupported(&'static str),
+}
+
+/// Args used to check whether a tool is authenticated, or the reason it has no
+/// such check.
+fn probe_args_of(e: &CliToolCatalogEntry) -> Result<Vec<String>, String> {
+    let owned = |args: &[&str]| args.iter().map(|a| (*a).to_string()).collect();
+    match e.auth {
+        CliToolAuthStrategy::Command { probe_args, .. }
+        | CliToolAuthStrategy::EntraMint { probe_args, .. }
+        | CliToolAuthStrategy::EntraNativeBrowser { probe_args, .. } => Ok(owned(probe_args)),
+        CliToolAuthStrategy::ApiToken { probe } => probe(),
+        CliToolAuthStrategy::Unsupported(reason) => Err(reason.to_string()),
+    }
+}
+
+/// Whether `id` can be signed in with no human at a terminal — the set
+/// unattended re-authentication may drive.
+pub fn unattended_login(id: CliToolId) -> bool {
+    matches!(
+        entry(id).auth,
+        CliToolAuthStrategy::EntraMint { .. }
+            | CliToolAuthStrategy::EntraNativeBrowser { .. }
+            | CliToolAuthStrategy::ApiToken { .. }
+    )
+}
+
+/// Page read that proves `acli confluence` is authorized.
+fn acli_probe_args() -> Result<Vec<String>, String> {
+    acli_probe_args_for(std::env::var("VK_ATLASSIAN_VERIFY_PAGE_ID").ok())
+}
+
+fn acli_probe_args_for(page: Option<String>) -> Result<Vec<String>, String> {
+    let page = page
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| {
+            "unattended sign-in is not configured: VK_ATLASSIAN_VERIFY_PAGE_ID is not set"
+                .to_string()
+        })?;
+    if !page.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("VK_ATLASSIAN_VERIFY_PAGE_ID must be a numeric Confluence page id".to_string());
+    }
+    Ok(vec![
+        "confluence".to_string(),
+        "page".to_string(),
+        "view".to_string(),
+        "--id".to_string(),
+        page,
+        "--json".to_string(),
+    ])
 }
 
 pub fn catalog() -> &'static [CliToolCatalogEntry] {
@@ -210,8 +324,9 @@ pub fn catalog() -> &'static [CliToolCatalogEntry] {
                 archive: ArchiveKind::Zip,
             },
             docs_url: "https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-files.html",
+            runtime_wrapper: None,
             auth: CliToolAuthStrategy::Unsupported(
-                "AWS SSO login is profile-specific; manage SSO profiles and sign in from the AWS section in Settings",
+                "AWS SSO login is profile-specific; manage SSO profiles and sign in from the Auth section in Settings",
             ),
         },
         CliToolCatalogEntry {
@@ -226,9 +341,18 @@ pub fn catalog() -> &'static [CliToolCatalogEntry] {
                 package: "azure-cli",
             },
             docs_url: "https://learn.microsoft.com/en-us/cli/azure/authenticate-azure-cli",
-            auth: CliToolAuthStrategy::Command {
-                login_args: &["login", "--use-device-code"],
-                probe_args: &["account", "show", "--output", "none"],
+            runtime_wrapper: None,
+            // NOT `login --use-device-code`: Conditional Access refuses that
+            // flow tenant-wide. See CliToolAuthStrategy::EntraMint.
+            auth: CliToolAuthStrategy::EntraMint {
+                client_id: crate::services::entra_mint::AZ_CLIENT_ID,
+                scope: crate::services::entra_mint::AZ_SCOPE,
+                // Acquire a token, not `account show`: the latter reads
+                // cached subscriptions and stays green after the refresh
+                // token dies, which would hide exactly the expiry that
+                // unattended re-auth exists to repair. `--output none` keeps
+                // the token off stdout.
+                probe_args: &["account", "get-access-token", "--output", "none"],
             },
         },
         CliToolCatalogEntry {
@@ -265,6 +389,7 @@ pub fn catalog() -> &'static [CliToolCatalogEntry] {
                 archive: ArchiveKind::Zip,
             },
             docs_url: "https://developer.1password.com/docs/cli/get-started/",
+            runtime_wrapper: None,
             auth: CliToolAuthStrategy::Unsupported(
                 "1Password sign-in sessions are shell-scoped; authenticate the host CLI using the vendor setup guide",
             ),
@@ -303,6 +428,7 @@ pub fn catalog() -> &'static [CliToolCatalogEntry] {
                 archive: ArchiveKind::TarXz,
             },
             docs_url: "https://github.com/GAM-team/GAM/wiki",
+            runtime_wrapper: None,
             auth: CliToolAuthStrategy::Command {
                 login_args: &["oauth", "create"],
                 probe_args: &["oauth", "verify"],
@@ -335,9 +461,20 @@ pub fn catalog() -> &'static [CliToolCatalogEntry] {
                 archive: ArchiveKind::TarGz,
             },
             docs_url: "https://learn.microsoft.com/en-us/graph/cli/overview",
-            auth: CliToolAuthStrategy::Unsupported(
-                "This pinned Graph CLI has no non-secret authentication status command; run mgc-beta login externally",
-            ),
+            runtime_wrapper: Some(RuntimeWrapper::GraphCliSecretService),
+            // Its own InteractiveBrowser flow works — it just needs a browser
+            // that can reach the loopback listener it opens, which the remote
+            // one cannot. Device code is refused tenant-wide, so that is out.
+            auth: CliToolAuthStrategy::EntraNativeBrowser {
+                login_args: &[
+                    "login",
+                    "--strategy",
+                    "InteractiveBrowser",
+                    "--scopes",
+                    "User.Read",
+                ],
+                probe_args: &["users", "list", "--top", "1", "--select", "id"],
+            },
         },
         CliToolCatalogEntry {
             id: CliToolId::Acli,
@@ -366,9 +503,12 @@ pub fn catalog() -> &'static [CliToolCatalogEntry] {
                 archive: ArchiveKind::TarGz,
             },
             docs_url: "https://developer.atlassian.com/cloud/acli/guides/install-acli/",
-            auth: CliToolAuthStrategy::Unsupported(
-                "Atlassian CLI authentication is site and account specific; use the vendor setup guide",
-            ),
+            runtime_wrapper: None,
+            // Site and account come from deployment configuration, the token
+            // from 1Password; without them the probe reports why.
+            auth: CliToolAuthStrategy::ApiToken {
+                probe: acli_probe_args,
+            },
         },
         CliToolCatalogEntry {
             id: CliToolId::Gws,
@@ -411,6 +551,7 @@ pub fn catalog() -> &'static [CliToolCatalogEntry] {
                 archive: ArchiveKind::TarGz,
             },
             docs_url: "https://github.com/googleworkspace/cli#authentication",
+            runtime_wrapper: None,
             auth: CliToolAuthStrategy::Unsupported(
                 "gws auth status exits successfully even when unauthenticated; run gws auth login externally",
             ),
@@ -427,9 +568,19 @@ pub fn catalog() -> &'static [CliToolCatalogEntry] {
                 module: "Microsoft.Graph",
             },
             docs_url: "https://learn.microsoft.com/en-us/powershell/microsoftgraph/installation?view=graph-powershell-1.0",
-            auth: CliToolAuthStrategy::Unsupported(
-                "Microsoft Graph sign-in is owned by the SDK's user-scoped token cache; run Connect-MgGraph (e.g. -UseDeviceAuthentication) externally",
-            ),
+            runtime_wrapper: None,
+            // `Connect-MgGraph -AccessToken` authenticates only the current
+            // process, so the mint also writes a profile block that reconnects
+            // (refreshing first) at pwsh startup. `-NoProfile` skips that.
+            auth: CliToolAuthStrategy::EntraMint {
+                client_id: crate::services::entra_mint::GRAPH_CLIENT_ID,
+                scope: crate::services::entra_mint::GRAPH_SCOPE,
+                probe_args: &[
+                    "-NoLogo",
+                    "-Command",
+                    "if (Get-MgContext) { exit 0 } else { exit 1 }",
+                ],
+            },
         },
     ];
     CATALOG
@@ -482,6 +633,10 @@ pub struct CliToolStatus {
     pub login_supported: bool,
     pub auth_state: CliToolAuthState,
     pub auth_message: Option<String>,
+    /// Whether agents on this host can run the tool. Independent of
+    /// `auth_state`: a tool can be signed in yet unreachable from agent
+    /// shells, or reachable but unable to start.
+    pub agent: AgentToolCheck,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -613,7 +768,9 @@ async fn effective_binary(e: &CliToolCatalogEntry) -> Option<PathBuf> {
     if let Some(host) = detect_host_copy(e).await {
         return Some(PathBuf::from(host.path));
     }
-    detect_app_copy(e).map(|_| installed_binary_path(e))
+    // link_target, not the raw binary: a wrapped tool is only usable through
+    // its wrapper, which supplies the runtime its credential store needs.
+    detect_app_copy(e).map(|_| link_target(e))
 }
 
 /// Effective binary for a catalog tool (host copy wins over the app-managed
@@ -624,40 +781,194 @@ pub async fn effective_binary_for(id: CliToolId) -> Option<PathBuf> {
     effective_binary(entry(id)).await
 }
 
-pub async fn login_command(id: CliToolId) -> Result<CliToolLoginCommand, CliToolError> {
+/// How a tool's "Authenticate" action is carried out.
+pub enum CliToolLoginPlan {
+    /// Run the vendor's own login command in a PTY and let the user drive it.
+    Command(CliToolLoginCommand),
+    /// Mint a delegated Entra token in-process and write it into the tool's
+    /// credential store; there is no interactive terminal to attach to.
+    EntraMint {
+        client_id: &'static str,
+        scope: &'static str,
+    },
+    /// Run the tool's own browser sign-in, supplying a local browser.
+    EntraNativeBrowser { args: Vec<String> },
+    /// Log in from an API token held in 1Password; no browser at all.
+    ApiToken,
+}
+
+pub async fn login_plan(id: CliToolId) -> Result<CliToolLoginPlan, CliToolError> {
     let e = entry(id);
-    let CliToolAuthStrategy::Command { login_args, .. } = e.auth else {
-        let CliToolAuthStrategy::Unsupported(reason) = e.auth else {
-            unreachable!()
-        };
-        return Err(CliToolError::Unsupported(
-            e.display_name.to_string(),
-            reason.to_string(),
-        ));
+    let unsupported =
+        |reason: &str| CliToolError::Unsupported(e.display_name.to_string(), reason.to_string());
+    match e.auth {
+        CliToolAuthStrategy::Unsupported(reason) => Err(unsupported(reason)),
+        CliToolAuthStrategy::ApiToken { probe } => {
+            probe().map_err(|reason| unsupported(&reason))?;
+            effective_binary(e)
+                .await
+                .ok_or_else(|| unsupported("tool is not available"))?;
+            Ok(CliToolLoginPlan::ApiToken)
+        }
+        CliToolAuthStrategy::EntraMint {
+            client_id, scope, ..
+        } => {
+            // The tool must exist before we can write credentials into it.
+            effective_binary(e)
+                .await
+                .ok_or_else(|| unsupported("tool is not available"))?;
+            Ok(CliToolLoginPlan::EntraMint { client_id, scope })
+        }
+        CliToolAuthStrategy::EntraNativeBrowser { login_args, .. } => {
+            effective_binary(e)
+                .await
+                .ok_or_else(|| unsupported("tool is not available"))?;
+            write_runtime_wrapper(e)?;
+            Ok(CliToolLoginPlan::EntraNativeBrowser {
+                args: login_args.iter().map(|a| (*a).to_string()).collect(),
+            })
+        }
+        CliToolAuthStrategy::Command { login_args, .. } => {
+            let executable = effective_binary(e)
+                .await
+                .ok_or_else(|| unsupported("tool is not available"))?;
+            Ok(CliToolLoginPlan::Command(CliToolLoginCommand {
+                executable,
+                args: login_args.iter().map(|arg| (*arg).to_string()).collect(),
+            }))
+        }
+    }
+}
+
+/// Directory `az` keeps its MSAL cache and subscription profile in.
+fn az_config_dir() -> PathBuf {
+    std::env::var_os("AZURE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".azure")))
+        .unwrap_or_else(|| PathBuf::from(".azure"))
+}
+
+/// The interpreter inside az's app-managed venv. It already has `msal`, which
+/// is what writes the token cache — so this path only exists for an app-owned
+/// az, not a host-provided one.
+fn az_venv_python() -> Option<PathBuf> {
+    let e = entry(CliToolId::Az);
+    let python = tool_dir(e.id).join(e.version).join("venv/bin/python3");
+    python.is_file().then_some(python)
+}
+
+fn graph_token_path() -> PathBuf {
+    tool_dir(CliToolId::GraphPowershell10).join("entra-token.json")
+}
+
+/// Rewrite an older vk-owned Graph block in the PowerShell profile to the
+/// current one (only that block; the rest of the profile is untouched).
+/// Best effort: a profile that cannot be read or written is left alone.
+pub fn migrate_graph_powershell_profile() {
+    let Some(profile) = powershell_profile_path() else {
+        return;
     };
-    let executable = effective_binary(e).await.ok_or_else(|| {
-        CliToolError::Unsupported(
-            e.display_name.to_string(),
-            "tool is not available".to_string(),
-        )
-    })?;
-    Ok(CliToolLoginCommand {
-        executable,
-        args: login_args.iter().map(|arg| (*arg).to_string()).collect(),
+    let Ok(existing) = std::fs::read_to_string(&profile) else {
+        return;
+    };
+    if let Some(updated) = entra_mint::migrate_ps_block(&existing, &graph_token_path()) {
+        let _ = std::fs::write(&profile, updated);
+    }
+}
+
+fn powershell_profile_path() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|h| {
+        PathBuf::from(h)
+            .join(".config/powershell")
+            .join("Microsoft.PowerShell_profile.ps1")
     })
 }
 
-async fn probe_auth(e: &CliToolCatalogEntry) -> (CliToolAuthState, Option<String>) {
-    let CliToolAuthStrategy::Command { probe_args, .. } = e.auth else {
-        let CliToolAuthStrategy::Unsupported(reason) = e.auth else {
-            unreachable!()
-        };
-        return (CliToolAuthState::Unsupported, Some(reason.to_string()));
+/// Mint a delegated Entra token for `id` and write it into that tool's own
+/// credential store, streaming progress to the caller.
+pub async fn run_entra_login(
+    id: CliToolId,
+    client_id: &str,
+    scope: &str,
+    progress: &entra_mint::Progress,
+) -> Result<(), CliToolError> {
+    let e = entry(id);
+    let cfg = entra_mint::EntraConfig::from_env()
+        .map_err(|err| CliToolError::Unsupported(e.display_name.to_string(), err.to_string()))?;
+    let token = entra_mint::mint(&cfg, client_id, scope, progress).await?;
+
+    match id {
+        CliToolId::Az => {
+            let python = az_venv_python().ok_or_else(|| {
+                CliToolError::Unsupported(
+                    e.display_name.to_string(),
+                    "signing in writes az's MSAL cache using the venv this app installs; \
+                     install the app-managed az first"
+                        .to_string(),
+                )
+            })?;
+            entra_mint::apply_az(&token, &python, &az_config_dir(), &cfg, progress)
+                .await
+                .map_err(|err| CliToolError::Login(err.to_string()))?;
+        }
+        CliToolId::GraphPowershell10 => {
+            let profile = powershell_profile_path()
+                .ok_or_else(|| CliToolError::Login("HOME is not set".to_string()))?;
+            entra_mint::apply_graph_powershell(
+                &token,
+                &graph_token_path(),
+                &profile,
+                &cfg,
+                progress,
+            )
+            .await
+            .map_err(|err| CliToolError::Login(err.to_string()))?;
+        }
+        other => {
+            return Err(CliToolError::Login(format!(
+                "{other:?} has no Entra credential store wired up"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Run a tool's own browser sign-in, supplying a local browser that can reach
+/// the loopback listener it opens.
+pub async fn run_entra_native_browser_login(
+    id: CliToolId,
+    args: &[String],
+    progress: &entra_mint::Progress,
+) -> Result<(), CliToolError> {
+    let e = entry(id);
+    let unsupported = |m: String| CliToolError::Unsupported(e.display_name.to_string(), m);
+    let cfg = entra_mint::EntraConfig::from_env().map_err(|err| unsupported(err.to_string()))?;
+    let tools =
+        entra_mint::LocalBrowserTools::from_env().map_err(|err| unsupported(err.to_string()))?;
+    let executable = effective_binary(e)
+        .await
+        .ok_or_else(|| unsupported("tool is not available".to_string()))?;
+    entra_mint::refresh_session(&cfg, progress).await?;
+    Ok(entra_mint::native_browser_login(&cfg, &tools, &executable, args, progress).await?)
+}
+
+/// Probe output kept in-process (never returned or logged) so unattended
+/// re-auth can tell an expired credential from an outage; see
+/// [`status_with_probe_output`].
+type ProbeOutput = Option<String>;
+
+async fn probe_auth_with_output(
+    e: &CliToolCatalogEntry,
+) -> (CliToolAuthState, Option<String>, ProbeOutput) {
+    let probe_args = match probe_args_of(e) {
+        Ok(args) => args,
+        Err(reason) => return (CliToolAuthState::Unsupported, Some(reason), None),
     };
     let Some(executable) = effective_binary(e).await else {
         return (
             CliToolAuthState::Unknown,
             Some("Tool is not available".to_string()),
+            None,
         );
     };
     let mut command = tokio::process::Command::new(executable);
@@ -685,22 +996,100 @@ async fn probe_auth(e: &CliToolCatalogEntry) -> (CliToolAuthState, Option<String
         "XDG_CONFIG_HOME",
         "AZURE_CONFIG_DIR",
         "GAMCFGDIR",
+        // A wrapped tool cannot start without the toolchain its wrapper
+        // requires; dropping these makes the wrapper abort, and a tool that
+        // just signed in successfully reports back unauthenticated.
+        "VK_ENTRA_CHROMIUM",
+        "VK_ENTRA_DBUS_RUN_SESSION",
+        "VK_ENTRA_KEYRING_DAEMON",
+        "VK_ENTRA_LIBSECRET_LIB",
     ] {
         if let Some(value) = std::env::var_os(key) {
             command.env(key, value);
         }
     }
-    match tokio::time::timeout(VERSION_PROBE_TIMEOUT, command.kill_on_drop(true).output()).await {
-        Ok(Ok(output)) if output.status.success() => (CliToolAuthState::Authenticated, None),
-        Ok(Ok(_)) => (CliToolAuthState::Unauthenticated, None),
+    match tokio::time::timeout(AUTH_PROBE_TIMEOUT, command.kill_on_drop(true).output()).await {
+        Ok(Ok(output)) if output.status.success() => (CliToolAuthState::Authenticated, None, None),
+        Ok(Ok(output)) => {
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            // A wrapper whose runtime is missing is "unknown", not signed out,
+            // so re-auth is not attempted for a fault it cannot fix.
+            let (state, message) = classify_auth_probe(false, output.status.code(), &stderr);
+            // Failure output only: a successful probe's stdout is never kept.
+            let mut text = stderr;
+            text.push('\n');
+            text.push_str(&String::from_utf8_lossy(&output.stdout));
+            let mut end = text.len().min(8 * 1024);
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text.truncate(end);
+            (state, message, Some(text))
+        }
         Ok(Err(_)) => (
             CliToolAuthState::Unknown,
             Some("Authentication check failed".to_string()),
+            None,
         ),
         Err(_) => (
             CliToolAuthState::Unknown,
             Some("Authentication check timed out".to_string()),
+            None,
         ),
+    }
+}
+
+/// Map a finished auth probe to a state. A wrapper that could not start
+/// because its runtime is missing says nothing about sign-in, so it is
+/// `Unknown` with the (sanitized) reason, never `Unauthenticated`.
+fn classify_auth_probe(
+    success: bool,
+    code: Option<i32>,
+    stderr: &str,
+) -> (CliToolAuthState, Option<String>) {
+    if success {
+        return (CliToolAuthState::Authenticated, None);
+    }
+    match agent_tools::runtime_dependency_message(code, stderr) {
+        Some(message) => (CliToolAuthState::Unknown, Some(capitalize(&message))),
+        None => (CliToolAuthState::Unauthenticated, None),
+    }
+}
+
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    chars
+        .next()
+        .map(|c| c.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
+
+/// Whether agents on this host can run the tool, checked the way they reach
+/// it: the agent environment, in login and non-login shells.
+async fn agent_check(e: &CliToolCatalogEntry) -> AgentToolCheck {
+    let wrapper = bin_link_path(e.id);
+    let probe = match e.runtime_wrapper {
+        Some(_) => agent_tools::Probe::Wrapper {
+            wrapper: &wrapper,
+            args: e.version_args,
+        },
+        None => agent_tools::Probe::Version(e.version_args),
+    };
+    agent_tools::check(e.binary_name, probe).await
+}
+
+/// Regenerate an installed tool's runtime wrapper if this build writes a
+/// different one, so existing installs pick up wrapper fixes without a
+/// reinstall. Skipped while an install/remove holds the tool's lock.
+fn refresh_runtime_wrapper(e: &CliToolCatalogEntry) {
+    if e.runtime_wrapper.is_none() || detect_app_copy(e).is_none() {
+        return;
+    }
+    let Ok(_guard) = lock_for(e.id).try_lock() else {
+        return;
+    };
+    if let Err(error) = write_runtime_wrapper(e) {
+        tracing::warn!(tool = e.binary_name, %error, "could not refresh CLI tool wrapper");
     }
 }
 
@@ -743,10 +1132,19 @@ fn detect_app_copy(e: &CliToolCatalogEntry) -> Option<AppCopy> {
 }
 
 pub async fn status(id: CliToolId) -> CliToolStatus {
+    status_with_probe_output(id).await.0
+}
+
+/// [`status`], plus the failed probe's output. The output stays inside the
+/// server: unattended re-auth reads it to tell an expired credential from a
+/// network or permission failure, which a bare exit code cannot.
+pub async fn status_with_probe_output(id: CliToolId) -> (CliToolStatus, ProbeOutput) {
     let e = entry(id);
+    refresh_runtime_wrapper(e);
     let reason = unsupported_reason(e).await;
-    let (auth_state, auth_message) = probe_auth(e).await;
-    CliToolStatus {
+    let (auth_state, auth_message, output) = probe_auth_with_output(e).await;
+    let agent = agent_check(e).await;
+    let status = CliToolStatus {
         id: e.id,
         binary_name: e.binary_name.to_string(),
         display_name: e.display_name.to_string(),
@@ -757,10 +1155,18 @@ pub async fn status(id: CliToolId) -> CliToolStatus {
         host: detect_host_copy(e).await,
         app: detect_app_copy(e),
         docs_url: e.docs_url.to_string(),
-        login_supported: matches!(e.auth, CliToolAuthStrategy::Command { .. }),
+        login_supported: match e.auth {
+            CliToolAuthStrategy::Command { .. }
+            | CliToolAuthStrategy::EntraMint { .. }
+            | CliToolAuthStrategy::EntraNativeBrowser { .. } => true,
+            CliToolAuthStrategy::ApiToken { probe } => probe().is_ok(),
+            CliToolAuthStrategy::Unsupported(_) => false,
+        },
         auth_state,
         auth_message,
-    }
+        agent,
+    };
+    (status, output)
 }
 
 pub async fn status_all() -> Vec<CliToolStatus> {
@@ -805,13 +1211,15 @@ pub async fn install(id: CliToolId) -> Result<CliToolStatus, CliToolError> {
         serde_json::to_string_pretty(&manifest).expect("manifest serializes"),
     )?;
 
+    write_runtime_wrapper(e)?;
+
     // Expose last: symlink into a temp name, then atomically rename over the
     // final name.
     #[cfg(unix)]
     {
         let bin_dir = cli_tools_bin_dir();
         std::fs::create_dir_all(&bin_dir)?;
-        let target = installed_binary_path(e);
+        let target = link_target(e);
         let tmp = bin_dir.join(format!(".tmp-{}", e.binary_name));
         let _ = std::fs::remove_file(&tmp);
         std::os::unix::fs::symlink(&target, &tmp)?;
@@ -852,6 +1260,178 @@ fn installed_binary_path(e: &CliToolCatalogEntry) -> PathBuf {
         // The generated pwsh wrapper sits at the version dir's root.
         InstallStrategy::PowerShellModule { .. } => version_dir.join(e.binary_name),
     }
+}
+
+/// Path of the generated runtime wrapper for a tool that declares one.
+fn wrapper_path(e: &CliToolCatalogEntry) -> PathBuf {
+    tool_dir(e.id)
+        .join(e.version)
+        .join(format!("{}-wrapper", e.binary_name))
+}
+
+/// What `bin/<name>` should point at: the wrapper when the tool needs a
+/// runtime it cannot get from a bare exec, otherwise the binary itself.
+fn link_target(e: &CliToolCatalogEntry) -> PathBuf {
+    match e.runtime_wrapper {
+        Some(_) => wrapper_path(e),
+        None => installed_binary_path(e),
+    }
+}
+
+/// Wrapper for the .NET Graph CLI.
+///
+/// Three things this host does not provide by default, all required on *every*
+/// invocation rather than just at sign-in:
+///   * invariant globalization — NixOS ships no libicu, and the CLI aborts
+///     on startup without one;
+///   * libsecret on the loader path — it lives in the store, so the dynamic
+///     loader cannot find it unaided;
+///   * a D-Bus session with an unlocked keyring — the MSAL cache is stored
+///     through the secret service, and its persistence check fails without it.
+///
+/// The keyring password is generated once and kept beside the tool; it guards
+/// a local token cache on a host the service user already owns.
+fn graph_cli_wrapper_script(binary: &Path, password_file: &Path, state_dir: &Path) -> String {
+    let q = |p: &Path| format!("'{}'", p.display().to_string().replace('\'', r"'\''"));
+    format!(
+        r#"#!/bin/sh
+# Generated by vibe-kanban; do not edit.
+set -e
+BIN={bin}
+PW={pw}
+
+# The runtime comes from the service environment of whichever host runs this
+# (every host sharing this directory needs it). A missing piece exits {exit}
+# with a message naming the variable -- never its value -- so status reports
+# "runtime unavailable" rather than "not signed in".
+unavailable() {{
+  echo "{prefix} $1 ($2)" >&2
+  exit {exit}
+}}
+[ -n "${{VK_ENTRA_DBUS_RUN_SESSION:-}}" ] || unavailable VK_ENTRA_DBUS_RUN_SESSION "not set"
+[ -x "$VK_ENTRA_DBUS_RUN_SESSION" ] || unavailable VK_ENTRA_DBUS_RUN_SESSION "not executable"
+[ -n "${{VK_ENTRA_KEYRING_DAEMON:-}}" ] || unavailable VK_ENTRA_KEYRING_DAEMON "not set"
+[ -x "$VK_ENTRA_KEYRING_DAEMON" ] || unavailable VK_ENTRA_KEYRING_DAEMON "not executable"
+[ -n "${{VK_ENTRA_LIBSECRET_LIB:-}}" ] || unavailable VK_ENTRA_LIBSECRET_LIB "not set"
+[ -d "$VK_ENTRA_LIBSECRET_LIB" ] || unavailable VK_ENTRA_LIBSECRET_LIB "not a directory"
+[ -x "$BIN" ] || unavailable "installed binary" "missing"
+# Dependency check only: launch nothing, touch no credential state.
+if [ "${{{check}:-}}" = 1 ]; then exit 0; fi
+
+DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
+export DOTNET_SYSTEM_GLOBALIZATION_INVARIANT
+LD_LIBRARY_PATH="$VK_ENTRA_LIBSECRET_LIB${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"
+export LD_LIBRARY_PATH
+
+# Keep the keyring in a directory we own. gnome-keyring unlocks the *login*
+# keyring under $XDG_DATA_HOME, and it can only do so with the password that
+# created it -- so a keyring left by anything else is one we can never open,
+# and the failure surfaces as MSAL's opaque "data was written but it could not
+# be read". Pointing XDG_DATA_HOME here means the keyring is always ours. The
+# tool's own cache lives alongside it, which is what we want: the credential
+# and the keyring that protects it stay together.
+XDG_DATA_HOME={state}
+mkdir -p "$XDG_DATA_HOME"
+chmod 700 "$XDG_DATA_HOME"
+export XDG_DATA_HOME
+
+# dbus-run-session wants a runtime dir it owns; fall back to a private one.
+if [ -z "${{XDG_RUNTIME_DIR:-}}" ] || [ ! -w "${{XDG_RUNTIME_DIR:-/nonexistent}}" ]; then
+  XDG_RUNTIME_DIR="${{TMPDIR:-/tmp}}/vk-runtime-$(id -u)"
+  mkdir -p "$XDG_RUNTIME_DIR"
+  chmod 700 "$XDG_RUNTIME_DIR"
+  export XDG_RUNTIME_DIR
+fi
+
+if [ ! -f "$PW" ]; then
+  (umask 077; od -An -tx1 -N32 /dev/urandom | tr -d ' 
+' > "$PW")
+fi
+
+exec "$VK_ENTRA_DBUS_RUN_SESSION" -- sh -c '
+  printf %s "$(cat "$2")" | "$VK_ENTRA_KEYRING_DAEMON" --daemonize --unlock --components=secrets >/dev/null 2>&1 || true
+  shift 2
+  exec "$0" "$@"
+' "$BIN" x "$PW" "$@"
+"#,
+        bin = q(binary),
+        pw = q(password_file),
+        state = q(state_dir),
+        exit = RUNTIME_DEPENDENCY_UNAVAILABLE_EXIT,
+        prefix = RUNTIME_DEPENDENCY_MESSAGE_PREFIX,
+        check = CHECK_MODE_ENV,
+    )
+}
+
+/// Write the generated runtime wrapper, if this tool declares one.
+///
+/// Also called before a sign-in: a copy installed by an older build has no
+/// wrapper, and without one the tool cannot reach its own credential store.
+/// Healing here means an upgrade does not silently leave the tool broken until
+/// someone happens to reinstall it.
+fn write_runtime_wrapper(e: &CliToolCatalogEntry) -> Result<(), CliToolError> {
+    let Some(RuntimeWrapper::GraphCliSecretService) = e.runtime_wrapper else {
+        return Ok(());
+    };
+    let binary = installed_binary_path(e);
+    if !binary.is_file() {
+        // Host-provided copy, or not installed: nothing of ours to wrap.
+        return Ok(());
+    }
+    let wrapper = wrapper_path(e);
+    let password_file = tool_dir(e.id).join(".keyring-password");
+    let state_dir = tool_dir(e.id).join("state");
+    std::fs::create_dir_all(&state_dir)?;
+    write_if_changed(
+        &wrapper,
+        &graph_cli_wrapper_script(&binary, &password_file, &state_dir),
+    )?;
+    // Point bin/ at the wrapper; an older install still links the binary.
+    #[cfg(unix)]
+    {
+        let link = bin_link_path(e.id);
+        if link.read_link().ok().as_deref() != Some(wrapper.as_path()) {
+            let tmp = cli_tools_bin_dir().join(format!(".tmp-{}", e.binary_name));
+            let _ = std::fs::remove_file(&tmp);
+            std::os::unix::fs::symlink(&wrapper, &tmp)?;
+            std::fs::rename(&tmp, link)?;
+        }
+    }
+    Ok(())
+}
+
+/// Replace an executable script only when its content changed, atomically.
+///
+/// The tools directory is shared by every host in a cluster and agents may be
+/// executing the script right now, so it must never be observed half-written:
+/// write a sibling unique to this process, then rename over the old file.
+/// Comparing first keeps a routine status refresh from rewriting it at all.
+fn write_if_changed(path: &Path, content: &str) -> Result<(), CliToolError> {
+    if std::fs::read_to_string(path).ok().as_deref() == Some(content) {
+        return Ok(());
+    }
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let tmp = path.with_file_name(format!(
+        ".{file_name}.tmp-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let result = (|| {
+        std::fs::write(&tmp, content)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
+        }
+        std::fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    Ok(result?)
 }
 
 /// Per-tool staging root, so concurrent installs of *different* tools never
@@ -1321,26 +1901,77 @@ mod tests {
     }
 
     #[test]
+    fn a_wrapped_tool_is_reached_through_its_wrapper() {
+        // Running the bare binary skips the environment its credential store
+        // needs, so it fails auth before it can even open a browser.
+        let mgc = entry(CliToolId::MgcBeta);
+        assert_eq!(link_target(mgc), wrapper_path(mgc));
+        assert_ne!(link_target(mgc), installed_binary_path(mgc));
+        // Unwrapped tools are unaffected.
+        let aws = entry(CliToolId::Aws);
+        assert_eq!(link_target(aws), installed_binary_path(aws));
+    }
+
+    #[test]
     fn only_durably_verifiable_tools_offer_login() {
-        for id in [CliToolId::Az, CliToolId::Gam] {
+        // Vendor login driven in a PTY.
+        assert!(matches!(
+            entry(CliToolId::Gam).auth,
+            CliToolAuthStrategy::Command { .. }
+        ));
+        // Entra tools: their own headless login is Conditional-Access blocked,
+        // so vibe-kanban mints the token and writes it to their credential
+        // store instead. Still login-capable, and still durably verifiable.
+        for id in [CliToolId::Az, CliToolId::GraphPowershell10] {
             assert!(matches!(
                 entry(id).auth,
-                CliToolAuthStrategy::Command { .. }
+                CliToolAuthStrategy::EntraMint { .. }
             ));
         }
-        for id in [
-            CliToolId::Aws,
-            CliToolId::Op,
-            CliToolId::MgcBeta,
-            CliToolId::Acli,
-            CliToolId::Gws,
-            CliToolId::GraphPowershell10,
-        ] {
+        // mgc-beta's own browser flow does work; it only needed a browser that
+        // could reach its loopback listener. It carries a runtime wrapper
+        // because that flow's credential store needs a secret service.
+        assert!(matches!(
+            entry(CliToolId::MgcBeta).auth,
+            CliToolAuthStrategy::EntraNativeBrowser { .. }
+        ));
+        assert_eq!(
+            entry(CliToolId::MgcBeta).runtime_wrapper,
+            Some(RuntimeWrapper::GraphCliSecretService),
+        );
+        // acli signs in from a 1Password API token, verified by a page read.
+        assert!(matches!(
+            entry(CliToolId::Acli).auth,
+            CliToolAuthStrategy::ApiToken { .. }
+        ));
+        for id in [CliToolId::Aws, CliToolId::Op, CliToolId::Gws] {
             assert!(matches!(
                 entry(id).auth,
                 CliToolAuthStrategy::Unsupported(_)
             ));
         }
+    }
+
+    #[test]
+    fn az_probe_acquires_a_token_rather_than_reading_the_cache() {
+        let args = probe_args_of(entry(CliToolId::Az)).unwrap();
+        assert_eq!(args, ["account", "get-access-token", "--output", "none"]);
+    }
+
+    #[test]
+    fn acli_probe_reads_the_configured_page_and_names_missing_config() {
+        assert_eq!(
+            acli_probe_args_for(Some(" 4796448789 ".into())).unwrap(),
+            ["confluence", "page", "view", "--id", "4796448789", "--json"]
+        );
+        let missing = acli_probe_args_for(None).unwrap_err();
+        assert!(missing.contains("VK_ATLASSIAN_VERIFY_PAGE_ID"), "{missing}");
+        // Never interpolate anything but a page id into the argv.
+        assert!(acli_probe_args_for(Some("1 --site evil".into())).is_err());
+        assert!(unattended_login(CliToolId::Acli));
+        assert!(unattended_login(CliToolId::Az));
+        assert!(!unattended_login(CliToolId::Gam), "gam needs a terminal");
+        assert!(!unattended_login(CliToolId::Aws), "AWS is a scope target");
     }
 
     #[test]
@@ -1375,7 +2006,15 @@ mod tests {
                 module: "Microsoft.Graph"
             }
         ));
-        assert!(matches!(e.auth, CliToolAuthStrategy::Unsupported(_)));
+        // Sign-in is minted by vibe-kanban rather than delegated to the SDK:
+        // the device-code flow it would otherwise use is refused tenant-wide.
+        assert!(matches!(
+            e.auth,
+            CliToolAuthStrategy::EntraMint {
+                client_id: crate::services::entra_mint::GRAPH_CLIENT_ID,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1393,6 +2032,239 @@ mod tests {
         // Shell-special characters in the app data path stay inert.
         let hostile = powershell_wrapper_script(Path::new("/data/o'brien $HOME/modules"));
         assert!(hostile.contains(r#"PSModulePath='/data/o'\''brien $HOME/modules'"#));
+    }
+
+    #[cfg(unix)]
+    fn graph_cli_wrapper_fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Hostile path: quotes and `$` must stay literal in the script.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("o'brien $HOME");
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        let exe = |name: &str, body: &str| {
+            let path = root.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        // Stand-ins: dbus-run-session drops its `--` and execs the rest; the
+        // keyring daemon swallows the password; the tool echoes its args and
+        // exits with a distinctive status.
+        exe(
+            "dbus-run-session",
+            "touch \"$(dirname \"$0\")/dbus-ran\"\nshift\nexec \"$@\"",
+        );
+        exe("gnome-keyring-daemon", "cat >/dev/null");
+        let binary = exe("mgc-beta", "printf '%s' \"$*\"\nexit 7");
+        let wrapper = root.join("mgc-beta-wrapper");
+        std::fs::write(
+            &wrapper,
+            graph_cli_wrapper_script(
+                &binary,
+                &root.join(".keyring-password"),
+                &root.join("state"),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (dir, root, binary, wrapper)
+    }
+
+    #[cfg(unix)]
+    fn run_graph_cli_wrapper(
+        wrapper: &Path,
+        vars: &[(&str, &Path)],
+        check_mode: bool,
+    ) -> std::process::Output {
+        let mut command = std::process::Command::new(wrapper);
+        command
+            .args(["users", "list"])
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default());
+        for (key, value) in vars {
+            command.env(key, value);
+        }
+        if check_mode {
+            command.env(CHECK_MODE_ENV, "1");
+        }
+        // A fork in a concurrent test can briefly hold the just-written script
+        // open for writing; exec then fails with ETXTBSY. Retry only that.
+        for _ in 0..50 {
+            match command.output() {
+                Err(e) if e.raw_os_error() == Some(26) => {
+                    std::thread::sleep(std::time::Duration::from_millis(20))
+                }
+                result => return result.unwrap(),
+            }
+        }
+        panic!("wrapper stayed busy (ETXTBSY)")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn graph_cli_wrapper_names_a_missing_dependency_without_its_value() {
+        let (_dir, root, _, wrapper) = graph_cli_wrapper_fixture();
+
+        let unset = run_graph_cli_wrapper(&wrapper, &[], false);
+        assert_eq!(
+            unset.status.code(),
+            Some(RUNTIME_DEPENDENCY_UNAVAILABLE_EXIT)
+        );
+        let stderr = String::from_utf8_lossy(&unset.stderr);
+        assert!(stderr.contains(&format!(
+            "{RUNTIME_DEPENDENCY_MESSAGE_PREFIX} VK_ENTRA_DBUS_RUN_SESSION (not set)"
+        )));
+
+        // A garbage-collected store path is as unavailable as an unset one,
+        // and the path itself never reaches the message.
+        let stale = Path::new("/nix/store/gone-dbus/bin/dbus-run-session");
+        let collected = run_graph_cli_wrapper(
+            &wrapper,
+            &[
+                ("VK_ENTRA_DBUS_RUN_SESSION", stale),
+                (
+                    "VK_ENTRA_KEYRING_DAEMON",
+                    &root.join("gnome-keyring-daemon"),
+                ),
+                ("VK_ENTRA_LIBSECRET_LIB", &root.join("lib")),
+            ],
+            false,
+        );
+        assert_eq!(
+            collected.status.code(),
+            Some(RUNTIME_DEPENDENCY_UNAVAILABLE_EXIT)
+        );
+        let stderr = String::from_utf8_lossy(&collected.stderr);
+        assert!(stderr.contains("VK_ENTRA_DBUS_RUN_SESSION (not executable)"));
+        assert!(!stderr.contains("gone-dbus"));
+
+        let no_lib = run_graph_cli_wrapper(
+            &wrapper,
+            &[
+                ("VK_ENTRA_DBUS_RUN_SESSION", &root.join("dbus-run-session")),
+                (
+                    "VK_ENTRA_KEYRING_DAEMON",
+                    &root.join("gnome-keyring-daemon"),
+                ),
+                ("VK_ENTRA_LIBSECRET_LIB", &root.join("missing-lib")),
+            ],
+            false,
+        );
+        assert!(
+            String::from_utf8_lossy(&no_lib.stderr)
+                .contains("VK_ENTRA_LIBSECRET_LIB (not a directory)")
+        );
+        // Nothing was launched and no credential state was created.
+        assert!(!root.join("dbus-ran").exists());
+        assert!(!root.join(".keyring-password").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn graph_cli_wrapper_check_mode_validates_without_launching() {
+        let (_dir, root, _, wrapper) = graph_cli_wrapper_fixture();
+        let out = run_graph_cli_wrapper(
+            &wrapper,
+            &[
+                ("VK_ENTRA_DBUS_RUN_SESSION", &root.join("dbus-run-session")),
+                (
+                    "VK_ENTRA_KEYRING_DAEMON",
+                    &root.join("gnome-keyring-daemon"),
+                ),
+                ("VK_ENTRA_LIBSECRET_LIB", &root.join("lib")),
+            ],
+            true,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.stdout.is_empty());
+        assert!(!root.join("dbus-ran").exists());
+        assert!(!root.join(".keyring-password").exists());
+        assert!(!root.join("state").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn graph_cli_wrapper_runs_the_tool_with_its_isolated_credential_store() {
+        let (_dir, root, binary, wrapper) = graph_cli_wrapper_fixture();
+        let out = run_graph_cli_wrapper(
+            &wrapper,
+            &[
+                ("VK_ENTRA_DBUS_RUN_SESSION", &root.join("dbus-run-session")),
+                (
+                    "VK_ENTRA_KEYRING_DAEMON",
+                    &root.join("gnome-keyring-daemon"),
+                ),
+                ("VK_ENTRA_LIBSECRET_LIB", &root.join("lib")),
+            ],
+            false,
+        );
+        // The tool's own status and args come through unchanged.
+        assert_eq!(
+            out.status.code(),
+            Some(7),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "users list");
+        assert!(root.join("dbus-ran").exists());
+        // Credential isolation is part of the contract: the keyring and the
+        // MSAL cache stay in the wrapper-owned paths beside the tool.
+        assert!(root.join(".keyring-password").exists());
+        assert!(root.join("state").is_dir());
+        let script = std::fs::read_to_string(&wrapper).unwrap();
+        let quoted = |p: &Path| format!("'{}'", p.display().to_string().replace('\'', r"'\''"));
+        assert!(script.contains(&format!("BIN={}", quoted(&binary))));
+        assert!(script.contains(&format!("PW={}", quoted(&root.join(".keyring-password")))));
+        assert!(script.contains(&format!("XDG_DATA_HOME={}", quoted(&root.join("state")))));
+    }
+
+    #[test]
+    fn a_missing_runtime_is_never_reported_as_signed_out() {
+        let stderr =
+            format!("{RUNTIME_DEPENDENCY_MESSAGE_PREFIX} VK_ENTRA_LIBSECRET_LIB (not set)");
+        let (state, message) =
+            classify_auth_probe(false, Some(RUNTIME_DEPENDENCY_UNAVAILABLE_EXIT), &stderr);
+        assert_eq!(state, CliToolAuthState::Unknown);
+        assert_eq!(
+            message.as_deref(),
+            Some("Runtime dependency unavailable: VK_ENTRA_LIBSECRET_LIB (not set)")
+        );
+        // An ordinary failed probe is still "not signed in", with no stderr.
+        assert_eq!(
+            classify_auth_probe(false, Some(1), "AADSTS700082: token expired"),
+            (CliToolAuthState::Unauthenticated, None)
+        );
+        assert_eq!(
+            classify_auth_probe(true, Some(0), ""),
+            (CliToolAuthState::Authenticated, None)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wrapper_rewrites_are_atomic_and_skip_unchanged_content() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tool-wrapper");
+        write_if_changed(&path, "#!/bin/sh\necho one\n").unwrap();
+        let first = std::fs::metadata(&path).unwrap().ino();
+        write_if_changed(&path, "#!/bin/sh\necho one\n").unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().ino(), first);
+        write_if_changed(&path, "#!/bin/sh\necho two\n").unwrap();
+        // Replaced by rename, never truncated in place under a running reader.
+        assert_ne!(std::fs::metadata(&path).unwrap().ino(), first);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "#!/bin/sh\necho two\n"
+        );
+        let leftovers = std::fs::read_dir(dir.path()).unwrap().count();
+        assert_eq!(leftovers, 1);
     }
 
     #[cfg(unix)]

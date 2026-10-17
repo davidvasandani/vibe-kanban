@@ -1,7 +1,8 @@
 # Active MCP refresh
 
 Contributing tasks: `8c27-refresh-mcp-tool`, `9151-reloading-mcp-no`,
-`cc71-refresh-mcp-shou`, `mcp-agent-restart`
+`cc71-refresh-mcp-shou`, `mcp-agent-restart`, `vk/d71c-refresh-active-w`,
+`vk/84ef-restore-slack-mc`, `vk/38a6-expose-session-w`
 
 ## Executor-neutral restart fallback
 
@@ -91,6 +92,14 @@ through executor errors, commands, environment values, authenticated URLs, or
 raw subprocess output. Tool/resource counts remain optional, and the
 last-successful timestamp advances only after a fully successful confirmation.
 
+Configured state and agent-visible state are separate facts. A secret-safe
+status response may expose only sorted server identifiers from the selected
+profile alongside live server snapshots. The browser can then distinguish
+"not assigned", "assigned but awaiting adoption", "missing or zero tools", and
+"ready with tools" without receiving definitions, headers, or environment
+values. Treat an aggregate refresh failure before retained snapshots so stale
+last-successful inventory cannot be presented as current availability.
+
 ## Clustered refresh rematerialization
 
 Dispatch-time snapshots describe what a remote execution started with; they are
@@ -111,3 +120,85 @@ Worker `busy` and `unsupported` outcomes preserve those public statuses rather
 than passing through a generic failure transition. Old workers without the
 refresh route, recovered jobs without live control, and terminal jobs are
 unsupported—not successful and not retryable bootstrap failures.
+
+## Exact inventory evidence and rolling compatibility
+
+A tool count cannot prove that a refreshed inventory matches the prior one.
+Remove-plus-add can keep the count constant, and an input/output schema can
+change without changing either the server or tool identifier. Thread-scoped,
+full-detail Codex status is therefore reduced to bounded evidence:
+
+- sorted tool identifiers, for exact addition/removal visibility;
+- a SHA-256 fingerprint of each tool identifier plus its input/output schemas,
+  for schema-only change visibility.
+
+Canonicalize every JSON object recursively before hashing. This repository
+enables serde_json `preserve_order`, and provider-supplied JSON object order is
+not semantic; hashing serialized input directly turns harmless key reordering
+into a false inventory change. Array order remains significant.
+
+Only publish this evidence when capability discovery succeeded. In particular,
+`NotLoggedIn` commonly accompanies an empty tool map, but that is unavailable
+inventory—not proof that every tool was removed. Leave names and fingerprint
+unknown on authentication failure.
+
+New optional fields crossing the coordinator/worker protocol need serde
+defaults. During a rolling deployment, an older worker omits them; failure to
+default would reject the entire otherwise-valid server snapshot and could make
+a successful refresh appear to have no servers. Test deserialization from the
+old payload shape whenever extending a distributed snapshot.
+
+The user-facing correctness boundary remains **Restart agent for MCP changes**.
+It starts a new app-server/MCP process from current native configuration while
+preserving the logical workspace and conversation. Settings connectivity tests
+and plugin-manager installation status are separate views: neither refreshes an
+already-running agent's callable schema.
+
+## Session and workspace recovery
+
+Recovery must be backend-owned before it stops the calling agent. A session
+restart reserves a normal continuation, records a fresh inventory generation,
+and lets the exit monitor remain the single consumer. Carry that generation
+through every deferred cancellation and failure path: looking up the current
+generation during old cleanup can terminalise a newer replacement operation.
+
+A workspace restart additionally stops every workspace-owned process and
+replays persistent processes from their durable launch definitions. Protect the
+teardown boundary with a per-workspace read/write launch gate:
+
+- ordinary user and tool launches take the read side and fail promptly while
+  teardown owns the write side;
+- lifecycle continuations that already consumed queue state wait for the read
+  side, so cleanup chains and follow-ups resume instead of disappearing;
+- recovery-owned persistent replay bypasses the read side explicitly while the
+  caller holds the write guard;
+- non-forced recovery waits for coding agents before acquiring the write side,
+  then rechecks under the guard to close the check-to-lock race.
+
+Never report workspace recovery as complete unless every captured running or
+indeterminate process has a verified terminal database state. A failed stop
+must prevent duplicate replay. Release the launch guard only after teardown and
+persistent replay, before starting the selected session continuation.
+
+## Runtime inventory truth
+
+Configured server names, control-plane connection state, and the active
+session's registered tools are different facts. Runtime status must come from
+the executor process that owns the callable registry. Preserve server identity
+when parsing executor tool names, including identifiers that contain the
+executor's own delimiter.
+
+Every configured server must reach a bounded terminal outcome. Distinguish at
+least ready, connected with zero tools, retained after failure, unavailable,
+and not registered. `ConnectedNoTools` is a partial recovery outcome, not a
+success, and must not advance `last_successful_refresh_at`. Similarly, an
+unsupported in-place refresh may report its limitation immediately but must
+not suppress startup inventory or timeout evidence from the already-active
+process.
+
+The MCP panel should render the same runtime inventory used by session tools.
+When a server is unusable, issue diagnostics should include only secret-safe
+structured evidence: server IDs, timestamped public error categories, executor,
+workspace/session IDs, registered server tool counts, and discovery-attempt
+counts. Keep issue creation available without project context by falling back
+to a prefilled upstream issue URL.

@@ -1,6 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ExecutionProcess, ExecutionProcessStatus } from 'shared/types';
 import {
+  createSettledEntriesCache,
   getRecentProcessIdsToRetain,
   getUnloadedHistoricProcesses,
   loadProcessesInOrder,
@@ -188,5 +189,96 @@ describe('loadProcessesInOrder', () => {
 
     expect(loaded.map(({ process: p }) => p.id)).toEqual(['ok', 'alsoOk']);
     expect(failedProcessCount).toBe(1);
+  });
+});
+
+describe('createSettledEntriesCache', () => {
+  const completed = (id: string) =>
+    process(id, ExecutionProcessStatus.completed);
+
+  it('requests each completed turn once across the initial window and load earlier', async () => {
+    // Six completed turns, newest last, as the session snapshot lists them.
+    const processes = ['t1', 't2', 't3', 't4', 't5', 't6'].map(completed);
+    const cache = createSettledEntriesCache<string>();
+    const requests: string[] = [];
+    const fetchEntries = (p: ExecutionProcess) =>
+      cache.get(p, async (target) => {
+        requests.push(target.id);
+        // The newest turn alone crosses the initial threshold.
+        return {
+          entries: target.id === 't6' ? Array(12).fill('e') : ['e'],
+          complete: true,
+        };
+      });
+
+    // Initial window: one concurrent slice of five, only the newest is kept.
+    const initial = await loadProcessesInOrder(
+      [...processes].reverse(),
+      fetchEntries,
+      (soFar) => soFar.flatMap(({ entries }) => entries).length > 10,
+      5
+    );
+    expect(initial.loaded.map(({ process: p }) => p.id)).toEqual(['t6']);
+
+    // The top sentinel then asks for earlier history.
+    const earlier = await loadProcessesInOrder(
+      getUnloadedHistoricProcesses(processes, new Set(['t6'])),
+      fetchEntries,
+      () => false,
+      5
+    );
+    expect(earlier.loaded.map(({ process: p }) => p.id)).toEqual([
+      't5',
+      't4',
+      't3',
+      't2',
+      't1',
+    ]);
+
+    expect([...requests].sort()).toEqual(['t1', 't2', 't3', 't4', 't5', 't6']);
+  });
+
+  it('joins a request already in flight for the same turn', async () => {
+    const cache = createSettledEntriesCache<string>();
+    let release: () => void = () => {};
+    const load = vi.fn(
+      () =>
+        new Promise<{ entries: string[]; complete: boolean }>((resolve) => {
+          release = () => resolve({ entries: ['a'], complete: true });
+        })
+    );
+
+    const first = cache.get(completed('t1'), load);
+    const second = cache.get(completed('t1'), load);
+    release();
+
+    await expect(Promise.all([first, second])).resolves.toEqual([['a'], ['a']]);
+    expect(load).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not keep failures or incomplete results, so a retry refetches', async () => {
+    const cache = createSettledEntriesCache<string>();
+    const failing = vi.fn().mockRejectedValue(new Error('timeout'));
+    await expect(cache.get(completed('t1'), failing)).rejects.toThrow(
+      'timeout'
+    );
+
+    const partial = vi
+      .fn()
+      .mockResolvedValue({ entries: ['prefix'], complete: false });
+    await expect(cache.get(completed('t1'), partial)).resolves.toEqual([
+      'prefix',
+    ]);
+
+    const settled = vi
+      .fn()
+      .mockResolvedValue({ entries: ['full'], complete: true });
+    await expect(cache.get(completed('t1'), settled)).resolves.toEqual([
+      'full',
+    ]);
+    await expect(cache.get(completed('t1'), settled)).resolves.toEqual([
+      'full',
+    ]);
+    expect(settled).toHaveBeenCalledTimes(1);
   });
 });

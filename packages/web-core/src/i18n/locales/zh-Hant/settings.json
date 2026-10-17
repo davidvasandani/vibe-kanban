@@ -13,6 +13,7 @@
       "hostSwitchMessage": "You have unsaved changes for the current host. Switching hosts will discard those drafts."
     },
     "layout": {
+      "resizeDrawer": "調整設定寬度",
       "nav": {
         "title": "設定",
         "general": "一般",
@@ -23,12 +24,14 @@
         "reposDesc": "儲存庫腳本與設定",
         "agents": "代理",
         "agentsDesc": "編碼代理設定",
+        "skills": "技能",
+        "skillsDesc": "共享代理技能與提案",
         "mcp": "MCP 伺服器",
         "mcpDesc": "模型上下文協議伺服器",
         "cli-tools": "CLI 工具",
         "cli-toolsDesc": "由應用程式管理的代理命令列工具",
-        "aws": "AWS",
-        "awsDesc": "AWS SSO 設定檔與登入",
+        "auth": "驗證",
+        "authDesc": "自動驗證儀表板與 AWS SSO 設定檔",
         "organizations": "組織設定",
         "organizationsDesc": "管理組織成員與權限",
         "remote-projects": "專案",
@@ -47,6 +50,27 @@
         "pipelinesDesc": "Pipeline TOML files and defaults",
         "workers": "叢集工作節點",
         "workersDesc": "工作節點健康狀況、儲存空間與排程"
+      }
+    },
+    "skills": {
+      "title": "技能",
+      "description": "建立及管理共享代理技能。變更會針對 {{baseBranch}} 建立拉取請求。",
+      "loading": "正在載入技能…",
+      "unavailable": "此機器未設定以 Git 管理技能。",
+      "add": "新增技能",
+      "delete": "刪除技能",
+      "untitled": "未命名技能",
+      "empty": "新增技能以開始。",
+      "fields": {
+        "name": "名稱",
+        "description": "描述與觸發指南",
+        "instructions": "說明 (Markdown)"
+      },
+      "proposal": {
+        "title": "提議變更",
+        "description": "Vibe Kanban 會驗證目錄並建立可審核的拉取請求。",
+        "submit": "建立拉取請求（{{count}} 項變更）",
+        "open": "開啟拉取請求"
       }
     },
     "general": {
@@ -86,6 +110,37 @@
         "autoResume": {
           "label": "啟動時恢復被中斷的執行",
           "helper": "自動向因重新啟動而中斷的編碼代理執行傳送後續訊息。每次執行最多恢復一次。代理會在未經確認的情況下啟動，並可能消耗 token。"
+        }
+      },
+      "autoRemediation": {
+        "title": "自動錯誤修復",
+        "description": "當編碼代理的回合失敗時，建立附帶流水線的問題，並啟動一個無人值守修復它的工作區。",
+        "enabled": {
+          "label": "自動修復失敗的代理執行",
+          "helper": "代理無需確認即啟動，會消耗權杖，並可能合併到基礎分支。修復工作區本身不會觸發修復；每個工作區每天最多修復一次。"
+        },
+        "project": {
+          "label": "問題所屬專案",
+          "helper": "接收修復問題的專案。",
+          "source": "失敗工作區的專案"
+        },
+        "repos": {
+          "label": "儲存庫",
+          "helper": "修復工作區使用的儲存庫。未選擇時使用失敗工作區的儲存庫。"
+        },
+        "executor": {
+          "label": "代理"
+        },
+        "variant": {
+          "label": "設定變體",
+          "helper": "若該變體未定義，則使用預設變體。"
+        },
+        "model": {
+          "label": "模型"
+        },
+        "maxPerHour": {
+          "label": "每小時最多啟動次數",
+          "helper": "0 表示停用啟動。"
         }
       },
       "editor": {
@@ -316,6 +371,19 @@
       "description": "使用不同設定自訂編碼代理的行為。",
       "loading": "載入代理設定中...",
       "selectAgent": "選擇代理",
+      "visibility": {
+        "title": "可見性",
+        "description": "已停用的代理不會出現在代理選擇器中。它們仍可在此設定，現有工作會繼續執行。",
+        "label": "在代理選擇器中顯示",
+        "defaultLocked": "無法停用預設代理。請先將其他代理設為預設。",
+        "lastLocked": "至少需要保留一個已啟用的代理。"
+      },
+      "models": {
+        "title": "模型",
+        "description": "取消勾選的模型將從此代理的模型選單中隱藏。",
+        "lastEnabled": "至少需要保留一個已啟用的模型。",
+        "loading": "正在載入模型..."
+      },
       "save": {
         "button": "儲存代理設定",
         "success": "✓ 執行器設定儲存成功！",
@@ -346,7 +414,8 @@
         "jsonLabel": "代理設定（JSON）",
         "jsonPlaceholder": "載入設定檔中...",
         "jsonLoading": "載入中...",
-        "pathLabel": "設定檔位置："
+        "pathLabel": "設定檔位置：",
+        "disabled": "已停用"
       },
       "errors": {
         "deleteFailed": "刪除設定失敗。請重試。",
@@ -675,6 +744,22 @@
       "overview": {
         "available": "Available",
         "unavailable": "Unavailable"
+      },
+      "management": {
+        "title": "已配對機器",
+        "description": "管理與此用戶端配對的遠端機器。",
+        "refresh": "重新整理",
+        "loading": "正在載入已配對機器…",
+        "loadError": "無法載入已配對機器。請重新整理後再試。",
+        "statusError": "無法檢查連線狀態。請重新整理後再試。",
+        "empty": "尚無已配對機器。請透過用戶端設定配對機器。",
+        "online": "線上",
+        "offline": "離線",
+        "unpaired": "需要配對",
+        "unknown": "狀態未知",
+        "pairedAt": "配對日期：{{date}}",
+        "open": "開啟工作區",
+        "removeConfirm": "從此用戶端移除與 {{name}} 的配對？遠端工作區不會被刪除。"
       }
     },
     "remoteProjects": {
@@ -774,7 +859,7 @@
     },
     "cliTools": {
       "title": "CLI 工具",
-      "description": "將供應商 CLI 工具的固定版本安裝到應用程式管理的目錄中。工具會加入代理的 PATH，但本機已有的副本永遠優先。應用程式絕不會儲存工具憑證。",
+      "description": "在所選主機上安裝 CLI 工具。以下檢查在該主機上、以其代理取得的環境（登入與非登入 shell）執行。憑證由各 CLI 管理。",
       "loading": "正在檢查工具可用性…",
       "docs": "供應商文件",
       "actions": {
@@ -797,18 +882,69 @@
         "cancel": "取消",
         "retry": "重試"
       },
+      "agent": {
+        "available": "此主機上的代理：{{path}}",
+        "missing": "此主機上的代理找不到它",
+        "login_shell_missing": "代理：位於 {{path}}，但在登入 shell 中遺失",
+        "login_shell_mismatch": "代理：{{path}}，但登入 shell 執行的是另一個副本",
+        "runtime_unavailable": "代理：{{path}} 無法啟動（執行階段相依項目無法使用）",
+        "failed": "代理：{{path}} 未能啟動"
+      },
       "status": {
-        "host": "由本機提供：{{path}}",
-        "app": "由 Vibe Kanban 安裝（{{version}}）",
+        "host": "本機副本：{{path}}",
+        "app": "由 Vibe Kanban 安裝在主機上（{{version}}）",
         "outdated": "目錄目前固定為 {{version}}",
         "shadowed": "本機副本在 PATH 中優先",
         "notAvailable": "未安裝。目錄版本：{{version}}",
         "unsupported": "無法在此安裝"
       }
     },
+    "reauth": {
+      "title": "自動驗證",
+      "description": "此主機使用已儲存的 Entra 瀏覽器工作階段和 1Password，在無人參與的情況下重新登入的憑證。只有在獨立檢查供應商自身的憑證存放區後才會回報成功。",
+      "loading": "正在檢查憑證…",
+      "empty": "此主機上未設定重新驗證目標。",
+      "sweepEvery": "過期的憑證每 {{minutes}} 分鐘自動修復一次。",
+      "sweepOff": "自動修復已關閉；請視需要重新驗證。",
+      "runAll": "重新驗證所有過期項目",
+      "run": "重新驗證",
+      "onDemand": "僅限視需要",
+      "refused": "先前遭拒：在您於此處重新執行之前，代理程式和自動巡檢不會重試。",
+      "showSteps": "顯示步驟",
+      "hideSteps": "隱藏步驟",
+      "state": {
+        "authenticated": "已驗證",
+        "unauthenticated": "已過期或已登出",
+        "unknown": "狀態未知",
+        "not_configured": "未設定"
+      },
+      "outcome": {
+        "running": "執行中",
+        "succeeded": "成功",
+        "failed": "失敗",
+        "verification_failed": "已完成，但驗證失敗",
+        "refused": "已拒絕"
+      },
+      "trigger": {
+        "manual": "來自設定",
+        "agent": "由代理程式",
+        "sweep": "由自動巡檢"
+      },
+      "summary": {
+        "healthy": "已登入",
+        "attention": "需要處理",
+        "unknown": "未知",
+        "notConfigured": "未設定"
+      },
+      "kind": {
+        "aws_sso": "AWS SSO",
+        "cli_tool": "CLI 工具",
+        "sgsc": "sgsc-mcp 閘道"
+      }
+    },
     "aws": {
       "title": "AWS",
-      "description": "管理此機器 ~/.aws/config 中的 AWS SSO 設定檔，並使用 AWS CLI 登入。Vibe Kanban 只寫入設定檔設定；憑證與權杖保留在 AWS CLI 自身的儲存空間中。",
+      "description": "在所選主機上管理 AWS SSO 設定並登入。狀態檢查僅驗證主機身分驗證。代理 shell 需要存取相同的 AWS 設定和 SSO 快取；請使用 AWS_PROFILE 選擇設定。權杖由 AWS CLI 管理。",
       "loading": "正在載入 AWS 設定檔…",
       "empty": "尚未設定 SSO 設定檔。新增一個即可在此機器上啟用 AWS 存取。",
       "cliMissing": "此機器上沒有可用的 AWS CLI。請從 CLI 工具區段安裝，以便檢查狀態並登入。",
@@ -829,10 +965,10 @@
         "delete": "刪除設定檔"
       },
       "auth": {
-        "authenticated": "已驗證",
-        "unauthenticated": "未登入",
-        "unknown": "狀態不明",
-        "cliMissing": "AWS CLI 無法使用"
+        "authenticated": "已在主機上驗證",
+        "unauthenticated": "主機未登入",
+        "unknown": "主機驗證狀態未知",
+        "cliMissing": "主機上無可用的 AWS CLI"
       },
       "delete": {
         "confirm": "要從 ~/.aws/config 刪除 SSO 設定檔「{{name}}」嗎？"
@@ -951,6 +1087,28 @@
         "resetAllTitle": "Reset all bundled defaults?",
         "resetAllMessage": "This recreates or overwrites all bundled default pipeline files.",
         "resetAllDirtyMessage": "This recreates or overwrites all bundled default pipeline files and discards the open draft."
+      },
+      "newIssueDefaults": {
+        "title": "新問題預設值",
+        "description": "新問題預設啟用的流水線,適用於新建問題表單以及未指定流水線的 MCP create_issue 呼叫。專案覆寫優先於其組織覆寫,組織覆寫優先於本機預設值。儲存在本機上。",
+        "machine": {
+          "label": "本機",
+          "helper": "當專案及其組織都未覆寫時使用。"
+        },
+        "organizations": {
+          "label": "組織覆寫",
+          "helper": "為組織內所有專案覆寫本機預設值。"
+        },
+        "projects": {
+          "label": "專案覆寫",
+          "helper": "為單一專案覆寫組織(或本機)預設值。"
+        },
+        "inheritMachine": "使用本機預設值",
+        "inheritOrganization": "使用組織預設值",
+        "override": "覆寫",
+        "noneSelected": "無流水線:新問題將不帶流水線。",
+        "missing": "{{id}}(遺失)",
+        "saveFailed": "無法儲存新問題預設值,請重試。"
       }
     }
   },
