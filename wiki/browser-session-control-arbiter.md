@@ -182,7 +182,48 @@ active only when `VIBE_BROWSER_CF_ACCESS_CLIENT_ID`, `_CLIENT_SECRET` and
 - Live check (ignored by default):
   `VK_BROWSER_LIVE_URL=https://<gated host>/ cargo test -p services --lib live_access_headers -- --ignored`.
 
+## Mobile keyboard and plain-text clipboard (vk/5c0e-vk-browser)
+
+A screencast image has no local editable DOM target. Focusing its wrapper
+cannot summon a software keyboard. Keep a real labeled textarea mounted and
+focus it synchronously during the touch gesture, before awaiting remote input.
+VK focuses it on touch taps inside the rendered frame and exposes Keyboard as
+an explicit alternative; taps on non-editable remote content can therefore
+also open the keyboard. Capture frame coordinates before focus changes the
+mobile viewport. A sentinel behind the local caret lets soft keyboards emit
+Backspace after each committed value has been cleared. Ignore intermediate
+composition events, commit once, and leave printable keys to native input in
+the textarea so keydown and input do not duplicate text.
+
+Clipboard operations use the existing WebSocket action acknowledgement and
+control gate. `copy_selection` evaluates a fixed expression, without enabling
+arbitrary Evaluate, and returns the selected plain text from a focused input,
+textarea, same-origin frame/open shadow root, or document selection. Password
+inputs are excluded. Copy fails above 65,536 UTF-16 code units instead of
+silently truncating; the UI applies the same bound to inserted text. Cross-origin
+frames are not readable through this expression. Paste uses Type / CDP
+`Input.insertText`, which replaces the remote selection but does not synthesize
+a remote paste event.
+
+Preserve the browser's local Ctrl/Cmd+V default and consume `clipboardData` in
+its paste event. A Paste button can call `navigator.clipboard.readText()`.
+Async clipboard permission can be denied, and Copy's remote response can
+outlive Safari's user activation, so offer a manual textarea fallback. Remount
+the bridge on session/connection/control-generation changes; unmount it on
+control loss/disconnection and reject late async results before clipboard or
+remote side effects. Do not persist or log text.
+
+Chromium needs virtual key codes for Select all, deletion and navigation.
+Avoid text payloads on Ctrl/Meta shortcuts, but preserve AltGr/Option-produced
+characters: the client OS already resolved them, so insert that text directly
+rather than treating Ctrl+Alt as a remote shortcut. Keep punctuation out of the
+ASCII virtual-key shortcut mapping (`.` is ASCII 46, the Delete virtual key).
+Use the ignored `live_keyboard_and_selection` Rust test with local Chromium to
+verify actual editing behavior. DOM/touch-event tests prove synchronous focus
+and forwarding, not whether a physical phone displays its OS keyboard.
+
 ## Contributed by
 
 - vk/57e0-add-shared-human
 - vk/5673-cloudflare-acces
+- vk/5c0e-vk-browser (workspace `5c0e77f9-1063-4612-9ac7-922daf57452b`)
