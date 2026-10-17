@@ -1,18 +1,51 @@
-# VK Browser keyboard and clipboard
+# Debug Codex refresh-token errors
 
-## Problem and scope
-The streamed browser is an image with pointer and key forwarding. Focusing its container cannot summon a mobile software keyboard, and native clipboard actions currently affect the local page rather than the remote browser. Limit changes to the Vibe Kanban repository.
+## Problem
+
+When Codex loses its session because a refresh token has been invalidated, its
+internal logger writes the same authentication failure to stderr repeatedly.
+Vibe Kanban currently renders those raw logger lines as ordinary error output.
+The screenshot for this task shows the resulting wall of red text and provides
+no concise, actionable recovery path.
+
+The structured Codex protocol already classifies equivalent refresh failures
+as setup-required errors. The stderr path does not apply that classification or
+collapse duplicate logger output, so behavior depends on which Codex channel
+reported the failure.
+
+## Scope
+
+Limit implementation to the Vibe Kanban source repository. The shared homelab
+repository's `modules/vibe-kanban-rebuild.nix` is in deployment scope only if
+diagnosis proves that its Codex refresh-broker wiring is incorrect. Do not
+change any other service.
 
 ## Required behavior
-- A controlling user tapping a remote text field can type with their device keyboard, including composition, deletion, and Enter.
-- Provide explicit keyboard access if remote focus cannot be identified synchronously within the mobile user gesture.
-- Users can paste plain text from their device into the focused remote field and copy remote selected text back to their device.
-- Clipboard access is explicit; denied or unsupported access has a selectable/manual fallback and visible error feedback.
-- Preserve control ownership, stale-generation rejection, desktop keyboard behavior, and session isolation. Read-only viewers cannot send input.
-- Never persist clipboard contents or log typed text.
 
-## Technical direction
-Inspect the existing browser WebSocket/CDP protocol and extend its guarded input handling only where needed. Use a real local editable input for mobile keyboard events, rather than depending on keydown alone. Bridge plain text through existing input routing where possible; remote selection retrieval must respect session control. Clear ephemeral input/clipboard state when sessions or ownership change.
+- Detect Codex stderr records whose message reports a failed token refresh,
+  including `refresh_token_invalidated` / revoked-session wording.
+- Render one concise setup-required entry with practical recovery guidance
+  instead of repeated raw internal log records.
+- Preserve useful diagnostic context without exposing token material.
+- Keep unrelated stderr output and structured Codex events unchanged.
+- Avoid hiding a later distinct refresh failure merely because an earlier one
+  was deduplicated.
+- Work when a logger record is split across stream chunks or contains a
+  multiline JSON error body.
 
-## Verification
-Cover text/composition event handling, clipboard behavior, ownership rejection and session changes with focused tests. Run repository formatting, type checks, relevant Rust tests and lint. Independently review the diff, fix confirmed findings, document reusable behavior, and merge a PR after checks succeed.
+## Acceptance criteria
+
+1. The exact failure shape shown in the task attachment is covered by an
+   automated regression test.
+2. Repeated lines from one refresh failure produce a single user-visible,
+   setup-required error.
+3. The guidance tells a direct-login user to sign in again and retains the
+   existing refresh-endpoint guidance for brokered cluster logins.
+4. A non-authentication stderr line remains an ordinary error entry.
+5. Relevant Rust tests, formatting, and repository checks pass.
+
+## Non-goals
+
+- Automatically renewing or replacing revoked credentials.
+- Changing the Codex CLI's authentication protocol.
+- Modifying unrelated services or broadening the homelab deployment topology.
