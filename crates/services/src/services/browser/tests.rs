@@ -470,3 +470,35 @@ async fn late_joining_observer_gets_the_last_frame() {
         "idle page pushes no new frames to a late subscriber"
     );
 }
+
+#[tokio::test]
+async fn selection_reads_require_current_control() {
+    let rt = runtime().await;
+    let owner = human(Uuid::new_v4());
+    let viewer = human(Uuid::new_v4());
+    let action: BrowserAction =
+        serde_json::from_value(serde_json::json!({"type": "copy_selection"})).unwrap();
+    assert!(!action.is_privileged());
+    assert!(
+        rt.execute(&viewer, Uuid::new_v4(), None, &action)
+            .await
+            .is_err()
+    );
+    rt.acquire(&owner, false, false, None).unwrap();
+    assert!(
+        rt.execute(&owner, Uuid::new_v4(), Some(1), &action)
+            .await
+            .is_ok()
+    );
+    assert!(
+        rt.execute(&viewer, Uuid::new_v4(), Some(1), &action)
+            .await
+            .is_err()
+    );
+    rt.acquire(&viewer, false, true, None).unwrap();
+    assert!(
+        rt.execute(&owner, Uuid::new_v4(), Some(1), &action)
+            .await
+            .is_err()
+    );
+}

@@ -522,6 +522,20 @@ impl DriverHandle for CdpHandle {
                     .await?;
                 Ok(None)
             }
+            BrowserAction::CopySelection => {
+                let result = self
+                    .call(
+                        "Runtime.evaluate",
+                        json!({ "expression": include_str!("selection.js"), "returnByValue": true, "timeout": 1_000 }),
+                    )
+                    .await?;
+                if result["exceptionDetails"].is_object() {
+                    return Err(DriverError::Protocol("could not read selection".into()));
+                }
+                Ok(Some(json!(
+                    result["result"]["value"].as_str().unwrap_or("")
+                )))
+            }
             BrowserAction::Key { key, modifiers } => {
                 let modifier_mask = modifiers
                     .as_ref()
@@ -537,20 +551,49 @@ impl DriverHandle for CdpHandle {
                             .fold(0, |acc, m| acc | m)
                     })
                     .unwrap_or(0);
+                // The client OS has already resolved AltGr/Option into a
+                // printable character. Insert it directly rather than turn
+                // Ctrl+Alt into a remote shortcut or discard its text.
+                if modifier_mask & 1 != 0 && modifier_mask & 4 == 0 && key.chars().count() == 1 {
+                    self.call("Input.insertText", json!({ "text": key }))
+                        .await?;
+                    return Ok(None);
+                }
                 // Enter needs a carriage-return text payload to submit forms.
                 let text = match key.as_str() {
                     "Enter" => Some("\r"),
-                    k if k.chars().count() == 1 => Some(key.as_str()),
+                    k if k.chars().count() == 1 && modifier_mask & (1 | 2 | 4) == 0 => {
+                        Some(key.as_str())
+                    }
                     _ => None,
                 };
                 let mut down = json!({ "type": "keyDown", "key": key, "modifiers": modifier_mask });
+                let key_code = match key.as_str() {
+                    "Backspace" => 8,
+                    "Tab" => 9,
+                    "Enter" => 13,
+                    "Escape" => 27,
+                    "End" => 35,
+                    "Home" => 36,
+                    "ArrowLeft" => 37,
+                    "ArrowUp" => 38,
+                    "ArrowRight" => 39,
+                    "ArrowDown" => 40,
+                    "Delete" => 46,
+                    " " => 32,
+                    k if k.len() == 1 && k.as_bytes()[0].is_ascii_alphanumeric() => {
+                        k.as_bytes()[0].to_ascii_uppercase() as u32
+                    }
+                    _ => 0,
+                };
+                down["windowsVirtualKeyCode"] = json!(key_code);
                 if let Some(text) = text {
                     down["text"] = json!(text);
                 }
                 self.call("Input.dispatchKeyEvent", down).await?;
                 self.call(
                     "Input.dispatchKeyEvent",
-                    json!({ "type": "keyUp", "key": key, "modifiers": modifier_mask }),
+                    json!({ "type": "keyUp", "key": key, "modifiers": modifier_mask, "windowsVirtualKeyCode": key_code }),
                 )
                 .await?;
                 Ok(None)
@@ -631,6 +674,83 @@ impl DriverHandle for CdpHandle {
 #[cfg(test)]
 mod live_tests {
     use super::*;
+
+    /// Exercises real Chromium editing semantics without network access.
+    #[tokio::test]
+    #[ignore = "requires a local Chromium binary"]
+    async fn live_keyboard_and_selection() {
+        let chromium = discover_chromium(None).expect("chromium");
+        let handle = CdpDriver::new(chromium)
+            .launch(LaunchOpts::default())
+            .await
+            .expect("launch");
+        handle.perform(&BrowserAction::Evaluate {
+            expression: "document.body.innerHTML = '<textarea></textarea>'; document.querySelector('textarea').focus()".into(),
+        }).await.unwrap();
+        handle
+            .perform(&BrowserAction::Type {
+                text: "hello 🌍".into(),
+            })
+            .await
+            .unwrap();
+        handle
+            .perform(&BrowserAction::Key {
+                key: "@".into(),
+                modifiers: Some(vec!["ctrl".into(), "alt".into()]),
+            })
+            .await
+            .unwrap();
+        handle
+            .perform(&BrowserAction::Key {
+                key: "å".into(),
+                modifiers: Some(vec!["alt".into()]),
+            })
+            .await
+            .unwrap();
+        handle
+            .perform(&BrowserAction::Key {
+                key: "a".into(),
+                modifiers: Some(vec!["ctrl".into()]),
+            })
+            .await
+            .unwrap();
+        let copied = handle.perform(&BrowserAction::CopySelection).await.unwrap();
+        handle
+            .perform(&BrowserAction::Key {
+                key: "Backspace".into(),
+                modifiers: None,
+            })
+            .await
+            .unwrap();
+        handle
+            .perform(&BrowserAction::Type {
+                text: "first".into(),
+            })
+            .await
+            .unwrap();
+        handle
+            .perform(&BrowserAction::Key {
+                key: "Enter".into(),
+                modifiers: None,
+            })
+            .await
+            .unwrap();
+        handle
+            .perform(&BrowserAction::Type {
+                text: "second".into(),
+            })
+            .await
+            .unwrap();
+        let edited = handle
+            .perform(&BrowserAction::Evaluate {
+                expression: "document.querySelector('textarea').value".into(),
+            })
+            .await
+            .unwrap();
+        handle.close().await;
+        assert_eq!(copied, Some(json!("hello 🌍@å")));
+        assert_eq!(edited, Some(json!("first\nsecond")));
+    }
 
     /// Opt-in: drives a real Chromium through Cloudflare Access with the
     /// deployment's service token. Needs VIBE_BROWSER_CF_ACCESS_* and
