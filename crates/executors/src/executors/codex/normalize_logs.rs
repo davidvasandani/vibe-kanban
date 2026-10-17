@@ -50,7 +50,7 @@ use crate::{
         ActionType, AnsweredQuestion, AskUserQuestionItem, AskUserQuestionOption,
         CommandExitStatus, CommandRunResult, FileChange, NormalizedEntry, NormalizedEntryError,
         NormalizedEntryType, TodoItem, ToolResult, ToolResultValueType, ToolStatus,
-        plain_text_processor::PlainTextLogProcessor,
+        plain_text_processor::{MessageBoundary, PlainTextLogProcessor},
         utils::{
             ConversationPatch, EntryIndexProvider,
             patch::{add_normalized_entry, replace_normalized_entry, upsert_normalized_entry},
@@ -1680,6 +1680,14 @@ const SUPPRESSED_STDERR_PATTERNS: &[&str] = &[
     "state db missing rollout path for",
 ];
 
+static CODEX_STDERR_RECORD_START: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^\d{4}-\d{2}-\d{2}T\S+\s+[A-Z]+\s+\S+").expect("valid Codex stderr record regex")
+});
+
+fn is_codex_stderr_record_start(line: &str) -> bool {
+    CODEX_STDERR_RECORD_START.is_match(strip_ansi_escapes::strip_str(line).trim_start())
+}
+
 /// Codex-specific stderr normalizer that filters noisy internal messages.
 /// When Codex's error is a failed credential refresh, the actionable text to
 /// show instead of the raw message (which is kept, verbatim, at the front).
@@ -1708,6 +1716,238 @@ fn refresh_failure_setup_message(message: &str) -> Option<String> {
     ))
 }
 
+fn stderr_refresh_failure_reason(content: &str) -> Option<&'static str> {
+    let lower = content.to_ascii_lowercase();
+    if !(lower.contains("failed to refresh token")
+        || lower.contains("access token could not be refreshed")
+        || lower.contains("refresh_token_invalidated"))
+    {
+        return None;
+    }
+
+    Some(
+        if lower.contains("refresh_token_invalidated")
+            || lower.contains("refresh token was revoked")
+        {
+            "Failed to refresh token: the session's refresh token was invalidated or revoked."
+        } else if lower.contains("refresh_token_reused")
+            || lower.contains("refresh token was already used")
+        {
+            "Failed to refresh token: the refresh token was already used."
+        } else if lower.contains("empty string") {
+            "Failed to refresh token: this machine has no local refresh token."
+        } else {
+            "Failed to refresh token: Codex could not renew the current session."
+        },
+    )
+}
+
+fn stderr_has_specific_refresh_failure_reason(content: &str) -> bool {
+    let lower = content.to_ascii_lowercase();
+    lower.contains("refresh_token_invalidated")
+        || lower.contains("refresh token was revoked")
+        || lower.contains("refresh_token_reused")
+        || lower.contains("refresh token was already used")
+        || lower.contains("empty string")
+}
+
+fn codex_stderr_record_is_complete(lines: &[String]) -> bool {
+    let Some(last) = lines.last() else {
+        return false;
+    };
+    if !last.ends_with('\n') {
+        return false;
+    }
+
+    let (saw_open_brace, brace_balance) = json_object_brace_state(&lines.concat());
+    !saw_open_brace || brace_balance == 0
+}
+
+fn json_object_brace_state(content: &str) -> (bool, i64) {
+    let mut saw_open_brace = false;
+    let mut brace_balance = 0_i64;
+    let mut in_string = false;
+    let mut escaped = false;
+    for character in content.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if in_string && character == '\\' {
+            escaped = true;
+            continue;
+        }
+        if character == '"' {
+            in_string = !in_string;
+            continue;
+        }
+        if !in_string {
+            match character {
+                '{' => {
+                    saw_open_brace = true;
+                    brace_balance += 1;
+                }
+                '}' => brace_balance -= 1,
+                _ => {}
+            }
+        }
+    }
+    (saw_open_brace, brace_balance)
+}
+
+fn completed_refresh_record_line_count(lines: &[String]) -> Option<usize> {
+    for (index, line) in lines.iter().enumerate() {
+        let record = lines[..=index].concat();
+        let (saw_open_brace, brace_balance) = json_object_brace_state(&record);
+        if line.ends_with('\n') && (!saw_open_brace || brace_balance == 0) {
+            if stderr_refresh_failure_reason(&record).is_some() {
+                return Some(index + 1);
+            }
+            return None;
+        }
+    }
+    None
+}
+
+fn codex_stderr_record_boundary(lines: &[String]) -> Option<MessageBoundary> {
+    let timestamp_starts = lines
+        .iter()
+        .enumerate()
+        .skip(1)
+        .filter_map(|(index, line)| is_codex_stderr_record_start(line).then_some(index))
+        .collect::<Vec<_>>();
+    let next_timestamp = timestamp_starts.first().copied();
+
+    if let Some(completed) = completed_refresh_record_line_count(lines)
+        && completed < lines.len()
+        && next_timestamp != Some(completed)
+    {
+        if lines.last().is_some_and(|line| !line.ends_with('\n')) {
+            return None;
+        }
+        return Some(MessageBoundary::Split(completed));
+    }
+
+    next_timestamp?;
+    let mut starts = vec![0];
+    starts.extend(timestamp_starts);
+    starts.push(lines.len());
+
+    for records in starts.windows(3) {
+        let before = &lines[records[0]..records[1]];
+        let after = &lines[records[1]..records[2]];
+        let before_reason = stderr_refresh_failure_reason(&before.concat());
+        let after_content = after.concat();
+        let after_reason = stderr_refresh_failure_reason(&after_content);
+        if !codex_stderr_record_is_complete(after)
+            && before_reason.is_some()
+            && !stderr_has_specific_refresh_failure_reason(&after_content)
+        {
+            continue;
+        }
+        if (before_reason.is_some() || after_reason.is_some()) && before_reason != after_reason {
+            return Some(MessageBoundary::Split(records[1]));
+        }
+    }
+    None
+}
+
+fn transform_codex_stderr_lines(lines: &mut Vec<String>) {
+    lines.retain(|line| {
+        !SUPPRESSED_STDERR_PATTERNS
+            .iter()
+            .any(|pattern| line.contains(pattern))
+    });
+
+    let mut record_starts = vec![0];
+    record_starts.extend(
+        lines
+            .iter()
+            .enumerate()
+            .skip(1)
+            .filter_map(|(index, line)| is_codex_stderr_record_start(line).then_some(index)),
+    );
+    record_starts.push(lines.len());
+
+    let mut compacted = Vec::with_capacity(lines.len());
+    let mut previous_refresh_reason = None;
+    for bounds in record_starts.windows(2) {
+        let record = &lines[bounds[0]..bounds[1]];
+        let refresh_end = completed_refresh_record_line_count(record);
+        let refresh_record = refresh_end.map(|end| &record[..end]).unwrap_or(record);
+        let trailing = refresh_end.map(|end| &record[end..]).unwrap_or_default();
+        let reason = codex_stderr_record_is_complete(refresh_record)
+            .then(|| stderr_refresh_failure_reason(&refresh_record.concat()))
+            .flatten();
+        if reason.is_some() && reason == previous_refresh_reason {
+            compacted.extend_from_slice(trailing);
+            if !trailing.is_empty() {
+                previous_refresh_reason = None;
+            }
+            continue;
+        }
+        compacted.extend_from_slice(record);
+        previous_refresh_reason = if trailing.is_empty() { reason } else { None };
+    }
+    *lines = compacted;
+}
+
+/// Converts raw Codex login logger output into the same safe, actionable error
+/// used for structured refresh failures.
+///
+/// Stderr can repeat a multiline error many times in one aggregation window.
+/// Do not echo that raw record: besides being noisy, future vendor messages may
+/// include credential-shaped values. Instead retain only a stable failure
+/// category and let the existing guidance helper provide the recovery steps.
+fn normalize_codex_stderr_entry(content: String) -> NormalizedEntry {
+    let content = strip_ansi_escapes::strip_str(&content);
+    let lines = content
+        .split_inclusive('\n')
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let refresh_end = completed_refresh_record_line_count(&lines);
+    let refresh_record = refresh_end.map(|end| lines[..end].concat());
+    let first_line_is_refresh_record = lines.first().is_some_and(|line| {
+        is_codex_stderr_record_start(line)
+            && line
+                .to_ascii_lowercase()
+                .contains("failed to refresh token")
+    });
+    let refresh_message = refresh_record
+        .as_deref()
+        .or_else(|| first_line_is_refresh_record.then_some(content.as_str()))
+        .and_then(stderr_refresh_failure_reason)
+        .and_then(refresh_failure_setup_message);
+
+    match refresh_message {
+        Some(mut guidance) => {
+            if let Some(end) = refresh_end {
+                let trailing = lines[end..].concat();
+                if !trailing.is_empty() && stderr_refresh_failure_reason(&trailing).is_none() {
+                    guidance.push_str("\n\nAdditional Codex stderr:\n");
+                    guidance.push_str(&trailing);
+                }
+            }
+            NormalizedEntry {
+                timestamp: None,
+                entry_type: NormalizedEntryType::ErrorMessage {
+                    error_type: NormalizedEntryError::SetupRequired,
+                },
+                content: guidance,
+                metadata: None,
+            }
+        }
+        None => NormalizedEntry {
+            timestamp: None,
+            entry_type: NormalizedEntryType::ErrorMessage {
+                error_type: NormalizedEntryError::Other,
+            },
+            content,
+            metadata: None,
+        },
+    }
+}
+
 fn normalize_codex_stderr_logs(
     msg_store: Arc<MsgStore>,
     entry_index_provider: EntryIndexProvider,
@@ -1715,23 +1955,11 @@ fn normalize_codex_stderr_logs(
     tokio::spawn(async move {
         let mut stderr = msg_store.stderr_chunked_stream();
         let mut processor = PlainTextLogProcessor::builder()
-            .normalized_entry_producer(|content: String| NormalizedEntry {
-                timestamp: None,
-                entry_type: NormalizedEntryType::ErrorMessage {
-                    error_type: NormalizedEntryError::Other,
-                },
-                content: strip_ansi_escapes::strip_str(&content),
-                metadata: None,
-            })
+            .normalized_entry_producer(normalize_codex_stderr_entry)
             .time_gap(Duration::from_secs(2))
             .index_provider(entry_index_provider)
-            .transform_lines(Box::new(|lines: &mut Vec<String>| {
-                lines.retain(|line| {
-                    !SUPPRESSED_STDERR_PATTERNS
-                        .iter()
-                        .any(|pattern| line.contains(pattern))
-                });
-            }))
+            .transform_lines(Box::new(transform_codex_stderr_lines))
+            .message_boundary_predicate(Box::new(codex_stderr_record_boundary))
             .build();
 
         while let Some(Ok(chunk)) = stderr.next().await {
@@ -2968,6 +3196,194 @@ mod tests {
                 refresh_failure_setup_message(message).is_none(),
                 "{message}"
             );
+        }
+    }
+
+    #[test]
+    fn repeated_multiline_stderr_refresh_failure_is_safe_and_actionable() {
+        let record = r#"2026-10-17T14:56:20.009964Z ERROR codex_login::auth::manager: Failed to refresh token: 401 Unauthorized: {
+  "error": {
+    "message": "Your session has ended. Please log in again.",
+    "type": "invalid_request_error",
+    "param": null,
+    "code": "refresh_token_invalidated",
+    "access_token": "must-not-be-rendered"
+  }
+}"#;
+        let entry = normalize_codex_stderr_entry(format!("{record}\n{record}\n"));
+
+        assert!(matches!(
+            entry.entry_type,
+            NormalizedEntryType::ErrorMessage {
+                error_type: NormalizedEntryError::SetupRequired
+            }
+        ));
+        assert_eq!(entry.content.matches("Codex could not renew").count(), 1);
+        assert!(entry.content.contains("invalidated or revoked"));
+        assert!(entry.content.contains("CODEX_REFRESH_TOKEN_URL_OVERRIDE"));
+        assert!(!entry.content.contains("must-not-be-rendered"));
+        assert!(!entry.content.contains("2026-10-17"));
+    }
+
+    #[test]
+    fn stderr_refresh_failure_recognition_does_not_require_line_boundaries() {
+        let chunks = [
+            "2026-10-17T14:56:20Z ERROR codex_login::auth::manager: Failed to ref",
+            "resh token: Your access token could not be refreshed because your refresh token was revoked.\n",
+        ];
+        let entry = normalize_codex_stderr_entry(chunks.concat());
+
+        assert!(matches!(
+            entry.entry_type,
+            NormalizedEntryType::ErrorMessage {
+                error_type: NormalizedEntryError::SetupRequired
+            }
+        ));
+    }
+
+    #[test]
+    fn unrelated_stderr_is_preserved() {
+        let stderr = "transport disconnected before completion\n";
+        let entry = normalize_codex_stderr_entry(stderr.to_string());
+
+        assert!(matches!(
+            entry.entry_type,
+            NormalizedEntryType::ErrorMessage {
+                error_type: NormalizedEntryError::Other
+            }
+        ));
+        assert_eq!(entry.content, stderr);
+    }
+
+    #[test]
+    fn distinct_refresh_failures_keep_distinct_guidance() {
+        let invalidated = normalize_codex_stderr_entry(
+            "2026-10-17T14:56:20Z ERROR codex_login::auth::manager: Failed to refresh token: refresh_token_invalidated\n".to_string(),
+        );
+        let reused = normalize_codex_stderr_entry(
+            "2026-10-17T14:56:21Z ERROR codex_login::auth::manager: Failed to refresh token: refresh_token_reused\n".to_string(),
+        );
+
+        assert!(invalidated.content.contains("invalidated or revoked"));
+        assert!(reused.content.contains("already used"));
+        assert_ne!(invalidated.content, reused.content);
+    }
+
+    #[test]
+    fn stderr_records_collapse_only_adjacent_equivalent_refresh_failures() {
+        let msg_store = Arc::new(MsgStore::new());
+        let mut processor = PlainTextLogProcessor::builder()
+            .normalized_entry_producer(normalize_codex_stderr_entry)
+            .time_gap(Duration::from_secs(2))
+            .index_provider(EntryIndexProvider::start_from(&msg_store))
+            .transform_lines(Box::new(transform_codex_stderr_lines))
+            .message_boundary_predicate(Box::new(codex_stderr_record_boundary))
+            .build();
+        let invalidated = "2026-10-17T14:56:20Z ERROR codex_login::auth::manager: Failed to refresh token: refresh_token_invalidated\n";
+        let ordinary = "2026-10-17T14:56:18Z WARN codex_core::transport: retrying\n2026-10-17T14:56:19Z ERROR codex_core::transport: first attempt failed\n";
+        let unrelated = "2026-10-17T14:56:21Z ERROR codex_core::transport: stream disconnected before completion\n";
+        let reused = "2026-10-17T14:56:22Z ERROR codex_login::auth::manager: Failed to refresh token: refresh_token_reused";
+
+        let chunk = [ordinary, invalidated, invalidated, unrelated, reused].concat();
+        for patch in processor.process(chunk) {
+            msg_store.push_patch(patch);
+        }
+
+        let entries = latest_normalized_entries(&msg_store);
+        assert_eq!(entries.len(), 4);
+        assert_eq!(entries[0].content, ordinary);
+        assert!(entries[1].content.contains("invalidated or revoked"));
+        assert_eq!(entries[2].content, unrelated);
+        assert!(entries[3].content.contains("already used"));
+    }
+
+    #[test]
+    fn stderr_waits_for_split_multiline_records_before_deduplicating() {
+        let msg_store = Arc::new(MsgStore::new());
+        let mut processor = PlainTextLogProcessor::builder()
+            .normalized_entry_producer(normalize_codex_stderr_entry)
+            .time_gap(Duration::from_secs(2))
+            .index_provider(EntryIndexProvider::start_from(&msg_store))
+            .transform_lines(Box::new(transform_codex_stderr_lines))
+            .message_boundary_predicate(Box::new(codex_stderr_record_boundary))
+            .build();
+        let header = "2026-10-17T14:56:20Z ERROR codex_login::auth::manager: Failed to refresh token: 401 Unauthorized: {\n";
+        let partial_header = "2026-10-17T14:56:20Z ERROR codex_login::auth::manager: Failed to ref";
+        let header_tail = "resh token: 401 Unauthorized: {\n";
+        let body_prefix = "  \"error\": {\n    \"message\": \"literal }} and escaped \\\"quote plus {\",\n    \"access_token\": \"must-not-be-rendered\",\n";
+        let body_tail = "    \"code\": \"refresh_token_invalidated\"\n  }\n}\n";
+
+        for chunk in [
+            header,
+            body_prefix,
+            body_tail,
+            partial_header,
+            header_tail,
+            body_prefix,
+            body_tail,
+        ] {
+            for patch in processor.process(chunk.to_string()) {
+                msg_store.push_patch(patch);
+            }
+            assert!(
+                latest_normalized_entries(&msg_store)
+                    .iter()
+                    .all(|entry| !entry.content.contains("must-not-be-rendered"))
+            );
+        }
+
+        let entries = latest_normalized_entries(&msg_store);
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].content.contains("invalidated or revoked"));
+    }
+
+    #[test]
+    fn stderr_preserves_untimestamped_and_ansi_prefixed_diagnostics() {
+        let msg_store = Arc::new(MsgStore::new());
+        let mut processor = PlainTextLogProcessor::builder()
+            .normalized_entry_producer(normalize_codex_stderr_entry)
+            .time_gap(Duration::from_secs(2))
+            .index_provider(EntryIndexProvider::start_from(&msg_store))
+            .transform_lines(Box::new(transform_codex_stderr_lines))
+            .message_boundary_predicate(Box::new(codex_stderr_record_boundary))
+            .build();
+        let refresh = "31m2026-10-17T14:56:20Z ERROR codex_login::auth::manager: Failed to refresh token: {\n  \"code\": \"refresh_token_invalidated\"\n}\n";
+        let unrelated = "transport disconnected before completion\n";
+
+        for chunk in [
+            "\u{1b}[",
+            refresh,
+            "\u{1b}[0m",
+            "\u{1b}[",
+            refresh,
+            unrelated,
+        ] {
+            for patch in processor.process(chunk.to_string()) {
+                msg_store.push_patch(patch);
+            }
+        }
+
+        let entries = latest_normalized_entries(&msg_store);
+        assert_eq!(entries.len(), 2);
+        assert!(entries[0].content.contains("invalidated or revoked"));
+        assert_eq!(entries[1].content, unrelated);
+    }
+
+    #[test]
+    fn stderr_does_not_consume_an_untimestamped_failure_after_other_output() {
+        for content in [
+            "transport disconnected\nFailed to refresh token: refresh_token_invalidated\n",
+            "2026-10-17T14:56:20Z ERROR codex_core::transport: disconnected\nFailed to refresh token: refresh_token_invalidated\n",
+        ] {
+            let entry = normalize_codex_stderr_entry(content.to_string());
+
+            assert!(matches!(
+                entry.entry_type,
+                NormalizedEntryType::ErrorMessage {
+                    error_type: NormalizedEntryError::Other
+                }
+            ));
+            assert_eq!(entry.content, content);
         }
     }
 

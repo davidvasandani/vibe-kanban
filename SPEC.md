@@ -1,26 +1,51 @@
-# Mobile Toolbar Leading-Edge Follow-up — Technical Specification
+# Debug Codex refresh-token errors
 
-## Objective
+## Problem
 
-Prevent the first workspace tool from being partially clipped after the mobile
-toolbar expansion shipped in `vk/2163-fix-toolbar`, while retaining equal use of
-available space and fixed trailing actions.
+When Codex loses its session because a refresh token has been invalidated, its
+internal logger writes the same authentication failure to stderr repeatedly.
+Vibe Kanban currently renders those raw logger lines as ordinary error output.
+The screenshot for this task shows the resulting wall of red text and provides
+no concise, actionable recovery path.
 
-## Requirements
-
-1. Visible workspace tools fill the available mobile toolbar region.
-2. The first tool is fully visible at the toolbar's leading edge when the tools
-   fit in the available width.
-3. When tools genuinely exceed the available width, only the tool group scrolls
-   horizontally and all tools remain reachable.
-4. Leading navigation affordances and trailing status/settings/account controls
-   never shrink or become clipped by tool-group overflow.
-5. Existing ordering, active styling, accessibility, project headers, desktop
-   navbar behavior, and safe-area padding remain unchanged.
-6. A rendered-component regression test protects the corrected flex/overflow
-   ownership contract.
+The structured Codex protocol already classifies equivalent refresh failures
+as setup-required errors. The stderr path does not apply that classification or
+collapse duplicate logger output, so behavior depends on which Codex channel
+reported the failure.
 
 ## Scope
 
-Only the Vibe Kanban shared mobile navbar and its focused tests/documentation are
-in scope. No other service or deployment configuration changes are permitted.
+Limit implementation to the Vibe Kanban source repository. The shared homelab
+repository's `modules/vibe-kanban-rebuild.nix` is in deployment scope only if
+diagnosis proves that its Codex refresh-broker wiring is incorrect. Do not
+change any other service.
+
+## Required behavior
+
+- Detect Codex stderr records whose message reports a failed token refresh,
+  including `refresh_token_invalidated` / revoked-session wording.
+- Render one concise setup-required entry with practical recovery guidance
+  instead of repeated raw internal log records.
+- Preserve useful diagnostic context without exposing token material.
+- Keep unrelated stderr output and structured Codex events unchanged.
+- Avoid hiding a later distinct refresh failure merely because an earlier one
+  was deduplicated.
+- Work when a logger record is split across stream chunks or contains a
+  multiline JSON error body.
+
+## Acceptance criteria
+
+1. The exact failure shape shown in the task attachment is covered by an
+   automated regression test.
+2. Repeated lines from one refresh failure produce a single user-visible,
+   setup-required error.
+3. The guidance tells a direct-login user to sign in again and retains the
+   existing refresh-endpoint guidance for brokered cluster logins.
+4. A non-authentication stderr line remains an ordinary error entry.
+5. Relevant Rust tests, formatting, and repository checks pass.
+
+## Non-goals
+
+- Automatically renewing or replacing revoked credentials.
+- Changing the Codex CLI's authentication protocol.
+- Modifying unrelated services or broadening the homelab deployment topology.

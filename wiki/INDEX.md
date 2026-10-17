@@ -150,8 +150,12 @@ contributed to it.
   copy-holders whose refresh token is blank by design: Codex's in-turn 401
   recovery is the fatal path, the deployment's `CODEX_REFRESH_TOKEN_URL_OVERRIDE`
   endpoint serves the owner's current token, and VK skips doomed pre-turn
-  refreshes and renders refresh failures as `SetupRequired`
-  (`vk/82c6-vk-error-when-us`, `vk/6c79-codex-auth-error`).
+  refreshes and renders refresh failures as `SetupRequired`. Raw stderr refresh
+  failures use timestamp-aware record framing, string-aware JSON completion,
+  post-accumulation ANSI stripping, sanitized interim output, and adjacency- and
+  reason-bounded compaction so unrelated diagnostics remain visible
+  (`vk/82c6-vk-error-when-us`, `vk/6c79-codex-auth-error`,
+  `vk/0773-debug-token-erro`).
 - [slack-shortcut-ai-summarization.md](slack-shortcut-ai-summarization.md) —
   Optional AI thread summarization for the Slack "Create issue from message"
   shortcut: the ack-fast/enrich-later shape (all slow work in the post-ack

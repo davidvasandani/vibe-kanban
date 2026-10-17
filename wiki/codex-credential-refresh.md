@@ -138,7 +138,35 @@ VK's part is to understand that contract:
   verbatim. That's why the endpoint's actionable text ("could not fetch the
   current Codex credential from think2 …") reaches the VK error entry intact.
 
+## Raw stderr refresh failures (vk/0773-debug-token-erro)
+
+Codex can report the same failure through its internal logger instead of a
+structured protocol event. Treating stderr as one time-windowed blob produces a
+wall of repeated raw JSON and can accidentally expose credential-shaped fields.
+The stderr normalizer therefore frames timestamped logger records before it
+classifies them, reuses `refresh_failure_setup_message`, and replaces recognized
+records with the same sanitized `SetupRequired` guidance used by structured
+events.
+
+Several stream-processing details are load-bearing:
+
+- Strip ANSI escapes only after chunks have been accumulated; an escape
+  sequence can itself be split across chunks.
+- A multiline JSON record is complete only when braces balance outside quoted
+  strings, honoring backslash escapes. Braces in an error message are data, not
+  framing.
+- While a recognized refresh record is incomplete, render sanitized interim
+  guidance rather than its raw body. Never echo token-shaped fields.
+- Compact only adjacent, complete failures with the same semantic reason.
+  Preserve intervening diagnostics, later distinct failures, trailing output,
+  and buffers whose first record is unrelated.
+
+Regression coverage should include arbitrary chunk boundaries, incomplete and
+complete multiline JSON, split ANSI sequences, braces inside strings, and
+timestamped diagnostics followed by untimestamped output.
+
 ## Contributed by
 
 - vk/82c6-vk-error-when-us
 - vk/6c79-codex-auth-error
+- vk/0773-debug-token-erro

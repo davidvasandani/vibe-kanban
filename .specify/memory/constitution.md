@@ -1328,3 +1328,12 @@ identity; test both live updates and historical reads. No new principle needed.
 ## Review: vk/e831-remember-filter
 
 Applied `/speckit.constitution`: existing II (test the contract), III (reuse existing persistence), IV (both shared frontend consumers), and LI (one default resolver with explicit override precedence) govern this change. Remembered user choices must not become implicit site-wide defaults. No new principle or version amendment required.
+
+## Review: vk/0773-debug-token-erro
+
+Applied `/speckit.constitution`: existing II, III, VI and IX govern this fix.
+Codex stderr normalization must reuse the existing refresh-failure classifier,
+positively identify the vendor error, preserve unrelated output, and compact
+only adjacent semantically equal failures. The screenshot's multiline logger
+record is a required regression fixture. No new principle or version amendment
+is required.
