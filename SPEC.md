@@ -1,18 +1,26 @@
-# VK Browser keyboard and clipboard
+# Mobile Toolbar Leading-Edge Follow-up — Technical Specification
 
-## Problem and scope
-The streamed browser is an image with pointer and key forwarding. Focusing its container cannot summon a mobile software keyboard, and native clipboard actions currently affect the local page rather than the remote browser. Limit changes to the Vibe Kanban repository.
+## Objective
 
-## Required behavior
-- A controlling user tapping a remote text field can type with their device keyboard, including composition, deletion, and Enter.
-- Provide explicit keyboard access if remote focus cannot be identified synchronously within the mobile user gesture.
-- Users can paste plain text from their device into the focused remote field and copy remote selected text back to their device.
-- Clipboard access is explicit; denied or unsupported access has a selectable/manual fallback and visible error feedback.
-- Preserve control ownership, stale-generation rejection, desktop keyboard behavior, and session isolation. Read-only viewers cannot send input.
-- Never persist clipboard contents or log typed text.
+Prevent the first workspace tool from being partially clipped after the mobile
+toolbar expansion shipped in `vk/2163-fix-toolbar`, while retaining equal use of
+available space and fixed trailing actions.
 
-## Technical direction
-Inspect the existing browser WebSocket/CDP protocol and extend its guarded input handling only where needed. Use a real local editable input for mobile keyboard events, rather than depending on keydown alone. Bridge plain text through existing input routing where possible; remote selection retrieval must respect session control. Clear ephemeral input/clipboard state when sessions or ownership change.
+## Requirements
 
-## Verification
-Cover text/composition event handling, clipboard behavior, ownership rejection and session changes with focused tests. Run repository formatting, type checks, relevant Rust tests and lint. Independently review the diff, fix confirmed findings, document reusable behavior, and merge a PR after checks succeed.
+1. Visible workspace tools fill the available mobile toolbar region.
+2. The first tool is fully visible at the toolbar's leading edge when the tools
+   fit in the available width.
+3. When tools genuinely exceed the available width, only the tool group scrolls
+   horizontally and all tools remain reachable.
+4. Leading navigation affordances and trailing status/settings/account controls
+   never shrink or become clipped by tool-group overflow.
+5. Existing ordering, active styling, accessibility, project headers, desktop
+   navbar behavior, and safe-area padding remain unchanged.
+6. A rendered-component regression test protects the corrected flex/overflow
+   ownership contract.
+
+## Scope
+
+Only the Vibe Kanban shared mobile navbar and its focused tests/documentation are
+in scope. No other service or deployment configuration changes are permitted.
