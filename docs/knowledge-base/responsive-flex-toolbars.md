@@ -1,6 +1,6 @@
 # Responsive flex toolbars
 
-Tags: `vk/2163-fix-toolbar`
+Tags: `vk/2163-fix-toolbar`, `vk/2163-fix-toolbar-followup`
 
 ## Flexible middle, fixed edge
 
@@ -9,15 +9,20 @@ status/account actions, make ownership of the remaining inline space explicit:
 
 ```text
 row:               flex
-primary region:    flex-1 min-w-0 overflow-x-auto
-primary group:     flex flex-1 min-w-fit
+primary region:    flex-1 min-w-0
+primary group:     flex flex-1 min-w-0 overflow-x-auto
 primary controls:  flex-1 <usable minimum width>
 trailing region:   shrink-0
 ```
 
-The zero minimum on the primary region is load-bearing. Without it, the flex
+The zero minimum on both flexible layers is load-bearing. Without it, the flex
 item's automatic minimum content width can force the trailing actions outside
 the viewport instead of containing overflow in the intended scroller.
+
+Keep fixed leading navigation outside the scrolling group. If the whole primary
+region scrolls, a retained horizontal offset can partially clip the first
+leading control even after the tools fit again. Narrow overflow ownership to the
+tool group so only tools participate in scroll state.
 
 The group and controls need both halves of the sizing contract. Flexible growth
 shares surplus width across the actual tap targets, while intrinsic/minimum
