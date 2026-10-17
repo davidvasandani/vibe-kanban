@@ -60,11 +60,11 @@ export type BrowserSessionLiveState = { session_id: string, workspace_id: string
 
 export type MouseButton = "left" | "middle" | "right";
 
-export type BrowserAction = { "type": "navigate", url: string, } | { "type": "back" } | { "type": "forward" } | { "type": "reload" } | { "type": "click", x: number, y: number, button: MouseButton | null, } | { "type": "mouse_move", x: number, y: number, } | { "type": "type", text: string, } | { "type": "key", key: string, modifiers: Array<string> | null, } | { "type": "set_viewport", width: number, height: number, } | { "type": "evaluate", expression: string, };
+export type BrowserAction = { "type": "navigate", url: string, } | { "type": "back" } | { "type": "forward" } | { "type": "reload" } | { "type": "click", x: number, y: number, button: MouseButton | null, } | { "type": "mouse_move", x: number, y: number, } | { "type": "type", text: string, } | { "type": "copy_selection" } | { "type": "key", key: string, modifiers: Array<string> | null, } | { "type": "set_viewport", width: number, height: number, } | { "type": "evaluate", expression: string, };
 
 export type BrowserActionResult = { command_id: string, generation: number, 
 /**
- * Present for Evaluate.
+ * Present for Evaluate and CopySelection.
  */
 value: JsonValue | null, current_url: string | null, };
 

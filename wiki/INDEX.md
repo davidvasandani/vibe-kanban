@@ -82,6 +82,8 @@ contributed to it.
   whitespace, use product branding only as the empty-state fallback, and remain
   separate from visible breadcrumb identity.
 - [browser-session-control-arbiter.md](browser-session-control-arbiter.md) —
+  Mobile keyboard gesture focus, composition, plain-text clipboard fallbacks
+  and control-scoped async results (`vk/5c0e-vk-browser`), plus
   Workspace browser sessions with shared human/agent control: the
   three-lock concurrency shape (control mutex / command gate / Arc'd driver
   handle), lease+generation arbitration with invalidate-never-replay,

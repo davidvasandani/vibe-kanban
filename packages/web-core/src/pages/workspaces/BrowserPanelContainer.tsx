@@ -16,6 +16,11 @@ import {
   useSelectedBrowserSessionId,
 } from '@/shared/stores/useBrowserSessionStore';
 
+import {
+  BrowserTextInput,
+  type BrowserTextInputHandle,
+} from './BrowserTextInput';
+
 interface BrowserPanelContainerProps {
   workspaceId: string;
   className: string;
@@ -42,8 +47,9 @@ function toMouseButton(button: number): MouseButton {
 
 function keyModifiers(e: React.KeyboardEvent): string[] | null {
   const modifiers: string[] = [];
-  if (e.ctrlKey) modifiers.push('ctrl');
-  if (e.altKey) modifiers.push('alt');
+  const altGraph = e.getModifierState('AltGraph');
+  if (e.ctrlKey || altGraph) modifiers.push('ctrl');
+  if (e.altKey || altGraph) modifiers.push('alt');
   if (e.shiftKey) modifiers.push('shift');
   if (e.metaKey) modifiers.push('meta');
   return modifiers.length > 0 ? modifiers : null;
@@ -130,6 +136,8 @@ export function BrowserPanelContainer({
 
   const controller = liveState?.control.controller;
   const weControl =
+    connected &&
+    liveState?.session_id === selectedSessionId &&
     controller?.type === 'human' &&
     connectionId !== null &&
     controller.connection_id === connectionId;
@@ -157,6 +165,7 @@ export function BrowserPanelContainer({
   );
 
   // ── Input capture (only while we hold control) ─────────────────────────
+  const textInputRef = useRef<BrowserTextInputHandle>(null);
   const imgRef = useRef<HTMLImageElement>(null);
   const lastMouseMoveAtRef = useRef(0);
 
@@ -190,7 +199,11 @@ export function BrowserPanelContainer({
       const coords = toFrameCoords(e.clientX, e.clientY);
       if (!coords) return;
       e.preventDefault();
-      (e.currentTarget as HTMLElement).focus();
+      if (e.pointerType === 'touch' || e.pointerType === 'pen') {
+        textInputRef.current?.focus();
+      } else {
+        (e.currentTarget as HTMLElement).focus();
+      }
       void sendInput({
         type: 'click',
         x: coords.x,
@@ -222,6 +235,18 @@ export function BrowserPanelContainer({
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
       if (!weControl) return;
+      if (
+        (e.ctrlKey || e.metaKey) &&
+        !e.altKey &&
+        !e.getModifierState('AltGraph')
+      ) {
+        if (e.key.toLowerCase() === 'v') return;
+        if (e.key.toLowerCase() === 'c') {
+          e.preventDefault();
+          textInputRef.current?.copy();
+          return;
+        }
+      }
       e.preventDefault();
       void sendInput({
         type: 'key',
@@ -260,7 +285,7 @@ export function BrowserPanelContainer({
   return (
     <div className={cn('flex flex-col h-full min-h-0 bg-primary', className)}>
       {/* Toolbar */}
-      <div className="flex items-center gap-half px-base py-half border-b bg-secondary">
+      <div className="flex flex-wrap items-center gap-half px-base py-half border-b bg-secondary">
         <span
           className={cn(
             'shrink-0 h-2 w-2 rounded-full',
@@ -345,6 +370,14 @@ export function BrowserPanelContainer({
         )}
       </div>
 
+      {weControl && (
+        <BrowserTextInput
+          key={`${selectedSessionId}:${connectionId}:${controlGeneration}`}
+          ref={textInputRef}
+          sendInput={sendInput}
+        />
+      )}
+
       {/* Error banner */}
       {bannerText && (
         <div className="flex items-center gap-half px-base py-half bg-error/10 text-error text-sm border-b">
@@ -360,6 +393,11 @@ export function BrowserPanelContainer({
         onPointerUp={handlePointerUp}
         onPointerMove={handlePointerMove}
         onKeyDown={handleKeyDown}
+        onPaste={(e) => {
+          if (!weControl) return;
+          e.preventDefault();
+          textInputRef.current?.paste(e.clipboardData.getData('text/plain'));
+        }}
         style={{ cursor: weControl ? 'crosshair' : 'default' }}
       >
         {frameUrl ? (

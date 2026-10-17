@@ -574,6 +574,19 @@
     },
     "session": {
       "forceCloseConfirm": "此会话由代理控制。要强制关闭吗？"
+    },
+    "textInput": {
+      "keyboard": "键盘",
+      "selectAll": "全选",
+      "copy": "复制",
+      "paste": "粘贴",
+      "close": "关闭",
+      "failed": "输入失败，请重试。",
+      "tooLong": "文本过长（最多65,536个字符）。",
+      "noSelection": "请先在远程浏览器中选择文本。",
+      "copied": "已复制到剪贴板。",
+      "copyManually": "请在设备上选择并复制此文本。",
+      "pasteManually": "在此粘贴文本，然后点击粘贴。"
     }
   }
 }
