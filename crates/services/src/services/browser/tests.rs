@@ -502,3 +502,49 @@ async fn selection_reads_require_current_control() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn takeover_release_and_reacquire_do_not_touch_the_remote_page() {
+    let handle = MockDriver.launch(Default::default()).await.unwrap();
+    let mut frames = handle.subscribe_frames();
+    let rt = SessionRuntime::new(
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        None,
+        handle,
+        Duration::seconds(60),
+        Duration::minutes(120),
+    );
+    let ag = agent(Uuid::new_v4());
+    let h = human(Uuid::new_v4());
+    rt.acquire(&ag, false, false, None).unwrap();
+    rt.execute(
+        &ag,
+        Uuid::new_v4(),
+        Some(1),
+        &navigate("https://shop.example/cart"),
+    )
+    .await
+    .unwrap();
+    // Mock emits a frame for every mutation, including reload/evaluate. No
+    // frames after subscription proves transitions did not touch the driver.
+    frames.try_recv().expect("initial navigation frame");
+    let before = rt.page_info().await.unwrap();
+    let session_id = rt.live_state().session_id;
+    rt.acquire(&h, true, false, None).unwrap();
+    assert!(rt.acquire(&ag, false, false, None).is_err());
+    assert!(
+        rt.execute(&ag, Uuid::new_v4(), Some(1), &BrowserAction::Reload)
+            .await
+            .is_err()
+    );
+    rt.release(&h, Some(2)).unwrap();
+    rt.acquire(&ag, false, false, None).unwrap();
+    assert_eq!(rt.live_state().session_id, session_id);
+    assert_eq!(rt.page_info().await.unwrap().url, before.url);
+    assert!(matches!(
+        frames.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
+    assert!(!rt.is_closed());
+}

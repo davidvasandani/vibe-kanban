@@ -244,6 +244,7 @@ impl BrowserDriver for CdpDriver {
         };
         handle.call("Page.enable", json!({})).await?;
         handle.call("Runtime.enable", json!({})).await?;
+        handle.call("Network.enable", json!({})).await?;
         if let Some(access) = &self.access {
             // Only requests matching these patterns pause; reader_loop answers
             // each one with Fetch.continueRequest.
@@ -327,6 +328,62 @@ impl CdpConnection {
     }
 }
 
+fn push_diagnostic(console: &mut VecDeque<String>, entry: &'static str) {
+    console.push_back(entry.to_string());
+    while console.len() > CONSOLE_TAIL_CAPACITY {
+        console.pop_front();
+    }
+}
+
+/// Emit only fixed classifications. Site-controlled arguments, URLs, error
+/// descriptions and request metadata can contain credentials or payment data.
+/// These observations do not establish why a challenge was rejected.
+fn sanitized_diagnostic(event: &Value) -> Option<&'static str> {
+    let params = &event["params"];
+    match event["method"].as_str()? {
+        "Network.loadingFailed" => Some(if params["canceled"].as_bool() == Some(true) {
+            "[network] Request canceled (not evidence of challenge rejection)"
+        } else {
+            match params["errorText"].as_str() {
+                Some("net::ERR_NAME_NOT_RESOLVED") => "[network] DNS resolution failed",
+                Some("net::ERR_CONNECTION_RESET") => "[network] Connection reset",
+                Some("net::ERR_CONNECTION_TIMED_OUT" | "net::ERR_TIMED_OUT") => {
+                    "[network] Request timed out"
+                }
+                Some("net::ERR_BLOCKED_BY_CLIENT") => "[network] Request blocked by client",
+                _ => "[network] Request failed (details suppressed)",
+            }
+        }),
+        "Runtime.consoleAPICalled" => {
+            let args = params["args"].as_array()?;
+            for arg in args {
+                let Some(message) = arg["value"].as_str() else {
+                    continue;
+                };
+                if message.contains("[Cloudflare Turnstile]")
+                    && message.contains("Ignored message from unexpected source")
+                {
+                    return Some(
+                        "[verification] Turnstile unexpected-source warning (cause unconfirmed)",
+                    );
+                }
+                if message.contains("Cannot find Widget") && message.contains("turnstile.remove()")
+                {
+                    return Some(
+                        "[verification] Turnstile widget teardown warning (cause unconfirmed)",
+                    );
+                }
+            }
+            match params["type"].as_str() {
+                Some("warning") => Some("[console] Warning (content suppressed)"),
+                Some("error" | "assert") => Some("[console] Error (content suppressed)"),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 async fn reader_loop(
     mut stream: futures::stream::SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>,
     conn: Arc<CdpConnection>,
@@ -399,25 +456,9 @@ async fn reader_loop(
                         .await;
                 }
             }
-            Some("Runtime.consoleAPICalled") => {
-                let params = &value["params"];
-                let kind = params["type"].as_str().unwrap_or("log");
-                let preview: Vec<String> = params["args"]
-                    .as_array()
-                    .map(|args| {
-                        args.iter()
-                            .filter_map(|a| {
-                                a.get("value")
-                                    .map(|v| v.to_string())
-                                    .or_else(|| a["description"].as_str().map(str::to_string))
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let mut console = console.lock().unwrap();
-                console.push_back(format!("[{kind}] {}", preview.join(" ")));
-                while console.len() > CONSOLE_TAIL_CAPACITY {
-                    console.pop_front();
+            Some("Runtime.consoleAPICalled" | "Network.loadingFailed") => {
+                if let Some(entry) = sanitized_diagnostic(&value) {
+                    push_diagnostic(&mut console.lock().unwrap(), entry);
                 }
             }
             _ => {}
@@ -675,6 +716,92 @@ impl DriverHandle for CdpHandle {
 mod live_tests {
     use super::*;
 
+    /// Provider test keys only; this does not solve a production challenge.
+    #[tokio::test]
+    #[ignore = "requires Chromium and access to Cloudflare's test widget"]
+    async fn live_test_widget_survives_control_handoff() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        use super::super::{session::SessionRuntime, types::ControlPrincipal};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let html = include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../scripts/fixtures/browser-verification.html"
+            ));
+            // Bounded even if a test assertion fails before cleanup.
+            let _ = tokio::time::timeout(Duration::from_secs(90), async {
+                loop {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut request = [0u8; 4096];
+                    let _ = socket.read(&mut request).await;
+                    let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", html.len(), html);
+                    let _ = socket.write_all(response.as_bytes()).await;
+                }
+            }).await;
+        });
+        let driver = CdpDriver::new(discover_chromium(None).expect("Chromium required"));
+        let handle = driver.launch(LaunchOpts::default()).await.unwrap();
+        let rt = SessionRuntime::new(
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            None,
+            handle,
+            chrono::Duration::seconds(60),
+            chrono::Duration::minutes(120),
+        );
+        let agent = ControlPrincipal::Agent {
+            execution_id: uuid::Uuid::new_v4(),
+        };
+        let human = ControlPrincipal::Human {
+            user_id: "fixture".into(),
+            connection_id: uuid::Uuid::new_v4(),
+        };
+        rt.acquire(&agent, false, false, None).unwrap();
+        rt.execute(
+            &agent,
+            uuid::Uuid::new_v4(),
+            Some(1),
+            &BrowserAction::Navigate {
+                url: format!("http://{address}"),
+            },
+        )
+        .await
+        .unwrap();
+        let observation = BrowserAction::Evaluate { expression: "({identity:window.pageIdentity, cart:document.querySelector('#cart')?.value, passed:document.querySelector('#result')?.textContent === 'Provider test widget passed'})".into() };
+        let mut before = None;
+        for _ in 0..40 {
+            let result = rt
+                .execute(&agent, uuid::Uuid::new_v4(), Some(1), &observation)
+                .await
+                .unwrap();
+            if result.value.as_ref().is_some_and(|v| v["passed"] == true) {
+                before = result.value;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        rt.acquire(&human, true, false, None).unwrap();
+        assert!(rt.acquire(&agent, false, false, None).is_err());
+        rt.release(&human, Some(2)).unwrap();
+        rt.acquire(&agent, false, false, None).unwrap();
+        let after = rt
+            .execute(&agent, uuid::Uuid::new_v4(), Some(4), &observation)
+            .await
+            .unwrap();
+        rt.close().await;
+        server.abort();
+        assert!(
+            before.is_some(),
+            "provider test widget did not complete within 20 seconds"
+        );
+        assert_eq!(
+            before, after.value,
+            "page or test cart changed during ownership transitions"
+        );
+    }
+
     /// Exercises real Chromium editing semantics without network access.
     #[tokio::test]
     #[ignore = "requires a local Chromium binary"]
@@ -779,5 +906,89 @@ mod live_tests {
             !landed.contains("cloudflareaccess.com"),
             "redirected to the Access login: {landed}"
         );
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn diagnostic_tail_is_bounded() {
+        let mut tail = VecDeque::new();
+        for _ in 0..CONSOLE_TAIL_CAPACITY + 10 {
+            push_diagnostic(&mut tail, "[console] Warning (content suppressed)");
+        }
+        push_diagnostic(&mut tail, "[network] Connection reset");
+        assert_eq!(tail.len(), CONSOLE_TAIL_CAPACITY);
+        assert_eq!(tail.back().unwrap(), "[network] Connection reset");
+    }
+
+    #[test]
+    fn console_diagnostics_never_retain_site_data() {
+        for (message, expected) in [
+            (
+                "[Cloudflare Turnstile] Ignored message from unexpected source for event: interactiveEnd. secret-cookie",
+                "[verification] Turnstile unexpected-source warning (cause unconfirmed)",
+            ),
+            (
+                "Cannot find Widget cf-chl-widget-secret, consider using turnstile.remove() to clean up a widget. payment-data",
+                "[verification] Turnstile widget teardown warning (cause unconfirmed)",
+            ),
+            (
+                "authorization=secret-token card=secret-payment",
+                "[console] Warning (content suppressed)",
+            ),
+        ] {
+            let event = json!({"method":"Runtime.consoleAPICalled", "params":{
+                "type":"warning", "args":[{"value":message}, {"description":"secret"}]
+            }});
+            assert_eq!(sanitized_diagnostic(&event), Some(expected));
+        }
+        assert_eq!(
+            sanitized_diagnostic(&json!({"method":"Runtime.consoleAPICalled", "params":{
+                "type":"log", "args":[{"value":"secret"}]
+            }})),
+            None
+        );
+    }
+
+    #[test]
+    fn only_actual_failure_events_produce_network_diagnostics() {
+        assert_eq!(
+            sanitized_diagnostic(
+                &json!({"method":"Network.responseReceived", "params":{"status":0}})
+            ),
+            None
+        );
+        for (error, canceled, expected) in [
+            (
+                "net::ERR_NAME_NOT_RESOLVED",
+                false,
+                "[network] DNS resolution failed",
+            ),
+            (
+                "net::ERR_CONNECTION_RESET",
+                false,
+                "[network] Connection reset",
+            ),
+            (
+                "secret URL and token",
+                false,
+                "[network] Request failed (details suppressed)",
+            ),
+            (
+                "net::ERR_ABORTED",
+                true,
+                "[network] Request canceled (not evidence of challenge rejection)",
+            ),
+        ] {
+            assert_eq!(
+                sanitized_diagnostic(&json!({"method":"Network.loadingFailed", "params":{
+                    "errorText":error, "canceled":canceled, "requestId":"secret", "url":"https://secret/token"
+                }})),
+                Some(expected)
+            );
+        }
     }
 }

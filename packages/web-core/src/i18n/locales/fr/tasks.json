@@ -587,6 +587,13 @@
       "copied": "Copié dans le presse-papiers.",
       "copyManually": "Sélectionnez et copiez ce texte sur votre appareil.",
       "pasteManually": "Collez le texte ici, puis appuyez sur Coller."
+    },
+    "handoff": {
+      "title": "La vérification se répète ?",
+      "explanation": "Certains sites ne prennent pas en charge la vérification dans un navigateur automatisé hébergé, même lorsque vous en prenez le contrôle.",
+      "steps": "Ouvrez le site dans votre navigateur habituel. Retrouvez le produit, choisissez les mêmes options et recréez votre panier avant de passer à la commande. Si la vérification échoue aussi, contactez l’assistance du site.",
+      "session": "La session hébergée reste inchangée jusqu’à son expiration habituelle. Votre navigateur local possède ses propres cookies et son propre panier. Ouvrir le site ne transfère ni le contrôle, ni les identifiants, ni les jetons de vérification.",
+      "openSite": "Ouvrir {{origin}} dans votre navigateur"
     }
   }
 }

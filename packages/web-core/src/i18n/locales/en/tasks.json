@@ -587,6 +587,13 @@
       "copied": "Copied to clipboard.",
       "copyManually": "Select and copy this text on your device.",
       "pasteManually": "Paste text here, then press Paste."
+    },
+    "handoff": {
+      "title": "Verification keeps repeating?",
+      "explanation": "Some sites do not support verification in a hosted, automated browser, even when you take control.",
+      "steps": "Open the site in your normal browser. Find the product again, select the same options, and recreate your cart before continuing to checkout. If verification still fails there, contact the site’s support.",
+      "session": "Your hosted session is left as it is, subject to its usual expiry. Your local browser has separate cookies and cart state. Opening the site does not transfer control, sign-in details, or verification tokens.",
+      "openSite": "Open {{origin}} in your browser"
     }
   }
 }

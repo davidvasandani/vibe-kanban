@@ -1,51 +1,20 @@
-# Debug Codex refresh-token errors
+# Workspace Browser verification handoff
 
-## Problem
-
-When Codex loses its session because a refresh token has been invalidated, its
-internal logger writes the same authentication failure to stderr repeatedly.
-Vibe Kanban currently renders those raw logger lines as ordinary error output.
-The screenshot for this task shows the resulting wall of red text and provides
-no concise, actionable recovery path.
-
-The structured Codex protocol already classifies equivalent refresh failures
-as setup-required errors. The stderr path does not apply that classification or
-collapse duplicate logger output, so behavior depends on which Codex channel
-reported the failure.
+## Problem and evidence
+On 2026-10-18 the user observed SectigoStore checkout verification repeatedly spin and reset during human takeover in workspace 7fd6799a-9669-4f35-a643-f0c451ff5533, browser session 9d2fe322-c2b0-43ab-8311-83019d4eaa15. The reported environment exposed HeadlessChrome/149 and navigator.webdriver=true. Scripts returned 200. Cross-origin performance status 0 is not proof of a failed request. Widget teardown and unexpected-source warnings do not establish the rejection cause. Reproduce where accessible and label any unverified evidence explicitly.
 
 ## Scope
-
-Limit implementation to the Vibe Kanban source repository. The shared homelab
-repository's `modules/vibe-kanban-rebuild.nix` is in deployment scope only if
-diagnosis proves that its Codex refresh-broker wiring is incorrect. Do not
-change any other service.
+Vibe Kanban browser driver, session/control transitions, UI handoff, sanitized diagnostics and tests. Hosting changes only in homelab/modules/vibe-kanban-rebuild.nix if needed. No other services, HP Mini or AMT configuration changes.
 
 ## Required behavior
+Provide an explicit local-browser fallback for verification unsupported by hosted automation. Evaluate headed operation but do not promise compatibility merely because Chrome has a display. Explain that the local browser has its own cookies and cart and how to reconstruct checkout. Preserve the hosted session and cart during handoff. Never copy cookies, challenge tokens or payment data.
 
-- Detect Codex stderr records whose message reports a failed token refresh,
-  including `refresh_token_invalidated` / revoked-session wording.
-- Render one concise setup-required entry with practical recovery guidance
-  instead of repeated raw internal log records.
-- Preserve useful diagnostic context without exposing token material.
-- Keep unrelated stderr output and structured Codex events unchanged.
-- Avoid hiding a later distinct refresh failure merely because an earlier one
-  was deduplicated.
-- Work when a logger record is split across stream chunks or contains a
-  multiline JSON error body.
+Agent leases remain exclusive. Human takeover and release change ownership without relaunch, navigation, reload or widget manipulation. Inspect actual CDP input delivery, frame/message handling, cookie/profile lifetime and network continuity.
 
-## Acceptance criteria
+Diagnostics must be bounded and sanitized by construction: classify known console warnings and request failures without retaining raw console arguments, URLs with secrets, request/response bodies, headers, cookies, tokens or payment details. Distinguish actual request failure events from resource timing status 0.
 
-1. The exact failure shape shown in the task attachment is covered by an
-   automated regression test.
-2. Repeated lines from one refresh failure produce a single user-visible,
-   setup-required error.
-3. The guidance tells a direct-login user to sign in again and retains the
-   existing refresh-endpoint guidance for brokered cluster logins.
-4. A non-authentication stderr line remains an ordinary error entry.
-5. Relevant Rust tests, formatting, and repository checks pass.
+## Verification and acceptance
+Cover fallback safety, unchanged session identity and navigation during transitions, lease exclusion, and diagnostic redaction with regression tests. Use only provider test keys for automated challenge fixtures, never solve production challenges through automation. A human must exercise the real checkout without purchasing; record whether checkout is reached or the actionable local fallback is used. Do not claim this manual check passed without human evidence.
 
-## Non-goals
-
-- Automatically renewing or replacing revoked credentials.
-- Changing the Codex CLI's authentication protocol.
-- Modifying unrelated services or broadening the homelab deployment topology.
+## Delivery
+Follow the supplied WikiLLM and SpecKit stages in order, run an independent Codex review, record reusable knowledge, then open and merge a PR after required validation. Record environment blockers and unresolved acceptance criteria honestly.

@@ -8,6 +8,7 @@ const state = vi.hoisted(() => ({
   sessionId: 'session-1',
   connected: true,
   owner: 'connection-1',
+  url: 'https://sectigostore.com/checkout?token=secret#secret',
   sendInput: vi.fn().mockResolvedValue(null),
   refresh: vi.fn(),
   setSession: vi.fn(),
@@ -33,6 +34,7 @@ vi.mock('@/shared/hooks/useBrowserSessionWs', () => ({
     liveState: {
       session_id: 'session-1',
       status: 'running',
+      current_url: state.url,
       control: {
         controller: { type: 'human', connection_id: state.owner },
         generation: 1,
@@ -127,4 +129,21 @@ it('preserves local paste shortcut default then sends clipboard text once', () =
     type: 'type',
     text: 'local text',
   });
+});
+
+it('offers an isolated local browser fallback without mutating the hosted page', () => {
+  render();
+  const link = container.querySelector('a')!;
+  expect(link.href).toBe('https://sectigostore.com/');
+  expect(link.target).toBe('_blank');
+  expect(link.rel).toBe('noopener noreferrer');
+  expect(container.textContent).toContain('browser.handoff.session');
+  expect(container.textContent).toContain('browser.handoff.steps');
+  act(() => container.querySelector('summary')!.click());
+  expect(state.sendInput).not.toHaveBeenCalled();
+});
+it('does not offer a destination from a stale browser session', () => {
+  state.sessionId = 'session-2';
+  render();
+  expect(container.querySelector('a')).toBeNull();
 });

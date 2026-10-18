@@ -18,6 +18,8 @@ contributed to it.
 
 ## Pages
 
+- [browser-verification-handoff.md](browser-verification-handoff.md) — Hosted verification limits, origin-only local handoff, session continuity, sanitized diagnostics and provider test-key coverage (`vk/aa2f-fix-cloudflare-v`).
+
 - [1password-reference-resolution.md](1password-reference-resolution.md) — How `op://` org Env Vars and owner tokens are resolved and under which token, how failures are classified (rate-limited, token rejected, not found, unknown) and why stderr is never shown, the echoed-name and pipe-deadlock gotchas, and a no-secret debugging recipe that includes the shared 1,000-request/24 h service-account quota (`vk/76ab-debug-1password`).
 
 - [aws-sso-agent-state.md](aws-sso-agent-state.md) — Shared AWS state, scoped homes, profile selection, host-versus-agent availability evidence, and bounded authentication probes. Lazy admission prevents same-batch queue expiry; executable discovery is shared per refresh. Final deployed check: 31/31 authenticated, plus successful agent CLI and Node SDK default-provider authentication.

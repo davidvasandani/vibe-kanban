@@ -1,23 +1,10 @@
-# Implementation plan — vk/0773-debug-token-erro
+# Implementation plan
 
-1. Run the required SpecKit constitution, specify, clarify, plan, tasks, and
-   analyze stages, using the task-owned feature directory and preserving the
-   Vibe Kanban-only scope.
-2. Capture the screenshot's timestamped, multiline Codex logger record in
-   focused tests for the stderr normalization path, including repeated records,
-   chunk splitting, and an unrelated stderr control case.
-3. Add a small Codex-specific stderr record normalizer that identifies complete
-   refresh-failure records, reuses `refresh_failure_setup_message`, emits a
-   `SetupRequired` entry, and coalesces immediate duplicates while preserving
-   distinct later failures and ordinary stderr.
-4. Run focused executor tests, repository formatting, and the proportionate
-   type/lint checks. Inspect deployment configuration read-only to confirm the
-   existing refresh-override wiring; change `modules/vibe-kanban-rebuild.nix`
-   only if evidence demonstrates a deployment defect.
-5. Run an independent Codex review, address confirmed findings, and repeat
-   verification until no significant findings remain.
-6. Update the existing Codex credential-refresh knowledge page and index only
-   with reusable conclusions, commit the knowledge-base update, then open and
-   merge the task pull request against the base branch.
-
-Prior knowledge: `PRIOR_KNOWLEDGE.md`.
+1. Complete ordered SpecKit constitution, specification, clarification, plan, tasks and analysis using the workspace command files and their task pointer.
+2. Inspect the existing browser launch, CDP input, ownership transitions, profiles and frame transport. Verify Cloudflare support guidance and attempt a read-only inspection of the reported session without taking it over.
+3. Add local-browser handoff guidance to BrowserPanelContainer, with safe HTTP(S) links, no credential transfer, and explicit instructions to recreate the cart locally. Keep the hosted page and control untouched.
+4. Classify console diagnostics at CDP ingestion and collect actual Network.loadingFailed events in a bounded ring, with no raw arguments, headers, URL, request bodies or payment data. Add regression tests.
+5. Extend session/control regression coverage to prove ownership changes preserve driver state and reject stale commands. Add a provider-test-key fixture if browser automation is available.
+6. Install locked dependencies; format and run targeted tests, type checks and lint. Record blockers rather than claiming skipped checks passed.
+7. Have a human verify the real checkout or fallback without purchasing. Record live observations separately from reported evidence.
+8. Run independent Codex review, address findings, record reusable knowledge and commit it. Open and merge the task PR only when validation and review support readiness.
