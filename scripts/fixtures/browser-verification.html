@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>VK verification handoff test</title>
+<h1>Verification handoff test</h1>
+<p>This fixture uses Cloudflare's public always-pass test key. It cannot prove production challenge compatibility.</p>
+<label>Cart marker <input id="cart" value="one-year-one-site"></label>
+<p id="result">Waiting for test widget</p>
+<div class="cf-turnstile" data-sitekey="1x00000000000000000000AA" data-callback="verified"></div>
+<script>
+  // Never retain, log or export the callback's token argument.
+  window.pageIdentity = crypto.randomUUID();
+  window.verified = () => {
+    document.getElementById('result').textContent = 'Provider test widget passed';
+  };
+</script>
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+</html>

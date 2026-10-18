@@ -587,6 +587,13 @@
       "copied": "Copiado al portapapeles.",
       "copyManually": "Selecciona y copia este texto en tu dispositivo.",
       "pasteManually": "Pega el texto aquí y pulsa Pegar."
+    },
+    "handoff": {
+      "title": "¿La verificación se repite?",
+      "explanation": "Algunos sitios no admiten la verificación en un navegador automatizado alojado, aunque tomes el control.",
+      "steps": "Abre el sitio en tu navegador habitual. Busca el producto, selecciona las mismas opciones y vuelve a crear el carrito antes de pagar. Si la verificación también falla allí, contacta con el soporte del sitio.",
+      "session": "La sesión alojada se conserva hasta su vencimiento habitual. Tu navegador local tiene sus propias cookies y su propio carrito. Abrir el sitio no transfiere el control, los datos de acceso ni los tokens de verificación.",
+      "openSite": "Abrir {{origin}} en tu navegador"
     }
   }
 }

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { localBrowserOrigin } from './localBrowserHandoff';
 import { XIcon } from '@phosphor-icons/react';
 import type {
   BrowserSessionDbStatus,
@@ -279,6 +280,11 @@ export function BrowserPanelContainer({
     return null;
   })();
 
+  const localOrigin =
+    liveState?.session_id === selectedSessionId
+      ? localBrowserOrigin(liveState.current_url)
+      : null;
+
   const buttonClass =
     'shrink-0 px-half py-[2px] bg-secondary rounded border text-sm text-normal hover:text-high';
 
@@ -377,6 +383,25 @@ export function BrowserPanelContainer({
           sendInput={sendInput}
         />
       )}
+
+      <details className="shrink-0 border-b px-base py-half text-sm text-normal">
+        <summary className="cursor-pointer text-high">
+          {t('browser.handoff.title')}
+        </summary>
+        <p className="mt-half">{t('browser.handoff.explanation')}</p>
+        <p className="mt-half">{t('browser.handoff.steps')}</p>
+        <p className="mt-half">{t('browser.handoff.session')}</p>
+        {localOrigin && (
+          <a
+            href={localOrigin}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-block mt-half text-brand underline"
+          >
+            {t('browser.handoff.openSite', { origin: localOrigin })}
+          </a>
+        )}
+      </details>
 
       {/* Error banner */}
       {bannerText && (
