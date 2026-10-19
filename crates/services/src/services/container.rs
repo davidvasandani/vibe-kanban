@@ -25,6 +25,7 @@ use db::{
         execution_worker_job::ExecutionWorkerJob,
         repo::Repo,
         session::{CreateSession, Session, SessionError},
+        session_turn_boundary::SessionTurnBoundary,
         workspace::{Workspace, WorkspaceError},
         workspace_creation_progress::{WorkspaceCreationPhase, WorkspaceCreationProgress},
         workspace_repo::WorkspaceRepo,
@@ -945,6 +946,14 @@ pub trait ContainerService {
 
     /// Finalize workspace execution by sending notifications
     async fn finalize_task(&self, ctx: &ExecutionContext) {
+        // Every terminal chain reaches here only when no queued follow-up was
+        // started in its place: record that turn boundary durably and for this
+        // exact turn, before any early return, so issue comment delivery can
+        // never race the exit monitor's own handoff.
+        if let Err(error) = SessionTurnBoundary::record(&self.db().pool, ctx.session.id).await {
+            tracing::warn!(?error, session_id = %ctx.session.id, "failed to record turn boundary");
+        }
+
         // Skip notification if process was intentionally killed by user
         // or interrupted by a server shutdown/restart
         if matches!(

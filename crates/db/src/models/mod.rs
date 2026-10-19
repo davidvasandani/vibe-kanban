@@ -18,6 +18,7 @@ pub mod repository_admin_lock;
 pub mod requests;
 pub mod scratch;
 pub mod session;
+pub mod session_turn_boundary;
 pub mod tag;
 pub mod task;
 pub mod worker_node;

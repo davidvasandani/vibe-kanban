@@ -30,7 +30,7 @@ use api_types::{
     Workspace as RemoteWorkspace,
 };
 use axum::{Extension, Json, extract::State};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use db::models::{
     execution_process::{ExecutionProcess, ExecutionProcessRunReason, ExecutionProcessStatus},
     issue_comment_delivery::{
@@ -38,6 +38,7 @@ use db::models::{
         IssueCommentDeliverySource, IssueCommentDeliveryState, NewIssueCommentDelivery,
     },
     session::Session,
+    session_turn_boundary::SessionTurnBoundary,
     workspace::Workspace,
 };
 use deployment::Deployment;
@@ -63,14 +64,12 @@ use crate::{DeploymentImpl, routes::sessions::CreateFollowUpAttempt};
 
 /// How often pending deliveries are re-examined (missed events, retries).
 const SWEEP_INTERVAL: Duration = Duration::from_secs(15);
-/// A turn boundary is confirmed by `finalize_task`'s event for the session's
-/// latest turn: the exit monitor emits it only after deciding not to start a
-/// queued follow-up, so nothing else is about to start. Without that event
-/// (it was missed, or the turn ended before this process started), a turn
-/// must have ended at least this long ago. That is far longer than the exit
-/// monitor's commit / cleanup / queued-message handoff, which a time-based
-/// guess must never race.
-const UNCONFIRMED_BOUNDARY_AGE: chrono::Duration = chrono::Duration::minutes(2);
+// A new turn may start only at a confirmed turn boundary: the session's
+// latest turn is the one `finalize_task` recorded in `session_turn_boundaries`
+// (written once the exit monitor has decided not to start a queued
+// follow-up), or it ended before this process started (no exit monitor of
+// an earlier process survives a restart, and its in-memory queue is gone).
+// Elapsed time never authorizes a dispatch.
 
 // ── Shared API types ────────────────────────────────────────────────────
 
@@ -468,9 +467,8 @@ pub struct IssueCommentDispatcher<B: DeliveryBackend> {
     pool: SqlitePool,
     backend: B,
     session_locks: StdMutex<HashMap<Uuid, Arc<Mutex<()>>>>,
-    /// The latest coding-agent turn of each session whose turn-boundary event
-    /// was observed. A boundary counts only for that exact turn.
-    boundaries: StdMutex<HashMap<Uuid, Uuid>>,
+    /// When this dispatcher (and so this server process) started.
+    started_at: DateTime<Utc>,
 }
 
 /// One candidate with the presentation details the API reports.
@@ -486,7 +484,7 @@ impl<B: DeliveryBackend> IssueCommentDispatcher<B> {
             pool,
             backend,
             session_locks: StdMutex::new(HashMap::new()),
-            boundaries: StdMutex::new(HashMap::new()),
+            started_at: Utc::now(),
         }
     }
 
@@ -499,19 +497,16 @@ impl<B: DeliveryBackend> IssueCommentDispatcher<B> {
             .clone()
     }
 
-    fn note_boundary(&self, session_id: Uuid, turn_id: Uuid) {
-        self.boundaries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(session_id, turn_id);
-    }
-
-    fn boundary_confirmed(&self, session_id: Uuid, turn_id: Uuid) -> bool {
-        self.boundaries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(&session_id)
-            == Some(&turn_id)
+    async fn boundary_confirmed(
+        &self,
+        session_id: Uuid,
+        turn_id: Uuid,
+        completed_at: Option<DateTime<Utc>>,
+    ) -> Result<bool, sqlx::Error> {
+        if completed_at.is_some_and(|at| at < self.started_at) {
+            return Ok(true);
+        }
+        Ok(SessionTurnBoundary::finalized_turn(&self.pool, session_id).await? == Some(turn_id))
     }
 
     async fn session_state(
@@ -1015,17 +1010,23 @@ impl<B: DeliveryBackend> IssueCommentDispatcher<B> {
             )
             .await?
             .iter()
-            .any(|(id, status)| *id == latest_turn_id && *status == ExecutionProcessStatus::Failed)
-            {
+            .any(|turn| {
+                turn.id == latest_turn_id
+                    && !turn.launched
+                    && turn.status != ExecutionProcessStatus::Running
+            }) {
                 own_attempt = true;
                 break;
             }
         }
 
-        // Only at a confirmed boundary (see `UNCONFIRMED_BOUNDARY_AGE`); the
-        // event or the sweep comes back otherwise.
-        let ended_long_ago = completed_at.is_some_and(|at| now - at >= UNCONFIRMED_BOUNDARY_AGE);
-        if !own_attempt && !self.boundary_confirmed(session_id, latest_turn_id) && !ended_long_ago {
+        // Only at a confirmed boundary; the finalize event or the sweep comes
+        // back otherwise.
+        if !own_attempt
+            && !self
+                .boundary_confirmed(session_id, latest_turn_id, completed_at)
+                .await?
+        {
             return Ok(());
         }
 
@@ -1052,11 +1053,11 @@ impl<B: DeliveryBackend> IssueCommentDispatcher<B> {
         self.deliver_claimed(&session, deliverable).await
     }
 
-    /// A turn that carried `comment_id` and actually ran. An execution row is
-    /// written as soon as a start is attempted and kept if the launch fails,
-    /// so a `Failed` row is not evidence: such a comment is sent again. (A
-    /// turn that started and then failed is indistinguishable here; the
-    /// re-send is the safer error than never delivering.)
+    /// A turn that carried `comment_id` and whose agent was actually
+    /// launched (see `find_coding_agent_turns_with_marker`), whatever its
+    /// status since: a turn that ran and then failed is still delivered and
+    /// is never replayed, while a launch that failed or was cut off by a
+    /// crash before the agent started is not evidence.
     async fn started_turn(
         &self,
         session_id: Uuid,
@@ -1069,8 +1070,8 @@ impl<B: DeliveryBackend> IssueCommentDispatcher<B> {
         )
         .await?
         .into_iter()
-        .find(|(_, status)| *status != ExecutionProcessStatus::Failed)
-        .map(|(id, _)| id))
+        .find(|turn| turn.launched)
+        .map(|turn| turn.id))
     }
 
     /// Finish every claimed row of a batch with the same outcome.
@@ -1361,14 +1362,9 @@ impl<B: DeliveryBackend> IssueCommentDispatcher<B> {
         Ok(())
     }
 
-    /// A turn boundary was announced for `session_id`: its latest turn ended
-    /// and no queued follow-up was started in its place.
+    /// A turn boundary was announced for `session_id` (`finalize_task`
+    /// recorded it before emitting the event).
     pub async fn on_turn_finalized(&self, session_id: Uuid) -> Result<(), sqlx::Error> {
-        if let Some((turn_id, _, _)) =
-            ExecutionProcess::latest_coding_agent_turn_for_session(&self.pool, session_id).await?
-        {
-            self.note_boundary(session_id, turn_id);
-        }
         self.dispatch_session(session_id).await
     }
 

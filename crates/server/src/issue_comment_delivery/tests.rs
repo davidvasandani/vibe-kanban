@@ -215,6 +215,10 @@ impl DeliveryBackend for FakeBackend {
             if failure == Some(StartFailure::LaunchFailed) {
                 return Err("executable not found".into());
             }
+            // The agent process was spawned: durable launch evidence.
+            ExecutionProcess::update_pgid(&self.pool, id, 4242)
+                .await
+                .unwrap();
             self.state().starts.push((session_id, prompt));
             if failure == Some(StartFailure::LostResponse) {
                 return Err("response lost".into());
@@ -445,6 +449,15 @@ impl Fixture {
             .unwrap()
     }
 
+    /// What `finalize_task` does at a turn boundary: record it, then wake
+    /// the dispatcher.
+    async fn finalize(&self, session_id: Uuid) {
+        db::models::session_turn_boundary::SessionTurnBoundary::record(&self.pool, session_id)
+            .await
+            .unwrap();
+        self.dispatcher.on_turn_finalized(session_id).await.unwrap();
+    }
+
     fn starts(&self) -> Vec<(Uuid, String)> {
         self.backend.state().starts.clone()
     }
@@ -523,7 +536,7 @@ async fn running_agent_gets_one_turn_after_its_boundary() {
     );
 
     fx.complete_running(session_id, 0).await;
-    fx.dispatcher.on_turn_finalized(session_id).await.unwrap();
+    fx.finalize(session_id).await;
     let starts = fx.starts();
     assert_eq!(starts.len(), 1, "both comments ride one turn");
     assert_eq!(extract_markers(&starts[0].1), vec![first, second]);
@@ -561,7 +574,7 @@ async fn reply_right_after_completion_waits_for_the_boundary_event() {
     fx.dispatcher.sweep().await.unwrap();
     assert!(fx.starts().is_empty());
 
-    fx.dispatcher.on_turn_finalized(session_id).await.unwrap();
+    fx.finalize(session_id).await;
     assert_eq!(fx.starts().len(), 1);
 }
 
@@ -579,7 +592,7 @@ async fn reply_after_a_seen_boundary_is_delivered_immediately() {
         None,
     )
     .await;
-    fx.dispatcher.on_turn_finalized(session_id).await.unwrap();
+    fx.finalize(session_id).await;
 
     let delivery = fx.reply(fx.post("answer"), None).await;
     assert_eq!(delivery.state, IssueCommentDeliveryState::Delivered);
@@ -726,7 +739,7 @@ async fn a_turn_that_fails_while_a_reply_waits_is_not_resumed() {
     .execute(&fx.pool)
     .await
     .unwrap();
-    fx.dispatcher.on_turn_finalized(session_id).await.unwrap();
+    fx.finalize(session_id).await;
     let stored = IssueCommentDelivery::find_by_id(&fx.pool, delivery.id)
         .await
         .unwrap()
@@ -877,10 +890,12 @@ async fn restart_recovery_uses_positive_evidence() {
     fx.backend.state().queued.insert(session_id);
     let started = fx.post("started before the crash");
     let not_started = fx.post("claimed but never started");
+    let crashed = fx.post("execution row written, then the server died");
     let a = fx.reply(started, None).await;
     let b = fx.reply(not_started, None).await;
+    let c = fx.reply(crashed, None).await;
     fx.backend.state().queued.clear();
-    for row in [&a, &b] {
+    for row in [&a, &b, &c] {
         assert!(
             IssueCommentDelivery::claim(&fx.pool, row.id, Utc::now())
                 .await
@@ -902,6 +917,28 @@ async fn restart_recovery_uses_positive_evidence() {
         session_id,
         &prompt,
         ExecutionProcessStatus::Completed,
+        Some(300),
+    )
+    .await;
+    ExecutionProcess::update_pgid(&fx.pool, execution, 4242)
+        .await
+        .unwrap();
+    // The third comment's row exists, but the agent was never launched: the
+    // restart marked it interrupted, with no process group or agent session.
+    let crashed_prompt = compose_delivery_prompt(
+        "VAS-859",
+        &[DeliveredComment {
+            comment_id: crashed,
+            author_name: None,
+            created_at: Utc::now(),
+            message: "execution row written, then the server died".into(),
+        }],
+    );
+    insert_turn(
+        &fx.pool,
+        session_id,
+        &crashed_prompt,
+        ExecutionProcessStatus::Interrupted,
         Some(300),
     )
     .await;
@@ -939,11 +976,20 @@ async fn restart_recovery_uses_positive_evidence() {
         Some("started before the crash")
     );
     assert_eq!(b.state, IssueCommentDeliveryState::Pending);
+    let c = IssueCommentDelivery::find_by_id(&fx.pool, c.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        c.state,
+        IssueCommentDeliveryState::Pending,
+        "no launch evidence"
+    );
 
     fx.dispatcher.sweep().await.unwrap();
     let starts = fx.starts();
     assert_eq!(starts.len(), 1);
-    assert_eq!(extract_markers(&starts[0].1), vec![not_started]);
+    assert_eq!(extract_markers(&starts[0].1), vec![not_started, crashed]);
 }
 
 // Edits: a pending delivery sends the latest text; a delivered one is a
@@ -973,7 +1019,7 @@ async fn edits_and_deletions_follow_snapshot_semantics() {
         state.comments.remove(&deleted);
     }
     fx.complete_running(session_id, 0).await;
-    fx.dispatcher.on_turn_finalized(session_id).await.unwrap();
+    fx.finalize(session_id).await;
 
     let starts = fx.starts();
     assert_eq!(starts.len(), 1);
@@ -1255,7 +1301,7 @@ async fn a_reply_waiting_for_an_unlinked_workspace_is_not_delivered() {
         .workspaces
         .clear();
     fx.complete_running(session_id, 0).await;
-    fx.dispatcher.on_turn_finalized(session_id).await.unwrap();
+    fx.finalize(session_id).await;
     let stored = IssueCommentDelivery::find_by_id(&fx.pool, unlinked.id)
         .await
         .unwrap()
@@ -1276,7 +1322,7 @@ async fn a_boundary_for_an_older_turn_does_not_confirm_a_newer_one() {
     let fx = Fixture::new().await;
     let (_, session_id) = fx.linked_workspace().await;
     fx.waiting(session_id).await;
-    fx.dispatcher.on_turn_finalized(session_id).await.unwrap();
+    fx.finalize(session_id).await;
     insert_turn(
         &fx.pool,
         session_id,
@@ -1290,6 +1336,6 @@ async fn a_boundary_for_an_older_turn_does_not_confirm_a_newer_one() {
     assert_eq!(delivery.state, IssueCommentDeliveryState::Pending);
     assert!(fx.starts().is_empty());
 
-    fx.dispatcher.on_turn_finalized(session_id).await.unwrap();
+    fx.finalize(session_id).await;
     assert_eq!(fx.starts().len(), 1);
 }
