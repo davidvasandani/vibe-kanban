@@ -558,6 +558,18 @@ impl DriverHandle for CdpHandle {
                 .await?;
                 Ok(None)
             }
+            BrowserAction::Scroll {
+                x,
+                y,
+                delta_x,
+                delta_y,
+            } => {
+                self.call(
+                    "Input.dispatchMouseEvent",
+                    json!({ "type": "mouseWheel", "x": x, "y": y, "deltaX": delta_x, "deltaY": delta_y }),
+                ).await?;
+                Ok(None)
+            }
             BrowserAction::Type { text } => {
                 self.call("Input.insertText", json!({ "text": text }))
                     .await?;
@@ -800,6 +812,52 @@ mod live_tests {
             before, after.value,
             "page or test cart changed during ownership transitions"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a local Chromium binary"]
+    async fn live_scroll_targets_nested_content() {
+        let chromium = discover_chromium(None).expect("chromium");
+        let handle = CdpDriver::new(chromium)
+            .launch(LaunchOpts::default())
+            .await
+            .expect("launch");
+        handle.perform(&BrowserAction::Evaluate {
+            expression: "document.body.innerHTML = '<div id=scroll style=\"width:200px;height:200px;overflow:auto\"><div style=\"width:2000px;height:2000px\">content</div></div>'; document.body.style.margin='0';".into(),
+        }).await.unwrap();
+        handle
+            .perform(&BrowserAction::Scroll {
+                x: 50,
+                y: 50,
+                delta_x: 100,
+                delta_y: 150,
+            })
+            .await
+            .unwrap();
+        let mut position = None;
+        for _ in 0..40 {
+            position = handle.perform(&BrowserAction::Evaluate {
+                expression: "[document.getElementById('scroll').scrollLeft, document.getElementById('scroll').scrollTop, window.scrollY]".into(),
+            }).await.unwrap();
+            if position
+                .as_ref()
+                .is_some_and(|v| v[0].as_i64().unwrap_or(0) > 0 && v[1].as_i64().unwrap_or(0) > 0)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        handle.close().await;
+        let position = position.unwrap();
+        assert!(
+            position[0].as_i64().unwrap() > 0,
+            "horizontal scroll: {position}"
+        );
+        assert!(
+            position[1].as_i64().unwrap() > 0,
+            "vertical scroll: {position}"
+        );
+        assert_eq!(position[2], 0, "outer page should not scroll");
     }
 
     /// Exercises real Chromium editing semantics without network access.

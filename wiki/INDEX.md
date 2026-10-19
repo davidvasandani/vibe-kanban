@@ -84,6 +84,7 @@ contributed to it.
   whitespace, use product branding only as the empty-state fallback, and remain
   separate from visible breadcrumb identity.
 - [browser-session-control-arbiter.md](browser-session-control-arbiter.md) —
+  Touch/wheel scrolling, fractional deltas, bounded queues and gesture lifecycle (`vk/5c0e-browser-scrolling`);
   Mobile keyboard gesture focus, composition, plain-text clipboard fallbacks
   and control-scoped async results (`vk/5c0e-vk-browser`), plus
   Workspace browser sessions with shared human/agent control: the
