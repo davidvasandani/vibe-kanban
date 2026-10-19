@@ -6,5 +6,6 @@
 - All frontend package lint checks passed. Focused lint passed again after review fixes. Repository format ran; changed frontend files were formatted again afterwards.
 - Shared types regenerated with `pnpm run generate-types`; only Scroll changed.
 - Independent Codex CLI review first flagged pending type generation, then fractional delta loss and movement crossing hit targets. Generation completed, both logic findings were fixed and regression tested; the third review reported no actionable findings.
-- Final repository-wide backend check/lint and frontend type checks are running; results will be recorded before PR readiness/merge.
+- All four frontend type checks passed (local-web, remote-web, web-core, ui). Repository-wide backend checks and Clippy passed for the main and remote workspaces. No unused i18n keys.
+- PR: https://github.com/davidvasandani/vibe-kanban/pull/377. GitHub CI is the final merge gate; its PR state records delivery.
 - Physical phone swipe/OS keyboard behavior remains a manual check. No deployment changes or other services were touched.
