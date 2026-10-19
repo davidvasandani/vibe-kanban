@@ -6,6 +6,7 @@ pub mod execution_process_repo_state;
 pub mod execution_worker_job;
 pub mod file;
 pub mod github_owner_token;
+pub mod issue_comment_delivery;
 pub mod mcp_gateway;
 pub mod mcp_oauth;
 pub mod merge;

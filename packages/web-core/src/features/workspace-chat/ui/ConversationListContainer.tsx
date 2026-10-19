@@ -40,6 +40,12 @@ import {
   isAggregatedThinkingGroup,
 } from '@/shared/hooks/useConversationHistory/types';
 import { useConversationHistory } from '../model/hooks/useConversationHistory';
+import {
+  IssueCommentsContext,
+  type IssueCommentsContextValue,
+} from '../model/contexts/IssueCommentsContext';
+import { useWorkspaceIssueComments } from '@/shared/hooks/useWorkspaceIssueComments';
+import { mergeIssueComments } from '@/shared/lib/issueCommentDelivery';
 import { useSetTokenUsageInfo } from '../model/contexts/EntriesContext';
 import type { WorkspaceWithSession } from '@/shared/types/attempt';
 import type { RepoWithTargetBranch } from 'shared/types';
@@ -171,6 +177,27 @@ export const ConversationList = forwardRef<
   const [hasRunningProcess, setHasRunningProcess] = useState(false);
   const lastSettledTailStartIndexRef = useRef<number | null>(null);
   const { setEntries, reset } = useEntriesActions();
+  // Linked issue comments shown in this conversation (delivered ones replace
+  // the prompt of the turn they started; others sit between turns).
+  const { data: workspaceIssueComments } = useWorkspaceIssueComments(
+    attempt.id
+  );
+  const issueCommentsRef = useRef(workspaceIssueComments);
+  const hasEarlierHistoryRef = useRef(false);
+  const issueCommentsSnapshotRef = useRef<{
+    data: typeof workspaceIssueComments;
+    key: string;
+  }>({ data: undefined, key: '' });
+  const lastTimelineRef = useRef<{
+    source: ConversationTimelineSource;
+    loading: boolean;
+  } | null>(null);
+  const [issueCommentsValue, setIssueCommentsValue] =
+    useState<IssueCommentsContextValue>({
+      issue: null,
+      deliveredByExecution: new Map(),
+      standaloneById: new Map(),
+    });
   const setTokenUsageInfo = useSetTokenUsageInfo();
   const scriptOutputCacheRef = useRef<
     Map<string, { count: number; output: string }>
@@ -363,8 +390,40 @@ export const ConversationList = forwardRef<
     setHasRunningProcess(derivedEntries.hasRunningProcess);
     setTokenUsageInfo(derivedEntries.latestTokenUsageInfo);
 
-    const derivedTimeline = deriveConversationTimeline(
+    lastTimelineRef.current = {
+      source: pending.source,
+      loading: pending.loading,
+    };
+    const merged = mergeIssueComments(
       derivedEntries.entries,
+      issueCommentsRef.current,
+      attempt.session?.id,
+      !hasEarlierHistoryRef.current
+    );
+    // Publish a new context value only when the comment data or its
+    // placement changed: streaming flushes every frame, and a fresh value
+    // would re-render every conversation entry.
+    const issueCommentsKey = [
+      [...merged.deliveredByExecution.keys()].join(','),
+      [...merged.standaloneById.keys()].join(','),
+    ].join('|');
+    if (
+      issueCommentsSnapshotRef.current.data !== issueCommentsRef.current ||
+      issueCommentsSnapshotRef.current.key !== issueCommentsKey
+    ) {
+      issueCommentsSnapshotRef.current = {
+        data: issueCommentsRef.current,
+        key: issueCommentsKey,
+      };
+      setIssueCommentsValue({
+        issue: issueCommentsRef.current?.issue ?? null,
+        deliveredByExecution: merged.deliveredByExecution,
+        standaloneById: merged.standaloneById,
+      });
+    }
+
+    const derivedTimeline = deriveConversationTimeline(
+      merged.entries,
       prevEntriesRef.current,
       prevRowsRef.current
     );
@@ -417,6 +476,24 @@ export const ConversationList = forwardRef<
 
   const prevEntriesRef = useRef<DisplayEntry[]>([]);
   const prevRowsRef = useRef<ConversationRow[]>([]);
+
+  useEffect(() => {
+    hasEarlierHistoryRef.current = hasEarlierHistory;
+  }, [hasEarlierHistory]);
+
+  const onTimelineUpdatedRef = useRef(onTimelineUpdated);
+  useEffect(() => {
+    onTimelineUpdatedRef.current = onTimelineUpdated;
+  });
+
+  // New or changed issue comments re-derive the current timeline.
+  useEffect(() => {
+    issueCommentsRef.current = workspaceIssueComments;
+    const last = lastTimelineRef.current;
+    if (last) {
+      onTimelineUpdatedRef.current(last.source, 'running', last.loading);
+    }
+  }, [workspaceIssueComments]);
 
   const clearHistoryAnchor = useCallback(() => {
     if (historyAnchorFrameRef.current !== null) {
@@ -910,125 +987,129 @@ export const ConversationList = forwardRef<
   }, [clearHistoryAnchor, clearPendingInteractionAnchor]);
 
   return (
-    <ApprovalFormProvider>
-      <div className="relative h-full overflow-hidden">
-        {showLoader && (
-          <div className="absolute inset-0 flex items-center justify-center z-10">
-            <SpinnerIcon className="size-6 animate-spin text-low" />
-          </div>
-        )}
-        <div
-          ref={tanstackScrollRef}
-          // overflow-x-hidden: overflow-y:auto alone computes overflow-x to
-          // auto, which would make this a competing horizontal scroller
-          // inside horizontally-scrolling layouts (workspace carousel).
-          className="h-full overflow-y-auto overflow-x-hidden scrollbar-none"
-          style={{ overflowAnchor: 'none', contain: 'strict' }}
-          onClickCapture={handleConversationClickCapture}
-        >
-          <div className="pt-2">
-            {showSetupPlaceholder && (
-              <div className="my-base px-double">
-                <ChatScriptPlaceholder
-                  type="setup"
-                  onConfigure={canConfigure ? handleConfigureSetup : undefined}
+    <IssueCommentsContext.Provider value={issueCommentsValue}>
+      <ApprovalFormProvider>
+        <div className="relative h-full overflow-hidden">
+          {showLoader && (
+            <div className="absolute inset-0 flex items-center justify-center z-10">
+              <SpinnerIcon className="size-6 animate-spin text-low" />
+            </div>
+          )}
+          <div
+            ref={tanstackScrollRef}
+            // overflow-x-hidden: overflow-y:auto alone computes overflow-x to
+            // auto, which would make this a competing horizontal scroller
+            // inside horizontally-scrolling layouts (workspace carousel).
+            className="h-full overflow-y-auto overflow-x-hidden scrollbar-none"
+            style={{ overflowAnchor: 'none', contain: 'strict' }}
+            onClickCapture={handleConversationClickCapture}
+          >
+            <div className="pt-2">
+              {showSetupPlaceholder && (
+                <div className="my-base px-double">
+                  <ChatScriptPlaceholder
+                    type="setup"
+                    onConfigure={
+                      canConfigure ? handleConfigureSetup : undefined
+                    }
+                  />
+                </div>
+              )}
+            </div>
+
+            <div ref={historyTopSentinelRef} className="h-px" />
+
+            {(hasEarlierHistory || isLoadingEarlier || loadEarlierError) &&
+              !showLoader && (
+                <EarlierHistoryControl
+                  isLoading={isLoadingEarlier}
+                  error={loadEarlierError}
+                  onLoad={() => void requestEarlierHistory()}
+                />
+              )}
+
+            {showEmptyState && (
+              <div className="flex min-h-full items-center justify-center px-double py-12">
+                <ChatEmptyState
+                  title={t('conversation.emptyTitle', {
+                    defaultValue: 'Send a message to start the conversation.',
+                  })}
+                  description={t('conversation.emptyDescription', {
+                    defaultValue:
+                      'Your workspace conversation will appear here once a new turn starts.',
+                  })}
                 />
               </div>
             )}
-          </div>
 
-          <div ref={historyTopSentinelRef} className="h-px" />
-
-          {(hasEarlierHistory || isLoadingEarlier || loadEarlierError) &&
-            !showLoader && (
-              <EarlierHistoryControl
-                isLoading={isLoadingEarlier}
-                error={loadEarlierError}
-                onLoad={() => void requestEarlierHistory()}
-              />
+            {virtualizedRows.length > 0 && (
+              <div
+                style={{
+                  height: `${totalSize}px`,
+                  width: '100%',
+                  position: 'relative',
+                }}
+              >
+                {virtualItems.map((virtualItem) => {
+                  const row = virtualizedRows[virtualItem.index];
+                  if (!row) return null;
+                  return (
+                    <div
+                      key={row.semanticKey}
+                      data-index={virtualItem.index}
+                      data-row-index={virtualItem.index}
+                      data-semantic-key={row.semanticKey}
+                      ref={measureElement}
+                      style={{
+                        position: 'absolute',
+                        top: 0,
+                        left: 0,
+                        width: '100%',
+                        transform: `translateY(${virtualItem.start}px)`,
+                      }}
+                    >
+                      {renderRowContent(row.entry, attempt, resetAction, repos)}
+                    </div>
+                  );
+                })}
+              </div>
             )}
 
-          {showEmptyState && (
-            <div className="flex min-h-full items-center justify-center px-double py-12">
-              <ChatEmptyState
-                title={t('conversation.emptyTitle', {
-                  defaultValue: 'Send a message to start the conversation.',
-                })}
-                description={t('conversation.emptyDescription', {
-                  defaultValue:
-                    'Your workspace conversation will appear here once a new turn starts.',
-                })}
-              />
-            </div>
-          )}
+            {unvirtualizedTailRows.map((row, tailIndex) => {
+              const rowIndex = firstUnvirtualizedRowIndex + tailIndex;
+              return (
+                <div
+                  key={row.semanticKey}
+                  data-row-index={rowIndex}
+                  data-semantic-key={row.semanticKey}
+                >
+                  {renderRowContent(row.entry, attempt, resetAction, repos)}
+                </div>
+              );
+            })}
 
-          {virtualizedRows.length > 0 && (
-            <div
-              style={{
-                height: `${totalSize}px`,
-                width: '100%',
-                position: 'relative',
-              }}
-            >
-              {virtualItems.map((virtualItem) => {
-                const row = virtualizedRows[virtualItem.index];
-                if (!row) return null;
-                return (
-                  <div
-                    key={row.semanticKey}
-                    data-index={virtualItem.index}
-                    data-row-index={virtualItem.index}
-                    data-semantic-key={row.semanticKey}
-                    ref={measureElement}
-                    style={{
-                      position: 'absolute',
-                      top: 0,
-                      left: 0,
-                      width: '100%',
-                      transform: `translateY(${virtualItem.start}px)`,
-                    }}
-                  >
-                    {renderRowContent(row.entry, attempt, resetAction, repos)}
-                  </div>
-                );
-              })}
-            </div>
-          )}
-
-          {unvirtualizedTailRows.map((row, tailIndex) => {
-            const rowIndex = firstUnvirtualizedRowIndex + tailIndex;
-            return (
-              <div
-                key={row.semanticKey}
-                data-row-index={rowIndex}
-                data-semantic-key={row.semanticKey}
-              >
-                {renderRowContent(row.entry, attempt, resetAction, repos)}
-              </div>
-            );
-          })}
-
-          {/* Plan-reveal spacer: provides extra scroll room so plan-reveal
+            {/* Plan-reveal spacer: provides extra scroll room so plan-reveal
               can align the plan entry to the top of the viewport. Height is set
               imperatively in scrollToAbsoluteIndex and cleared on scrollToBottom. */}
-          <div ref={planRevealSpacerRef} style={{ height: 0 }} />
+            <div ref={planRevealSpacerRef} style={{ height: 0 }} />
 
-          {/* Footer placeholder */}
-          <div className="pb-2">
-            {showCleanupPlaceholder && (
-              <div className="my-base px-double">
-                <ChatScriptPlaceholder
-                  type="cleanup"
-                  onConfigure={
-                    canConfigure ? handleConfigureCleanup : undefined
-                  }
-                />
-              </div>
-            )}
+            {/* Footer placeholder */}
+            <div className="pb-2">
+              {showCleanupPlaceholder && (
+                <div className="my-base px-double">
+                  <ChatScriptPlaceholder
+                    type="cleanup"
+                    onConfigure={
+                      canConfigure ? handleConfigureCleanup : undefined
+                    }
+                  />
+                </div>
+              )}
+            </div>
           </div>
         </div>
-      </div>
-    </ApprovalFormProvider>
+      </ApprovalFormProvider>
+    </IssueCommentsContext.Provider>
   );
 });
 

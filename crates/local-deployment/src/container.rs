@@ -70,6 +70,7 @@ use services::services::{
     diff_stream::{self, DiffStreamHandle},
     error_remediation::ErrorRemediationEvent,
     file::FileService,
+    issue_comment_delivery::TurnFinalizedEvent,
     mcp_refresh::McpRefreshCoordinator,
     notification::NotificationService,
     queued_message::QueuedMessageService,
@@ -1380,6 +1381,9 @@ type McpRefreshControls = Arc<RwLock<HashMap<Uuid, (Uuid, DateTime<Utc>, McpRefr
 /// Failed-turn events beyond this backlog are dropped (and logged by the
 /// consumer as lag); the remediation rate cap would skip them anyway.
 const ERROR_REMEDIATION_CHANNEL_CAPACITY: usize = 64;
+/// Turn boundaries are wake-ups for the issue comment dispatcher; a lagged
+/// receiver loses nothing durable because the dispatcher also sweeps.
+const TURN_FINALIZED_CHANNEL_CAPACITY: usize = 256;
 
 #[derive(Clone)]
 pub struct LocalContainerService {
@@ -1423,6 +1427,7 @@ pub struct LocalContainerService {
     queued_message_service: QueuedMessageService,
     notification_service: NotificationService,
     error_remediation_tx: broadcast::Sender<ErrorRemediationEvent>,
+    turn_finalized_tx: broadcast::Sender<TurnFinalizedEvent>,
     remote_client: Option<RemoteClient>,
     cluster_config: ClusterConfig,
     repository_admin_locks: RepositoryAdminLockManager,
@@ -1710,6 +1715,7 @@ impl LocalContainerService {
         let workspace_touch_times = Arc::new(RwLock::new(HashMap::new()));
         let notification_service = NotificationService::new(config.clone());
         let (error_remediation_tx, _) = broadcast::channel(ERROR_REMEDIATION_CHANNEL_CAPACITY);
+        let (turn_finalized_tx, _) = broadcast::channel(TURN_FINALIZED_CHANNEL_CAPACITY);
         let repository_admin_locks =
             RepositoryAdminLockManager::new(db.pool.clone(), Duration::from_mins(5))
                 .expect("static repository lock lease must be valid");
@@ -1738,6 +1744,7 @@ impl LocalContainerService {
             queued_message_service,
             notification_service,
             error_remediation_tx,
+            turn_finalized_tx,
             remote_client,
             cluster_config,
             repository_admin_locks,
@@ -4431,6 +4438,10 @@ impl ContainerService for LocalContainerService {
 
     fn error_remediation_sender(&self) -> Option<&broadcast::Sender<ErrorRemediationEvent>> {
         Some(&self.error_remediation_tx)
+    }
+
+    fn turn_finalized_sender(&self) -> Option<&broadcast::Sender<TurnFinalizedEvent>> {
+        Some(&self.turn_finalized_tx)
     }
 
     async fn refresh_mcp_tools(

@@ -1,53 +1,79 @@
-# Prior knowledge — vk/0773-debug-token-erro
+# Prior knowledge — vk/e252-deliver-issue-co
 
-Searched `wiki/INDEX.md` and project knowledge pages for Codex
-authentication, refresh tokens, stderr normalization, setup-required errors,
-and worker stream boundaries.
+This file distils pages from the knowledge base (`wiki/`, 56 pages) that are
+relevant to delivering issue comments to workspace sessions. The knowledge
+base was not modified; it was only read.
 
-## Relevant pages
+## Directly relevant
 
-### `wiki/codex-credential-refresh.md`
+- **issue-workspace-lifecycle** (`vk/e464`): "comment-driven activation"
+  there means *workspace conversation messages*. The clarify stage of that
+  task explicitly excluded issue-level comments, so this task fills that gap.
+  Reusable rules:
+  - Route accepted activity through `ContainerService::activate_workspace`.
+  - Publish queued work **before** awaiting remote I/O, because a turn can
+    finish while the request is in flight.
+  - Never put remote HTTP latency ahead of queue insertion or dispatch.
+  - SQLite and Postgres are separate stores. There is no distributed
+    transaction.
+- **auto-error-remediation**:
+  - `finalize_task` is the one convergence point for every exit path,
+    including the local exit monitor, skipped-cleanup and worker
+    reconciliation.
+  - Emit from it with a non-blocking `broadcast::send` through a trait
+    accessor that defaults to `None` (`error_remediation_sender`). Subscribe
+    **before** boot resumes interrupted agents.
+  - Server-side consumers may call route handlers directly (Axum extractors
+    are tuple structs).
+  - Reserve before I/O and fail closed.
+  - Use a durable recursion guard; in-memory guards do not survive restarts.
+  - `RemoteClient::create_issue_comment` already exists; remediation uses it.
+- **worker-execution-hardening / 9f36 queued-message spec**:
+  - The queued follow-up is in memory and holds one message per session.
+  - It is **dropped after any failed/killed/interrupted turn** (existing
+    policy), and it is not persisted across restarts.
+  - The no-change cleanup-skip path must dispatch queued work before
+    finalizing.
+- **session-chat-history-search**:
+  - A session's turns are its non-dropped `CodingAgent` executions.
+  - Keep "could not read" distinct from "read, nothing matched" for any
+    aggregate reader. This also applies to remote lookups during target
+    resolution: a failed lookup is not "no target".
+- **kanban-items-state-and-activity-grouping**: the UI's "Waiting for feedback"
+  group means *not running and no pending approval*. It is derived and never
+  persisted, and issue status is not agent state. This matches the
+  task's requirement that "In progress" is not evidence of a running agent.
+- **kanban-issue-panel-sections**:
+  - The comments section is a render-prop slot in `KanbanIssuePanel`.
+  - Component tests live in `packages/remote-web/src/test/*.test.tsx` and
+    must run with `NODE_ENV=test`.
+  - Without an i18n provider, `t()` returns raw keys.
+- **read-only-markdown-links**: conversation and comment markdown is rendered
+  read-only. Composers are disabled only while they are submitting.
+- **host-env-sensitive-tests**: some Slack/GitHub-routing tests fail only
+  because of host env vars. Re-run with those vars unset before blaming a
+  diff. Run tests in the foreground.
 
-- ChatGPT OAuth refresh tokens rotate and are single-use. Concurrent Codex
-  processes historically raced when sharing `auth.json`; Vibe Kanban now does
-  a serialized, up-front refresh to reduce those races.
-- Cluster workers intentionally receive a blank refresh token and use
-  `CODEX_REFRESH_TOKEN_URL_OVERRIDE` to fetch the canonical node's current
-  access token. A worker should not attempt OpenAI refresh directly.
-- Structured v2 and legacy Codex error notifications already route messages
-  containing `Failed to refresh token` or `access token could not be refreshed`
-  through `refresh_failure_setup_message` and classify them as
-  `SetupRequired`.
-- Broker endpoints deliberately avoid 401 and known Codex refresh error codes
-  so their actionable message survives Codex's own canned error mapping.
+## Constitution principles that bind this design
 
-### `wiki/worker-journal-agent-stream-boundary.md`
+- **V:** remote mutations are transactional and covered by a txid.
+  - New remote routes stay read-only here, so no new mutation is needed.
+  - Terminal statuses are identified by name, case-insensitively
+    (`is_active_status_name`).
+- **XII:** asynchronous handoffs have one owner. A claim boundary is needed
+  against authoritative state, without holding locks across awaits, and
+  tests must cover both orderings.
+- **XVIII/XXII:** retries are idempotent and can never create a second
+  execution. A missing response is not evidence of success.
+- **XX (time):** a derived row inherits its parent event's timestamp. An
+  issue-comment card shows the comment's `created_at`, not the turn's.
+- **XXI:** reuse existing resolvers (`is_active_status_name`, MCP
+  `issue_url`, `follow_up` executor checks) instead of re-deriving them.
+  Failures name what failed.
 
-- Agent stderr remains agent stderr across worker journaling; only agent stdout
-  enters vendor protocol parsers. This symptom belongs in the Codex stderr
-  normalizer, not the worker journal classifier.
-- Unknown structured worker metadata is converted to a stderr diagnostic and
-  must not be mistaken for vendor output.
+## Gaps confirmed by investigation (not in the knowledge base)
 
-### `wiki/unattended-reauth.md`
-
-- Authentication recovery must be based on affirmative auth-error evidence,
-  not merely a nonzero exit status.
-- Error reporting must avoid leaking credential material and should preserve an
-  actionable, coarse cause.
-
-## Implications for this task
-
-- Reuse the existing refresh-failure classifier and guidance so structured and
-  stderr failures have one recovery contract.
-- Normalize only positively identified Codex refresh failures; preserve all
-  unrelated stderr.
-- Apply suppression/deduplication at the stderr record boundary, where the
-  repeated logger output is produced, without weakening the worker stream
-  boundary.
-- Keep both recovery modes in the guidance: repair the configured cluster
-  refresh endpoint/credential owner or run `codex login` for a direct login.
-
-The knowledge base is populated. This stage made no changes to it. The initial
-`SPEC.md` predates this recall as required by the pipeline stage order; these
-constraints refine the implementation plan.
+- There is no comment→session routing, no local comment proxy, no MCP
+  comment tools, and no comment `source` field.
+- There is no persisted "waiting for input" state. Agent state must be
+  derived from execution status.

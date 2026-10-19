@@ -104,6 +104,10 @@ interface IssueCommentsSectionProps {
   attachmentError?: string | null;
   onDismissAttachmentError?: () => void;
   renderEditor: (props: IssueCommentsEditorProps) => ReactNode;
+  /** Controls next to the send button (e.g. note vs. reply to agent). */
+  renderComposerControls?: () => ReactNode;
+  /** Per-comment footer (e.g. delivery status to an agent session). */
+  renderCommentFooter?: (commentId: string) => ReactNode;
 }
 
 export function IssueCommentsSection({
@@ -131,6 +135,8 @@ export function IssueCommentsSection({
   attachmentError,
   onDismissAttachmentError,
   renderEditor,
+  renderComposerControls,
+  renderCommentFooter,
 }: IssueCommentsSectionProps) {
   const { t } = useTranslation('common');
 
@@ -166,6 +172,7 @@ export function IssueCommentsSection({
               onToggleReaction={(emoji) => onToggleReaction(comment.id, emoji)}
               onReply={() => onReply(comment.authorName, comment.message)}
               renderEditor={renderEditor}
+              footer={renderCommentFooter?.(comment.id)}
             />
           ))
         )}
@@ -197,6 +204,9 @@ export function IssueCommentsSection({
             </div>
           )}
           <div className="flex items-center justify-end gap-half">
+            {renderComposerControls && (
+              <div className="mr-auto min-w-0">{renderComposerControls()}</div>
+            )}
             {onBrowseAttachment && (
               <TooltipProvider>
                 <Tooltip>
@@ -259,6 +269,7 @@ interface CommentItemProps {
   onToggleReaction: (emoji: string) => void;
   onReply: () => void;
   renderEditor: (props: IssueCommentsEditorProps) => ReactNode;
+  footer?: ReactNode;
 }
 
 function CommentItem({
@@ -274,6 +285,7 @@ function CommentItem({
   onToggleReaction,
   onReply,
   renderEditor,
+  footer,
 }: CommentItemProps) {
   const { t } = useTranslation('common');
   const timeAgo = formatRelativeTime(comment.createdAt);
@@ -356,6 +368,8 @@ function CommentItem({
           className: 'text-normal',
         })
       )}
+
+      {footer}
 
       {/* Reactions row */}
       <div className="flex items-center gap-base flex-wrap">

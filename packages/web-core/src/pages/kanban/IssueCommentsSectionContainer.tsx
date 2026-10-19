@@ -31,6 +31,18 @@ import {
   type IssueCommentData,
   type ReactionGroup,
 } from '@vibe/ui/components/IssueCommentsSection';
+import {
+  IssueCommentDeliveryChip,
+  IssueCommentIntentToggle,
+} from '@vibe/ui/components/IssueCommentDelivery';
+import { useIssueCommentDelivery } from '@/shared/hooks/useIssueCommentDelivery';
+import { useAppNavigation } from '@/shared/hooks/useAppNavigation';
+import {
+  candidateLabel,
+  defaultCommentIntent,
+  describeDelivery,
+  type CommentIntent,
+} from '@/shared/lib/issueCommentDelivery';
 import WYSIWYGEditor, {
   type WYSIWYGEditorRef,
 } from '@/shared/components/WYSIWYGEditor';
@@ -62,6 +74,24 @@ function IssueCommentsSectionContent() {
   const issueContext = useIssueContext();
   const { data: currentUser } = useCurrentUser();
   const currentUserId = currentUser?.user_id ?? '';
+  const appNavigation = useAppNavigation();
+  const delivery = useIssueCommentDelivery(issueContext.issueId);
+
+  // Note vs. reply to agent. The default follows the backend: reply only when
+  // exactly one linked session is waiting or running. An explicit choice
+  // holds until the comment is posted.
+  const [intentOverride, setIntentOverride] = useState<CommentIntent | null>(
+    null
+  );
+  const targets = delivery.targets;
+  const replyUnavailable =
+    !delivery.available ||
+    !targets ||
+    targets.unavailable_reason !== null ||
+    targets.candidates.length === 0;
+  const intent: CommentIntent = replyUnavailable
+    ? 'note'
+    : (intentOverride ?? defaultCommentIntent(targets));
 
   // Check if current user is admin
   const currentUserMember = currentUserId
@@ -319,11 +349,22 @@ function IssueCommentsSectionContent() {
   const handleSubmitComment = useCallback(async () => {
     if (!commentInput.trim()) return;
     const message = commentInput.trim();
+    const sendToAgent = intent === 'reply';
     const { persisted } = issueContext.insertComment({
       issue_id: issueContext.issueId,
       message,
       parent_id: null,
     });
+    setIntentOverride(null);
+    if (sendToAgent) {
+      // Deliver only once the comment is saved; the backend re-reads it from
+      // the issue, so the agent gets exactly what the issue shows.
+      persisted
+        .then((saved) => delivery.requestDelivery(saved.id))
+        .catch((err) =>
+          console.error('[IssueCommentsSection] Comment not saved:', err)
+        );
+    }
     cancelDebouncedPersistCommentDraft();
     setCommentInput('');
     try {
@@ -357,6 +398,8 @@ function IssueCommentsSectionContent() {
     clearAttachments();
   }, [
     commentInput,
+    intent,
+    delivery,
     issueContext,
     getAttachmentIds,
     clearAttachments,
@@ -463,8 +506,125 @@ function IssueCommentsSectionContent() {
     []
   );
 
+  const renderComposerControls = useCallback(() => {
+    if (!delivery.available) {
+      return (
+        <span className="text-xs text-low">
+          {t('kanban.delivery.unavailable')}
+        </span>
+      );
+    }
+    const defaultCandidate = targets?.candidates.find(
+      (candidate) => candidate.session_id === targets.default_session_id
+    );
+    let hint: string;
+    if (replyUnavailable) {
+      hint = t(
+        `kanban.delivery.reasons.${targets?.unavailable_reason ?? 'no_sessions'}`
+      );
+    } else if (intent === 'note') {
+      hint = t('kanban.delivery.noteHint');
+    } else if (defaultCandidate) {
+      hint = t(
+        defaultCandidate.agent_state === 'running'
+          ? 'kanban.delivery.replyHintRunning'
+          : 'kanban.delivery.replyHintWaiting',
+        { session: candidateLabel(defaultCandidate) }
+      );
+    } else {
+      hint = t('kanban.delivery.replyHintChoose');
+    }
+    return (
+      <IssueCommentIntentToggle
+        value={intent}
+        onChange={setIntentOverride}
+        noteLabel={t('kanban.delivery.noteOption')}
+        replyLabel={t('kanban.delivery.replyOption')}
+        replyDisabled={replyUnavailable}
+        replyDisabledReason={replyUnavailable ? hint : undefined}
+        hint={hint}
+      />
+    );
+  }, [delivery.available, targets, replyUnavailable, intent, t]);
+
+  const renderCommentFooter = useCallback(
+    (commentId: string) => {
+      if (!delivery.available) return null;
+      const stored = delivery.deliveriesByComment.get(commentId);
+      const comment = issueContext.comments.find((c) => c.id === commentId);
+      const editedAfterDelivery = Boolean(
+        stored?.state === 'delivered' &&
+          stored.delivered_comment_updated_at &&
+          comment &&
+          Date.parse(comment.updated_at) >
+            Date.parse(stored.delivered_comment_updated_at)
+      );
+      const model = describeDelivery({
+        delivery: stored,
+        editedAfterDelivery,
+        requestError: delivery.requestErrors.get(commentId) ?? null,
+        targets,
+      });
+      if (!model) return null;
+      const reason = model.params.reason
+        ? t(`kanban.delivery.reasons.${model.params.reason}`)
+        : '';
+      const workspaceId = model.workspaceId;
+      return (
+        <IssueCommentDeliveryChip
+          tone={model.tone}
+          label={t(`kanban.delivery.${model.labelKey}`, {
+            ...model.params,
+            reason,
+          })}
+          detail={model.detail}
+          notice={
+            model.editedAfterDelivery
+              ? t('kanban.delivery.editedAfterDelivery')
+              : null
+          }
+          actions={model.actions
+            .filter((action) => action !== 'choose_target')
+            .map((action) => ({
+              key: action,
+              label: t(
+                action === 'send'
+                  ? 'kanban.delivery.sendToAgent'
+                  : 'kanban.delivery.retry'
+              ),
+              onClick: () => void delivery.requestDelivery(commentId),
+            }))}
+          targetChoice={
+            model.actions.includes('choose_target') && targets
+              ? {
+                  label: t('kanban.delivery.chooseSession'),
+                  options: targets.candidates.map((candidate) => ({
+                    id: candidate.session_id,
+                    label: candidateLabel(candidate),
+                  })),
+                  onSelect: (sessionId) =>
+                    void delivery.requestDelivery(commentId, sessionId),
+                }
+              : null
+          }
+          link={
+            model.labelKey === 'delivered' && workspaceId
+              ? {
+                  label: t('kanban.delivery.openConversation'),
+                  onClick: () => appNavigation.goToWorkspace(workspaceId),
+                }
+              : null
+          }
+        />
+      );
+    },
+    [delivery, issueContext.comments, targets, t, appNavigation]
+  );
+
   return (
     <IssueCommentsSection
+      renderComposerControls={renderComposerControls}
+      renderCommentFooter={renderCommentFooter}
       comments={commentsData}
       commentInput={commentInput}
       onCommentInputChange={setCommentInput}

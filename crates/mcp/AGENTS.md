@@ -494,3 +494,25 @@ cargo test -p mcp
 Unit tests live alongside the code (e.g. arg parsing in
 `src/bin/vibe_kanban_mcp.rs`). Add tests for new tools and for backend-resolution
 edge cases.
+
+## Issue comment delivery tools
+
+`create_issue_comment`, `list_issue_comments` and `deliver_issue_comment` live in
+`src/task_server/tools/issue_comments.rs`. They are registered in **global mode
+only**, because orchestrator mode deliberately has no remote-issue tools.
+
+- **No delivery logic here.** The tools call the backend's shared delivery path:
+  `POST /api/issue-comments`, `POST /api/issue-comment-deliveries` and
+  `GET /api/issues/{id}/comments`. These are owned by
+  `crates/server/src/issue_comment_delivery.rs`, so the MCP and the issue panel
+  report the same persisted outcome.
+- **`intent` is required, with no default.** It is `note` or `reply_to_agent`.
+  Intent is never inferred from the comment text.
+- **The idempotency key is fixed in the MCP process.** `comment_id` is generated
+  here when the caller omits it, and it is returned. A retried call with the
+  same id therefore cannot create a second comment or delivery.
+- **The loop guard needs the origin.** The MCP sends `origin_session_id`
+  (`orchestrator_session_id`) and `origin_workspace_id` (`scoped_workspace_id`)
+  from its context. The backend uses them for the self-target and
+  hop-count guards.
+

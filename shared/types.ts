@@ -908,6 +908,106 @@ export type RefreshRelaySigningSessionRequest = { client_id: string, timestamp: 
 
 export type RefreshRelaySigningSessionResponse = { signing_session_id: string, };
 
+export type IssueComment = { id: string, issue_id: string, author_id: string | null, parent_id: string | null, message: string, created_at: string, updated_at: string, };
+
+export type IssueCommentDelivery = { id: string, comment_id: string, issue_id: string, workspace_id: string | null, session_id: string | null, execution_process_id: string | null, state: IssueCommentDeliveryState, reason: IssueCommentDeliveryReason | null, error: string | null, source: IssueCommentDeliverySource, origin_session_id: string | null, hop_count: number, comment_author_id: string | null, comment_created_at: string, 
+/**
+ * Exact text sent to the agent (snapshot; later edits are not replayed).
+ */
+delivered_message: string | null, 
+/**
+ * The comment's `updated_at` when it was delivered; a newer `updated_at`
+ * means "edited after delivery".
+ */
+delivered_comment_updated_at: string | null, attempt_count: number, next_attempt_at: string | null, 
+/**
+ * An explicit target choice, which may resume a stopped turn.
+ */
+allow_stopped_target: boolean, created_at: string, updated_at: string, delivered_at: string | null, };
+
+export type IssueCommentDeliveryState = "pending" | "dispatching" | "delivered" | "needs_target" | "no_target" | "failed" | "blocked" | "cancelled";
+
+export type IssueCommentDeliveryReason = "agent_running" | "queued_message" | "retry_scheduled" | "no_linked_workspace" | "workspace_other_host" | "workspace_archived" | "issue_terminal" | "no_sessions" | "turn_stopped" | "target_not_linked" | "ambiguous" | "self_target" | "loop_guard" | "comment_deleted" | "remote_unavailable" | "unauthorized" | "start_failed";
+
+export type IssueCommentDeliverySource = "ui" | "mcp";
+
+export type AgentState = "running" | "waiting" | "stopped" | "never_run";
+
+export type DeliveryTargetCandidate = { workspace_id: string, workspace_name: string | null, workspace_branch: string, session_id: string, session_name: string | null, agent_state: AgentState, latest_execution_id: string | null, };
+
+export type IssueAgentTargets = { issue_id: string, 
+/**
+ * False when the issue is Done/Cancelled (nothing is resumed).
+ */
+issue_active: boolean, candidates: Array<DeliveryTargetCandidate>, 
+/**
+ * Set only when exactly one session would receive a reply and it is
+ * waiting or running; the UI defaults to "reply" only then.
+ */
+default_session_id: string | null, 
+/**
+ * Why no session is eligible, when none is.
+ */
+unavailable_reason: IssueCommentDeliveryReason | null, };
+
+export type IssueCommentWithDelivery = { comment: IssueComment, author_name: string | null, delivery: IssueCommentDelivery | null, 
+/**
+ * The comment changed after the agent received it; the agent saw the
+ * original (`delivery.delivered_message`).
+ */
+edited_after_delivery: boolean, };
+
+export type IssueCommentsWithDelivery = { issue_id: string, 
+/**
+ * Browser route of the issue, when the issue could be read.
+ */
+issue_url: string | null, comments: Array<IssueCommentWithDelivery>, 
+/**
+ * Deliveries whose comment no longer exists on the issue.
+ */
+deleted_deliveries: Array<IssueCommentDelivery>, };
+
+export type LinkedIssueSummary = { id: string, simple_id: string, title: string, project_id: string, 
+/**
+ * Browser route of the issue (shared by the local and remote apps).
+ */
+issue_url: string, };
+
+export type WorkspaceIssueComments = { workspace_id: string, 
+/**
+ * `None` when the workspace is not linked to an issue.
+ */
+issue: LinkedIssueSummary | null, comments: Array<IssueCommentWithDelivery>, deleted_deliveries: Array<IssueCommentDelivery>, };
+
+export type RequestIssueCommentDelivery = { comment_id: string, issue_id: string, 
+/**
+ * An explicit target; also consent to resume a stopped turn.
+ */
+target_session_id: string | null, source?: IssueCommentDeliverySource, 
+/**
+ * Session of the agent posting the comment (MCP), for loop guards.
+ */
+origin_session_id?: string, 
+/**
+ * Workspace of the agent posting the comment, when its session is unknown.
+ */
+origin_workspace_id?: string, };
+
+export type IssueCommentIntent = "note" | "reply_to_agent";
+
+export type CreateIssueCommentWithIntent = { issue_id: string, message: string, intent: IssueCommentIntent, parent_id: string | null, target_session_id: string | null, 
+/**
+ * Idempotency key: retrying with the same id never creates a second
+ * comment or delivery.
+ */
+comment_id: string | null, origin_session_id?: string, origin_workspace_id?: string, };
+
+export type CreateIssueCommentResult = { comment: IssueComment, issue_url: string, 
+/**
+ * `None` for notes: saved on the issue, not sent to any agent.
+ */
+delivery: IssueCommentDelivery | null, };
+
 export type CreateFollowUpAttempt = { prompt: string, executor_config: ExecutorConfig, retry_process_id: string | null, force_when_dirty: boolean | null, perform_git_reset: boolean | null, };
 
 export type ResetProcessRequest = { process_id: string, force_when_dirty: boolean | null, perform_git_reset: boolean | null, };

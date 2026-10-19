@@ -20,6 +20,7 @@ pub mod filesystem;
 pub mod filesystem_watcher;
 pub mod github_credentials;
 pub mod github_owner_tokens;
+pub mod issue_comment_delivery;
 pub mod mcp_gateway_secrets;
 pub mod mcp_refresh;
 pub mod normalized_log_cache;

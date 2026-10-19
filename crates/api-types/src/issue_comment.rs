@@ -41,7 +41,7 @@ pub struct ListIssueCommentsQuery {
     pub issue_id: Uuid,
 }
 
-#[derive(Debug, Clone, Serialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct ListIssueCommentsResponse {
     pub issue_comments: Vec<IssueComment>,
 }

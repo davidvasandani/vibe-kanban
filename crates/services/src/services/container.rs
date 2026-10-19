@@ -74,7 +74,9 @@ use worktree_manager::WorktreeError;
 
 use crate::services::{
     error_remediation::{self, ErrorRemediationEvent},
-    execution_process, normalized_log_cache,
+    execution_process,
+    issue_comment_delivery::TurnFinalizedEvent,
+    normalized_log_cache,
     notification::NotificationService,
 };
 
@@ -652,6 +654,13 @@ pub trait ContainerService {
         None
     }
 
+    /// Channel announcing that a session's turn chain finalized with no queued
+    /// follow-up started in its place: the turn boundary at which issue
+    /// comments waiting for that session are delivered. `None` disables it.
+    fn turn_finalized_sender(&self) -> Option<&broadcast::Sender<TurnFinalizedEvent>> {
+        None
+    }
+
     async fn refresh_mcp_tools(
         &self,
         workspace_id: Uuid,
@@ -945,6 +954,17 @@ pub trait ContainerService {
                 | ExecutionProcessStatus::Indeterminate
         ) {
             return;
+        }
+
+        // Wake the issue comment dispatcher for this session. Non-blocking;
+        // the consumer re-reads authoritative state before acting, and its
+        // periodic sweep covers a missed event.
+        if let Some(sender) = self.turn_finalized_sender() {
+            let _ = sender.send(TurnFinalizedEvent {
+                workspace_id: ctx.workspace.id,
+                session_id: ctx.session.id,
+                execution_process_id: ctx.execution_process.id,
+            });
         }
 
         let workspace_name = ctx

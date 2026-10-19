@@ -1,5 +1,6 @@
 pub mod error;
 pub mod error_remediation;
+pub mod issue_comment_delivery;
 pub mod middleware;
 pub mod relay_pairing;
 pub mod routes;

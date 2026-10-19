@@ -20,6 +20,12 @@ pub(crate) const RECOVERY_LADDER: &str = "If a Vibe Kanban tool call fails, or t
      test. Open, poll and merge pull requests with 'create_pr', 'get_pr'/'list_pr_checks' and \
      'merge_pr' rather than `gh`.";
 
+/// An issue comment and a delivered message are different things; say which
+/// tool does what so an agent does not report a saved note as delivered.
+const COMMENT_DELIVERY_GUIDANCE: &str = "To answer an agent that is waiting on an issue, \
+     call 'create_issue_comment' with intent 'reply_to_agent' and read the returned \
+     delivery.state; intent 'note' only saves the comment. A saved comment is not a delivery.";
+
 // rmcp 1.8 defaults the router expression to `Self::tool_router()`; ours is a
 // per-instance field selected by mode (global vs orchestrator).
 #[tool_handler(router = self.tool_router)]
@@ -29,6 +35,14 @@ impl ServerHandler for McpServer {
         // Orchestrator mode registers no remote-issue tools, so the lookup we
         // point at has to match what is actually callable.
         let has_get_issue = tools.iter().any(|tool| tool.name.as_ref() == "get_issue");
+        let comment_guidance = if tools
+            .iter()
+            .any(|tool| tool.name.as_ref() == "create_issue_comment")
+        {
+            COMMENT_DELIVERY_GUIDANCE
+        } else {
+            ""
+        };
         let mut tool_names = tools
             .into_iter()
             .map(|tool| format!("'{}'", tool.name))
@@ -61,7 +75,7 @@ impl ServerHandler for McpServer {
         };
         let mut instruction = format!(
             "{preamble} Use list/read tools first when you need IDs or current state. \
-             {issue_link_guidance} Never assemble an issue URL yourself out of ids, an issue key \
+             {issue_link_guidance} {comment_guidance} Never assemble an issue URL yourself out of ids, an issue key \
              or the backend host. A returned issue_url is an application-relative Vibe Kanban \
              route, so it only resolves in the Vibe Kanban UI: do not put one anywhere the text \
              leaves the app, including pull request bodies, commit messages, Slack, email, or \

@@ -122,6 +122,24 @@ For `update_issue`, the `parent_issue_id` field supports three states: omit it e
 
 Supported relationship types: `blocking`, `related`, `has_duplicate`.
 
+### Issue Comments
+
+| Tool | Purpose | Required Parameters | Optional Parameters | Returns |
+|------|---------|-------------------|-------------------|---------|
+| `create_issue_comment` | Post a comment on an issue. `intent: note` only saves it; `intent: reply_to_agent` also delivers it to the agent session linked to the issue | `issue_id`<br/>`message`<br/>`intent` | `target_session_id`<br/>`parent_id`<br/>`comment_id` | Comment ID, issue URL and the delivery outcome (state, reason, session, started execution ID) |
+| `list_issue_comments` | List an issue's comments with authors, timestamps and delivery state | `issue_id` | None | Comments with delivery state |
+| `deliver_issue_comment` | Retry a failed delivery or choose the target session for an existing comment | `issue_id`<br/>`comment_id` | `target_session_id` | Delivery outcome |
+
+A saved comment is not a delivery. Check `delivery.state`:
+
+- `delivered`: a turn carrying the comment started.
+- `pending`: the comment is queued until the agent's running turn ends.
+- `needs_target`: several sessions are linked, so pass `target_session_id`.
+- `no_target`: no session can receive it (for example, the workspace is archived, the issue is done, or the last turn failed).
+- `failed`: delivery failed, so retry with `deliver_issue_comment`.
+
+A reply waiting for a running agent is delivered at the end of the agent's turn and never starts a competing run. A comment is delivered at most once. An agent's comment is never delivered to its own session, and agent-to-agent chains are capped. These tools are available in global mode.
+
 ### Pipelines
 
 | Tool | Purpose | Required Parameters | Optional Parameters | Returns |

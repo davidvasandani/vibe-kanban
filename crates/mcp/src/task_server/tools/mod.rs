@@ -72,6 +72,7 @@ mod background_helpers;
 mod browser;
 mod context;
 mod issue_assignees;
+mod issue_comments;
 mod issue_relationships;
 mod issue_tags;
 mod organizations;
@@ -198,6 +199,7 @@ impl McpServer {
             + Self::issue_assignees_tools_router()
             + Self::issue_tags_tools_router()
             + Self::issue_relationships_tools_router()
+            + Self::issue_comments_tools_router()
             + Self::task_attempts_tools_router()
             + Self::session_tools_router()
             + Self::browser_tools_router()

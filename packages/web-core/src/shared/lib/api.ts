@@ -2,6 +2,10 @@
 
 import {
   ApprovalStatus,
+  IssueAgentTargets,
+  IssueCommentDelivery,
+  RequestIssueCommentDelivery,
+  WorkspaceIssueComments,
   ApiResponse,
   Config,
   CreateFollowUpAttempt,
@@ -2040,6 +2044,56 @@ export const agentsApi = {
 };
 
 // Queue API for session follow-up messages
+/**
+ * Issue comment delivery to linked workspace sessions. The backend owns
+ * delivery state; a saved comment is not a delivery until one of these
+ * reports it.
+ */
+export const issueCommentDeliveryApi = {
+  getAgentTargets: async (
+    issueId: string,
+    signal?: AbortSignal
+  ): Promise<IssueAgentTargets> => {
+    const response = await makeRequest(`/api/issues/${issueId}/agent-targets`, {
+      signal,
+    });
+    return handleApiResponse<IssueAgentTargets>(response);
+  },
+
+  getDeliveries: async (
+    issueId: string,
+    signal?: AbortSignal
+  ): Promise<IssueCommentDelivery[]> => {
+    const response = await makeRequest(
+      `/api/issues/${issueId}/comment-deliveries`,
+      { signal }
+    );
+    return handleApiResponse<IssueCommentDelivery[]>(response);
+  },
+
+  /** Deliver an existing comment, retry, or choose its target session. */
+  request: async (
+    data: RequestIssueCommentDelivery
+  ): Promise<IssueCommentDelivery> => {
+    const response = await makeRequest('/api/issue-comment-deliveries', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+    return handleApiResponse<IssueCommentDelivery>(response);
+  },
+
+  getWorkspaceIssueComments: async (
+    workspaceId: string,
+    signal?: AbortSignal
+  ): Promise<WorkspaceIssueComments> => {
+    const response = await makeRequest(
+      `/api/issue-comments/by-workspace/${workspaceId}`,
+      { signal }
+    );
+    return handleApiResponse<WorkspaceIssueComments>(response);
+  },
+};
+
 export const queueApi = {
   queueMcpRestart: async (
     sessionId: string,

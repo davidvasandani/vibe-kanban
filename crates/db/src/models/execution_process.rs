@@ -296,6 +296,43 @@ impl ExecutionProcess {
         .await
     }
 
+    /// The session's latest non-dropped coding-agent turn: its id, status and
+    /// completion time. Used to derive whether the agent is running, waiting
+    /// for input (last turn completed) or stopped.
+    pub async fn latest_coding_agent_turn_for_session(
+        pool: &SqlitePool,
+        session_id: Uuid,
+    ) -> Result<Option<(Uuid, ExecutionProcessStatus, Option<DateTime<Utc>>)>, sqlx::Error> {
+        sqlx::query_as::<_, (Uuid, ExecutionProcessStatus, Option<DateTime<Utc>>)>(
+            "SELECT id, status, completed_at FROM execution_processes \
+             WHERE session_id = ? AND run_reason = 'codingagent' AND dropped = FALSE \
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(session_id)
+        .fetch_optional(pool)
+        .await
+    }
+
+    /// Coding-agent executions in a session whose stored action contains
+    /// `marker` (e.g. an issue comment delivery marker). This is the positive
+    /// evidence that a delivery already started a turn, used to make dispatch
+    /// idempotent across lost responses and restarts.
+    pub async fn find_coding_agent_ids_with_marker(
+        pool: &SqlitePool,
+        session_id: Uuid,
+        marker: &str,
+    ) -> Result<Vec<Uuid>, sqlx::Error> {
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM execution_processes \
+             WHERE session_id = ? AND run_reason = 'codingagent' \
+             AND instr(executor_action, ?) > 0 ORDER BY created_at ASC",
+        )
+        .bind(session_id)
+        .bind(marker)
+        .fetch_all(pool)
+        .await
+    }
+
     /// Check if there's a running coding agent process for a session
     pub async fn has_running_coding_agent_for_session(
         pool: &SqlitePool,
