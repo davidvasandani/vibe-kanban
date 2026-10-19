@@ -314,16 +314,16 @@ impl ExecutionProcess {
     }
 
     /// Coding-agent executions in a session whose stored action contains
-    /// `marker` (e.g. an issue comment delivery marker). This is the positive
-    /// evidence that a delivery already started a turn, used to make dispatch
-    /// idempotent across lost responses and restarts.
-    pub async fn find_coding_agent_ids_with_marker(
+    /// `marker` (e.g. an issue comment delivery marker), with their status,
+    /// oldest first. A row exists from the moment a start is attempted, so
+    /// callers decide which statuses prove the turn actually ran.
+    pub async fn find_coding_agent_turns_with_marker(
         pool: &SqlitePool,
         session_id: Uuid,
         marker: &str,
-    ) -> Result<Vec<Uuid>, sqlx::Error> {
-        sqlx::query_scalar::<_, Uuid>(
-            "SELECT id FROM execution_processes \
+    ) -> Result<Vec<(Uuid, ExecutionProcessStatus)>, sqlx::Error> {
+        sqlx::query_as::<_, (Uuid, ExecutionProcessStatus)>(
+            "SELECT id, status FROM execution_processes \
              WHERE session_id = ? AND run_reason = 'codingagent' \
              AND instr(executor_action, ?) > 0 ORDER BY created_at ASC",
         )

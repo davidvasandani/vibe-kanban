@@ -82,7 +82,7 @@ async fn create_issue_comment(
     Ok(ResponseJson(ApiResponse::success(
         CreateIssueCommentResult {
             comment,
-            issue_url: issue_url(issue.project_id, issue.id),
+            issue_url: issue.map(|issue| issue_url(issue.project_id, issue.id)),
             delivery,
         },
     )))

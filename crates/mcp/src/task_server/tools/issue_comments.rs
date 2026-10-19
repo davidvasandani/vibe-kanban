@@ -63,7 +63,7 @@ struct CreateIssueCommentPayload {
 #[derive(Debug, Deserialize)]
 struct CreateIssueCommentResult {
     comment: IssueComment,
-    issue_url: String,
+    issue_url: Option<String>,
     delivery: Option<IssueCommentDelivery>,
 }
 
@@ -87,7 +87,7 @@ struct DeliverySummary {
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 struct McpCreateIssueCommentResponse {
     comment_id: String,
-    issue_url: String,
+    issue_url: Option<String>,
     saved_on_issue: bool,
     delivery: DeliverySummary,
 }
@@ -253,11 +253,24 @@ impl McpServer {
             origin_workspace_id: self.scoped_workspace_id(),
         };
         let url = self.url("/api/issue-comments");
-        let result: CreateIssueCommentResult =
-            match self.send_json(self.client.post(&url).json(&payload)).await {
-                Ok(result) => result,
-                Err(e) => return Ok(Self::tool_error(e)),
-            };
+        let result: CreateIssueCommentResult = match self
+            .send_json(self.client.post(&url).json(&payload))
+            .await
+        {
+            Ok(result) => result,
+            Err(mut e) => {
+                // The comment may already exist. Retrying with this id
+                // returns it instead of posting (and delivering) twice.
+                let retry = format!(
+                    "comment_id {comment_id}: retry with this comment_id; it never creates a second comment or delivery"
+                );
+                e.details = Some(match e.details.take() {
+                    Some(details) => format!("{details}; {retry}"),
+                    None => retry,
+                });
+                return Ok(Self::tool_error(e));
+            }
+        };
         Self::success(&McpCreateIssueCommentResponse {
             comment_id: result.comment.id.to_string(),
             issue_url: result.issue_url,

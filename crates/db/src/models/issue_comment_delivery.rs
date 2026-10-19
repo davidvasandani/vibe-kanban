@@ -160,22 +160,33 @@ const SELECT: &str = "SELECT id, comment_id, issue_id, workspace_id, session_id,
     FROM issue_comment_deliveries";
 
 impl IssueCommentDelivery {
-    /// Insert a row for `comment_id` unless one exists. Returns the stored row
-    /// and whether this call created it.
+    /// Insert a row for `comment_id`, already resolved, unless one exists.
+    /// Returns the stored row and whether this call created it. Resolving
+    /// before inserting means no row ever waits without a target: a crash
+    /// mid-resolution leaves no row at all, so a retry starts cleanly.
     pub async fn insert_if_absent(
         pool: &SqlitePool,
         new: &NewIssueCommentDelivery,
+        resolution: &IssueCommentDeliveryResolution,
         now: DateTime<Utc>,
     ) -> Result<(Self, bool), sqlx::Error> {
         let result = sqlx::query(
-            "INSERT INTO issue_comment_deliveries (id, comment_id, issue_id, state, source, \
+            "INSERT INTO issue_comment_deliveries (id, comment_id, issue_id, state, reason, \
+             error, workspace_id, session_id, hop_count, allow_stopped_target, source, \
              origin_session_id, comment_author_id, comment_created_at, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(comment_id) DO NOTHING",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(comment_id) DO NOTHING",
         )
         .bind(Uuid::new_v4())
         .bind(new.comment_id)
         .bind(new.issue_id)
-        .bind(IssueCommentDeliveryState::Pending)
+        .bind(resolution.state)
+        .bind(resolution.reason)
+        .bind(&resolution.error)
+        .bind(resolution.workspace_id)
+        .bind(resolution.session_id)
+        .bind(resolution.hop_count)
+        .bind(resolution.allow_stopped_target)
         .bind(new.source)
         .bind(new.origin_session_id)
         .bind(new.comment_author_id)
@@ -188,6 +199,29 @@ impl IssueCommentDelivery {
             .await?
             .ok_or(sqlx::Error::RowNotFound)?;
         Ok((row, result.rows_affected() == 1))
+    }
+
+    /// Persist the exact text about to be sent, before the turn starts, so
+    /// recovery after a crash keeps what the agent actually received.
+    pub async fn record_snapshot(
+        pool: &SqlitePool,
+        id: Uuid,
+        message: &str,
+        comment_updated_at: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            "UPDATE issue_comment_deliveries SET delivered_message = ?, \
+             delivered_comment_updated_at = ?, updated_at = ? \
+             WHERE id = ? AND state = 'dispatching'",
+        )
+        .bind(message)
+        .bind(comment_updated_at)
+        .bind(now)
+        .bind(id)
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
     }
 
     pub async fn find_by_id(pool: &SqlitePool, id: Uuid) -> Result<Option<Self>, sqlx::Error> {
@@ -453,15 +487,23 @@ mod tests {
     async fn duplicate_requests_share_one_row() {
         let pool = test_pool().await;
         let comment_id = Uuid::new_v4();
-        let (first, created) =
-            IssueCommentDelivery::insert_if_absent(&pool, &new_delivery(comment_id), Utc::now())
-                .await
-                .unwrap();
+        let (first, created) = IssueCommentDelivery::insert_if_absent(
+            &pool,
+            &new_delivery(comment_id),
+            &pending_resolution(),
+            Utc::now(),
+        )
+        .await
+        .unwrap();
         assert!(created);
-        let (second, created_again) =
-            IssueCommentDelivery::insert_if_absent(&pool, &new_delivery(comment_id), Utc::now())
-                .await
-                .unwrap();
+        let (second, created_again) = IssueCommentDelivery::insert_if_absent(
+            &pool,
+            &new_delivery(comment_id),
+            &pending_resolution(),
+            Utc::now(),
+        )
+        .await
+        .unwrap();
         assert!(!created_again);
         assert_eq!(first.id, second.id);
         // The first request's attribution is kept.
@@ -474,6 +516,7 @@ mod tests {
         let (row, _) = IssueCommentDelivery::insert_if_absent(
             &pool,
             &new_delivery(Uuid::new_v4()),
+            &pending_resolution(),
             Utc::now(),
         )
         .await
@@ -537,6 +580,7 @@ mod tests {
         let (row, _) = IssueCommentDelivery::insert_if_absent(
             &pool,
             &new_delivery(Uuid::new_v4()),
+            &pending_resolution(),
             Utc::now(),
         )
         .await
@@ -599,6 +643,7 @@ mod tests {
         let (row, _) = IssueCommentDelivery::insert_if_absent(
             &pool,
             &new_delivery(Uuid::new_v4()),
+            &pending_resolution(),
             Utc::now(),
         )
         .await

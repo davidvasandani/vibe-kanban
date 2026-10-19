@@ -30,7 +30,7 @@ use api_types::{
     Workspace as RemoteWorkspace,
 };
 use axum::{Extension, Json, extract::State};
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use db::models::{
     execution_process::{ExecutionProcess, ExecutionProcessRunReason, ExecutionProcessStatus},
     issue_comment_delivery::{
@@ -63,11 +63,14 @@ use crate::{DeploymentImpl, routes::sessions::CreateFollowUpAttempt};
 
 /// How often pending deliveries are re-examined (missed events, retries).
 const SWEEP_INTERVAL: Duration = Duration::from_secs(15);
-/// Without a confirmed turn-boundary event, a turn must have completed at
-/// least this long ago before a comment starts the next one. This keeps the
-/// sweep and new requests from racing the exit monitor's own queued-message
-/// handoff, which runs right after completion.
-const BOUNDARY_GRACE: chrono::Duration = chrono::Duration::seconds(5);
+/// A turn boundary is confirmed by `finalize_task`'s event for the session's
+/// latest turn: the exit monitor emits it only after deciding not to start a
+/// queued follow-up, so nothing else is about to start. Without that event
+/// (it was missed, or the turn ended before this process started), a turn
+/// must have ended at least this long ago. That is far longer than the exit
+/// monitor's commit / cleanup / queued-message handoff, which a time-based
+/// guess must never race.
+const UNCONFIRMED_BOUNDARY_AGE: chrono::Duration = chrono::Duration::minutes(2);
 
 // ── Shared API types ────────────────────────────────────────────────────
 
@@ -190,7 +193,9 @@ pub struct CreateIssueCommentWithIntent {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct CreateIssueCommentResult {
     pub comment: IssueComment,
-    pub issue_url: String,
+    /// Browser route of the issue; `None` if the issue could not be read
+    /// after the comment was saved (the comment and delivery still stand).
+    pub issue_url: Option<String>,
     /// `None` for notes: saved on the issue, not sent to any agent.
     pub delivery: Option<IssueCommentDelivery>,
 }
@@ -459,23 +464,13 @@ impl DeliveryBackend for DeploymentBackend {
 
 // ── The dispatcher ──────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Trigger {
-    /// `finalize_task` announced the session's turn boundary.
-    Finalized,
-    /// A new or retried request.
-    Request,
-    /// Periodic sweep or startup recovery.
-    Sweep,
-}
-
 pub struct IssueCommentDispatcher<B: DeliveryBackend> {
     pool: SqlitePool,
     backend: B,
     session_locks: StdMutex<HashMap<Uuid, Arc<Mutex<()>>>>,
-    /// When each session's latest turn-boundary event was observed. A
-    /// boundary seen after the latest turn completed needs no grace period.
-    boundaries: StdMutex<HashMap<Uuid, DateTime<Utc>>>,
+    /// The latest coding-agent turn of each session whose turn-boundary event
+    /// was observed. A boundary counts only for that exact turn.
+    boundaries: StdMutex<HashMap<Uuid, Uuid>>,
 }
 
 /// One candidate with the presentation details the API reports.
@@ -504,19 +499,19 @@ impl<B: DeliveryBackend> IssueCommentDispatcher<B> {
             .clone()
     }
 
-    fn note_boundary(&self, session_id: Uuid) {
+    fn note_boundary(&self, session_id: Uuid, turn_id: Uuid) {
         self.boundaries
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(session_id, Utc::now());
+            .insert(session_id, turn_id);
     }
 
-    fn boundary_seen_after(&self, session_id: Uuid, completed_at: DateTime<Utc>) -> bool {
+    fn boundary_confirmed(&self, session_id: Uuid, turn_id: Uuid) -> bool {
         self.boundaries
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(&session_id)
-            .is_some_and(|seen| *seen >= completed_at)
+            == Some(&turn_id)
     }
 
     async fn session_state(
@@ -758,10 +753,58 @@ impl<B: DeliveryBackend> IssueCommentDispatcher<B> {
         }
 
         let source = request.source.unwrap_or(IssueCommentDeliverySource::Ui);
+
+        if let Some(existing) =
+            IssueCommentDelivery::find_by_comment_id(&self.pool, comment.id).await?
+        {
+            // Pending, dispatching, delivered, blocked or cancelled: a repeat
+            // request changes nothing (and never starts a second turn).
+            if !existing.state.is_resolvable() {
+                return Ok(existing);
+            }
+            // A retry or target choice. Who posted was fixed at creation.
+            let resolution = self
+                .resolve(
+                    existing.issue_id,
+                    request.target_session_id,
+                    existing.origin_session_id,
+                    existing.source == IssueCommentDeliverySource::Mcp
+                        && existing.origin_session_id.is_some(),
+                )
+                .await?;
+            let applied = IssueCommentDelivery::apply_resolution(
+                &self.pool,
+                existing.id,
+                &[
+                    IssueCommentDeliveryState::Failed,
+                    IssueCommentDeliveryState::NoTarget,
+                    IssueCommentDeliveryState::NeedsTarget,
+                ],
+                &resolution,
+                Utc::now(),
+            )
+            .await?;
+            if applied {
+                self.dispatch_if_pending(&resolution).await?;
+            }
+            return Ok(IssueCommentDelivery::find_by_id(&self.pool, existing.id)
+                .await?
+                .ok_or(sqlx::Error::RowNotFound)?);
+        }
+
+        // Resolve first, then insert the resolved row: a crash in between
+        // leaves no row, so nothing can wait forever without a target.
         let origin_session_id = self
             .origin_session(request.origin_session_id, request.origin_workspace_id)
             .await?;
-
+        let resolution = self
+            .resolve(
+                comment.issue_id,
+                request.target_session_id,
+                origin_session_id,
+                source == IssueCommentDeliverySource::Mcp && origin_session_id.is_some(),
+            )
+            .await?;
         let (row, created) = IssueCommentDelivery::insert_if_absent(
             &self.pool,
             &NewIssueCommentDelivery {
@@ -772,44 +815,28 @@ impl<B: DeliveryBackend> IssueCommentDispatcher<B> {
                 comment_author_id: comment.author_id,
                 comment_created_at: comment.created_at,
             },
+            &resolution,
             Utc::now(),
         )
         .await?;
-
-        let from: &[IssueCommentDeliveryState] = if created {
-            &[IssueCommentDeliveryState::Pending]
-        } else if row.state.is_resolvable() {
-            &[
-                IssueCommentDeliveryState::Failed,
-                IssueCommentDeliveryState::NoTarget,
-                IssueCommentDeliveryState::NeedsTarget,
-            ]
-        } else {
-            // Pending, dispatching, delivered, blocked or cancelled: a repeat
-            // request changes nothing (and never starts a second turn).
-            return Ok(row);
-        };
-
-        // The loop guard is about who posted, which was fixed at creation.
-        let resolution = self
-            .resolve(
-                row.issue_id,
-                request.target_session_id,
-                row.origin_session_id,
-                row.source == IssueCommentDeliverySource::Mcp && row.origin_session_id.is_some(),
-            )
-            .await?;
-        IssueCommentDelivery::apply_resolution(&self.pool, row.id, from, &resolution, Utc::now())
-            .await?;
-
-        if let (IssueCommentDeliveryState::Pending, Some(session_id)) =
-            (resolution.state, resolution.session_id)
-        {
-            self.dispatch_session(session_id, Trigger::Request).await?;
+        if created {
+            self.dispatch_if_pending(&resolution).await?;
         }
         Ok(IssueCommentDelivery::find_by_id(&self.pool, row.id)
             .await?
             .ok_or(sqlx::Error::RowNotFound)?)
+    }
+
+    async fn dispatch_if_pending(
+        &self,
+        resolution: &IssueCommentDeliveryResolution,
+    ) -> Result<(), sqlx::Error> {
+        if let (IssueCommentDeliveryState::Pending, Some(session_id)) =
+            (resolution.state, resolution.session_id)
+        {
+            self.dispatch_session(session_id).await?;
+        }
+        Ok(())
     }
 
     /// MCP create: save the comment (idempotently, by `comment_id`) and, for
@@ -817,7 +844,14 @@ impl<B: DeliveryBackend> IssueCommentDispatcher<B> {
     pub async fn create_comment(
         &self,
         request: CreateIssueCommentWithIntent,
-    ) -> Result<(IssueComment, IssueInfo, Option<IssueCommentDelivery>), DeliveryError> {
+    ) -> Result<
+        (
+            IssueComment,
+            Option<IssueInfo>,
+            Option<IssueCommentDelivery>,
+        ),
+        DeliveryError,
+    > {
         let message = request.message.trim().to_string();
         if message.is_empty() {
             return Err(DeliveryError::BadRequest(
@@ -848,8 +882,6 @@ impl<B: DeliveryBackend> IssueCommentDispatcher<B> {
             }
             Err(error) => return Err(error.into()),
         };
-        let issue = self.backend.issue_info(comment.issue_id).await?;
-
         let delivery = match request.intent {
             IssueCommentIntent::Note => None,
             IssueCommentIntent::ReplyToAgent => Some(
@@ -864,15 +896,14 @@ impl<B: DeliveryBackend> IssueCommentDispatcher<B> {
                 .await?,
             ),
         };
+        // Once the comment exists, failing the call would invite a retry
+        // that cannot help; the URL is best effort.
+        let issue = self.backend.issue_info(comment.issue_id).await.ok();
         Ok((comment, issue, delivery))
     }
 
     /// Deliver what is pending for one session, if it is at a turn boundary.
-    async fn dispatch_session(
-        &self,
-        session_id: Uuid,
-        trigger: Trigger,
-    ) -> Result<(), sqlx::Error> {
+    async fn dispatch_session(&self, session_id: Uuid) -> Result<(), sqlx::Error> {
         // Held until the turn has started. This is deliberately different from
         // the usual claim-then-release (constitution XII): the row claim keeps
         // one row from being delivered twice, but only this per-session lock
@@ -959,7 +990,7 @@ impl<B: DeliveryBackend> IssueCommentDispatcher<B> {
 
         let latest =
             ExecutionProcess::latest_coding_agent_turn_for_session(&self.pool, session_id).await?;
-        let Some((_, latest_status, completed_at)) = latest else {
+        let Some((latest_turn_id, latest_status, completed_at)) = latest else {
             for row in &due {
                 IssueCommentDelivery::finish_pending(
                     &self.pool,
@@ -973,17 +1004,32 @@ impl<B: DeliveryBackend> IssueCommentDispatcher<B> {
             return Ok(());
         };
 
-        // Without a confirmed boundary event, give the exit monitor time to
-        // hand off its own queued follow-up first; the sweep comes back.
-        if trigger != Trigger::Finalized
-            && let Some(completed_at) = completed_at
-            && now - completed_at < BOUNDARY_GRACE
-            && !self.boundary_seen_after(session_id, completed_at)
-        {
+        // The latest turn may be one of our own failed launches for this
+        // batch: the agent did not stop, and nothing else is in flight.
+        let mut own_attempt = false;
+        for row in &due {
+            if ExecutionProcess::find_coding_agent_turns_with_marker(
+                &self.pool,
+                session_id,
+                &stored_marker_needle(row.comment_id),
+            )
+            .await?
+            .iter()
+            .any(|(id, status)| *id == latest_turn_id && *status == ExecutionProcessStatus::Failed)
+            {
+                own_attempt = true;
+                break;
+            }
+        }
+
+        // Only at a confirmed boundary (see `UNCONFIRMED_BOUNDARY_AGE`); the
+        // event or the sweep comes back otherwise.
+        let ended_long_ago = completed_at.is_some_and(|at| now - at >= UNCONFIRMED_BOUNDARY_AGE);
+        if !own_attempt && !self.boundary_confirmed(session_id, latest_turn_id) && !ended_long_ago {
             return Ok(());
         }
 
-        let stopped = latest_status != ExecutionProcessStatus::Completed;
+        let stopped = latest_status != ExecutionProcessStatus::Completed && !own_attempt;
         let mut deliverable = Vec::new();
         for row in due.into_iter().filter(|row| row.issue_id == issue_id) {
             if stopped && !row.allow_stopped_target {
@@ -1006,6 +1052,50 @@ impl<B: DeliveryBackend> IssueCommentDispatcher<B> {
         self.deliver_claimed(&session, deliverable).await
     }
 
+    /// A turn that carried `comment_id` and actually ran. An execution row is
+    /// written as soon as a start is attempted and kept if the launch fails,
+    /// so a `Failed` row is not evidence: such a comment is sent again. (A
+    /// turn that started and then failed is indistinguishable here; the
+    /// re-send is the safer error than never delivering.)
+    async fn started_turn(
+        &self,
+        session_id: Uuid,
+        comment_id: Uuid,
+    ) -> Result<Option<Uuid>, sqlx::Error> {
+        Ok(ExecutionProcess::find_coding_agent_turns_with_marker(
+            &self.pool,
+            session_id,
+            &stored_marker_needle(comment_id),
+        )
+        .await?
+        .into_iter()
+        .find(|(_, status)| *status != ExecutionProcessStatus::Failed)
+        .map(|(id, _)| id))
+    }
+
+    /// Finish every claimed row of a batch with the same outcome.
+    async fn finish_all(
+        &self,
+        rows: &[&IssueCommentDelivery],
+        state: IssueCommentDeliveryState,
+        reason: IssueCommentDeliveryReason,
+    ) -> Result<(), sqlx::Error> {
+        let now = Utc::now();
+        for row in rows {
+            IssueCommentDelivery::finish_dispatch(
+                &self.pool,
+                row.id,
+                state,
+                Some(reason),
+                None,
+                None,
+                now,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
     /// Start one turn carrying every claimed comment (all on one issue).
     async fn deliver_claimed(
         &self,
@@ -1015,46 +1105,27 @@ impl<B: DeliveryBackend> IssueCommentDispatcher<B> {
         let now = Utc::now();
         let mut ready: Vec<(IssueCommentDelivery, IssueComment)> = Vec::new();
         for row in claimed {
-            // Positive evidence of an earlier start whose outcome was lost.
-            let started = ExecutionProcess::find_coding_agent_ids_with_marker(
-                &self.pool,
-                session.id,
-                &stored_marker_needle(row.comment_id),
-            )
-            .await?;
+            // Positive evidence of an earlier start whose outcome was lost:
+            // record it with the snapshot taken before that start.
+            if let Some(execution_id) = self.started_turn(session.id, row.comment_id).await? {
+                IssueCommentDelivery::mark_delivered(
+                    &self.pool,
+                    row.id,
+                    execution_id,
+                    row.delivered_message.as_deref().unwrap_or_default(),
+                    row.delivered_comment_updated_at,
+                    now,
+                )
+                .await?;
+                continue;
+            }
             match self.backend.get_comment(row.comment_id).await {
-                Ok(comment) => {
-                    if let Some(execution_id) = started.first() {
-                        IssueCommentDelivery::mark_delivered(
-                            &self.pool,
-                            row.id,
-                            *execution_id,
-                            &comment.message,
-                            Some(comment.updated_at),
-                            now,
-                        )
-                        .await?;
-                    } else {
-                        ready.push((row, comment));
-                    }
-                }
-                Err(error) if !started.is_empty() => {
-                    // Already delivered; the text snapshot is unavailable.
-                    tracing::warn!(?error, comment_id = %row.comment_id, "delivered comment could not be re-read");
-                    IssueCommentDelivery::mark_delivered(
-                        &self.pool, row.id, started[0], "", None, now,
-                    )
-                    .await?;
-                }
+                Ok(comment) => ready.push((row, comment)),
                 Err(error) if is_status(&error, 404) => {
-                    IssueCommentDelivery::finish_dispatch(
-                        &self.pool,
-                        row.id,
+                    self.finish_all(
+                        &[&row],
                         IssueCommentDeliveryState::Cancelled,
-                        Some(IssueCommentDeliveryReason::CommentDeleted),
-                        None,
-                        None,
-                        now,
+                        IssueCommentDeliveryReason::CommentDeleted,
                     )
                     .await?;
                 }
@@ -1086,16 +1157,25 @@ impl<B: DeliveryBackend> IssueCommentDispatcher<B> {
         if ready.is_empty() {
             return Ok(());
         }
-
+        let rows: Vec<&IssueCommentDelivery> = ready.iter().map(|(row, _)| row).collect();
         let issue_id = ready[0].0.issue_id;
-        let issue = match self.backend.issue_info(issue_id).await {
-            Ok(issue) => issue,
-            Err(error) => {
-                for (row, _) in &ready {
+
+        // The target may have changed while the comment waited: the issue
+        // closed, or the workspace was unlinked, relinked or archived.
+        let (issue, link) = match (
+            self.backend.issue_info(issue_id).await,
+            self.backend.workspace_link(session.workspace_id).await,
+        ) {
+            (Ok(issue), Ok(link)) => (issue, link),
+            (Err(error), _) | (_, Err(error)) => {
+                for row in &rows {
                     self.retry_or_fail(
                         row,
                         IssueCommentDeliveryReason::RemoteUnavailable,
-                        &format!("could not read issue {issue_id}: {error}"),
+                        &format!(
+                            "could not re-check issue {issue_id} and workspace {}: {error}",
+                            session.workspace_id
+                        ),
                     )
                     .await?;
                 }
@@ -1103,19 +1183,34 @@ impl<B: DeliveryBackend> IssueCommentDispatcher<B> {
             }
         };
         if !issue.active {
-            for (row, _) in &ready {
-                IssueCommentDelivery::finish_dispatch(
-                    &self.pool,
-                    row.id,
+            return self
+                .finish_all(
+                    &rows,
                     IssueCommentDeliveryState::NoTarget,
-                    Some(IssueCommentDeliveryReason::IssueTerminal),
-                    None,
-                    None,
-                    now,
+                    IssueCommentDeliveryReason::IssueTerminal,
                 )
-                .await?;
+                .await;
+        }
+        match link {
+            Some(link) if link.issue_id == Some(issue_id) && link.archived => {
+                return self
+                    .finish_all(
+                        &rows,
+                        IssueCommentDeliveryState::NoTarget,
+                        IssueCommentDeliveryReason::WorkspaceArchived,
+                    )
+                    .await;
             }
-            return Ok(());
+            Some(link) if link.issue_id == Some(issue_id) => {}
+            _ => {
+                return self
+                    .finish_all(
+                        &rows,
+                        IssueCommentDeliveryState::NoTarget,
+                        IssueCommentDeliveryReason::TargetNotLinked,
+                    )
+                    .await;
+            }
         }
 
         let names = self.backend.member_names(issue.project_id).await;
@@ -1130,6 +1225,19 @@ impl<B: DeliveryBackend> IssueCommentDispatcher<B> {
             .collect();
         let label = format!("{} (\"{}\")", issue.simple_id, issue.title);
         let prompt = compose_delivery_prompt(&label, &delivered);
+
+        // The snapshot is durable before the turn can start, so recovery
+        // after a crash records exactly what the agent received.
+        for (row, comment) in &ready {
+            IssueCommentDelivery::record_snapshot(
+                &self.pool,
+                row.id,
+                &comment.message,
+                comment.updated_at,
+                Utc::now(),
+            )
+            .await?;
+        }
 
         match self.backend.start_follow_up(session.id, prompt).await {
             Ok(execution_id) => {
@@ -1153,7 +1261,7 @@ impl<B: DeliveryBackend> IssueCommentDispatcher<B> {
                 );
             }
             Err(error) => {
-                for (row, _) in &ready {
+                for row in &rows {
                     self.retry_or_fail(
                         row,
                         IssueCommentDeliveryReason::StartFailed,
@@ -1212,28 +1320,18 @@ impl<B: DeliveryBackend> IssueCommentDispatcher<B> {
     pub async fn recover(&self) -> Result<(), sqlx::Error> {
         for row in IssueCommentDelivery::list_dispatching(&self.pool).await? {
             let started = match row.session_id {
-                Some(session_id) => {
-                    ExecutionProcess::find_coding_agent_ids_with_marker(
-                        &self.pool,
-                        session_id,
-                        &stored_marker_needle(row.comment_id),
-                    )
-                    .await?
-                }
-                None => Vec::new(),
+                Some(session_id) => self.started_turn(session_id, row.comment_id).await?,
+                None => None,
             };
             let now = Utc::now();
-            if let Some(execution_id) = started.first() {
-                let message = match self.backend.get_comment(row.comment_id).await {
-                    Ok(comment) => (comment.message, Some(comment.updated_at)),
-                    Err(_) => (String::new(), None),
-                };
+            if let Some(execution_id) = started {
+                // The snapshot was recorded before that turn could start.
                 IssueCommentDelivery::mark_delivered(
                     &self.pool,
                     row.id,
-                    *execution_id,
-                    &message.0,
-                    message.1,
+                    execution_id,
+                    row.delivered_message.as_deref().unwrap_or_default(),
+                    row.delivered_comment_updated_at,
                     now,
                 )
                 .await?;
@@ -1258,15 +1356,20 @@ impl<B: DeliveryBackend> IssueCommentDispatcher<B> {
         for session_id in
             IssueCommentDelivery::sessions_with_due_pending(&self.pool, Utc::now()).await?
         {
-            self.dispatch_session(session_id, Trigger::Sweep).await?;
+            self.dispatch_session(session_id).await?;
         }
         Ok(())
     }
 
-    /// A turn boundary was announced for `session_id`.
+    /// A turn boundary was announced for `session_id`: its latest turn ended
+    /// and no queued follow-up was started in its place.
     pub async fn on_turn_finalized(&self, session_id: Uuid) -> Result<(), sqlx::Error> {
-        self.note_boundary(session_id);
-        self.dispatch_session(session_id, Trigger::Finalized).await
+        if let Some((turn_id, _, _)) =
+            ExecutionProcess::latest_coding_agent_turn_for_session(&self.pool, session_id).await?
+        {
+            self.note_boundary(session_id, turn_id);
+        }
+        self.dispatch_session(session_id).await
     }
 
     /// Comments on an issue with their delivery state (both surfaces).

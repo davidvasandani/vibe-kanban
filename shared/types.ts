@@ -1002,7 +1002,12 @@ export type CreateIssueCommentWithIntent = { issue_id: string, message: string, 
  */
 comment_id: string | null, origin_session_id?: string, origin_workspace_id?: string, };
 
-export type CreateIssueCommentResult = { comment: IssueComment, issue_url: string, 
+export type CreateIssueCommentResult = { comment: IssueComment, 
+/**
+ * Browser route of the issue; `None` if the issue could not be read
+ * after the comment was saved (the comment and delivery still stand).
+ */
+issue_url: string | null, 
 /**
  * `None` for notes: saved on the issue, not sent to any agent.
  */

@@ -405,7 +405,11 @@ mod tests {
             TargetDecision::Blocked(IssueCommentDeliveryReason::SelfTarget)
         );
         assert_eq!(
-            select_target(std::slice::from_ref(&own), Some(own.session_id), Some(own.session_id)),
+            select_target(
+                std::slice::from_ref(&own),
+                Some(own.session_id),
+                Some(own.session_id)
+            ),
             TargetDecision::Blocked(IssueCommentDeliveryReason::SelfTarget)
         );
     }

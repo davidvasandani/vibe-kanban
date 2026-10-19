@@ -36,6 +36,17 @@ use uuid::Uuid;
 
 use super::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartFailure {
+    /// Fails before any execution row exists.
+    Outright,
+    /// The turn starts, but the caller never hears back.
+    LostResponse,
+    /// An execution row is written, then the launch fails (as when the
+    /// executable is missing or the worker is unavailable).
+    LaunchFailed,
+}
+
 #[derive(Default)]
 struct FakeState {
     comments: HashMap<Uuid, IssueComment>,
@@ -44,9 +55,8 @@ struct FakeState {
     issue_error: Option<u16>,
     comment_error: Option<u16>,
     queued: HashSet<Uuid>,
-    /// Pending failures for the next starts: `Some(true)` = the start
-    /// succeeds but its response is lost; `Some(false)` = it fails outright.
-    start_failures: Vec<bool>,
+    /// Outcomes of the next starts (default: success).
+    start_failures: Vec<StartFailure>,
     /// Prompts of every turn actually started.
     starts: Vec<(Uuid, String)>,
 }
@@ -193,19 +203,20 @@ impl DeliveryBackend for FakeBackend {
                     Some(state.start_failures.remove(0))
                 }
             };
-            if failure == Some(false) {
+            if failure == Some(StartFailure::Outright) {
                 return Err("container unavailable".into());
             }
-            let id = insert_turn(
-                &self.pool,
-                session_id,
-                &prompt,
-                ExecutionProcessStatus::Running,
-                None,
-            )
-            .await;
+            let status = if failure == Some(StartFailure::LaunchFailed) {
+                ExecutionProcessStatus::Failed
+            } else {
+                ExecutionProcessStatus::Running
+            };
+            let id = insert_turn(&self.pool, session_id, &prompt, status, None).await;
+            if failure == Some(StartFailure::LaunchFailed) {
+                return Err("executable not found".into());
+            }
             self.state().starts.push((session_id, prompt));
-            if failure == Some(true) {
+            if failure == Some(StartFailure::LostResponse) {
                 return Err("response lost".into());
             }
             Ok(id)
@@ -784,7 +795,7 @@ async fn start_failures_retry_then_fail_visibly() {
     let fx = Fixture::new().await;
     let (_, session_id) = fx.linked_workspace().await;
     fx.waiting(session_id).await;
-    fx.backend.state().start_failures = vec![false, false, false];
+    fx.backend.state().start_failures = vec![StartFailure::Outright; 3];
     let comment = fx.post("answer");
 
     let first = fx.reply(comment, None).await;
@@ -832,7 +843,7 @@ async fn lost_start_response_is_recovered_from_evidence() {
     let fx = Fixture::new().await;
     let (_, session_id) = fx.linked_workspace().await;
     fx.waiting(session_id).await;
-    fx.backend.state().start_failures = vec![true];
+    fx.backend.state().start_failures = vec![StartFailure::LostResponse];
     let comment = fx.post("answer");
 
     let first = fx.reply(comment, None).await;
@@ -840,7 +851,7 @@ async fn lost_start_response_is_recovered_from_evidence() {
     assert_eq!(fx.starts().len(), 1);
 
     // The started turn finishes; the retry comes due.
-    fx.complete_running(session_id, 60).await;
+    fx.complete_running(session_id, 300).await;
     sqlx::query("UPDATE issue_comment_deliveries SET next_attempt_at = ? WHERE id = ?")
         .bind(Utc::now() - ChronoDuration::seconds(1))
         .bind(first.id)
@@ -891,9 +902,26 @@ async fn restart_recovery_uses_positive_evidence() {
         session_id,
         &prompt,
         ExecutionProcessStatus::Completed,
-        Some(60),
+        Some(300),
     )
     .await;
+    // The snapshot was recorded before that turn started; the comment was
+    // edited afterwards. Recovery keeps what the agent received.
+    IssueCommentDelivery::record_snapshot(
+        &fx.pool,
+        a.id,
+        "started before the crash",
+        Utc::now(),
+        Utc::now(),
+    )
+    .await
+    .unwrap();
+    fx.backend
+        .state()
+        .comments
+        .get_mut(&started)
+        .unwrap()
+        .message = "edited after the crash".into();
 
     fx.dispatcher.recover().await.unwrap();
     let a = IssueCommentDelivery::find_by_id(&fx.pool, a.id)
@@ -906,6 +934,10 @@ async fn restart_recovery_uses_positive_evidence() {
         .unwrap();
     assert_eq!(a.state, IssueCommentDeliveryState::Delivered);
     assert_eq!(a.execution_process_id, Some(execution));
+    assert_eq!(
+        a.delivered_message.as_deref(),
+        Some("started before the crash")
+    );
     assert_eq!(b.state, IssueCommentDeliveryState::Pending);
 
     fx.dispatcher.sweep().await.unwrap();
@@ -1149,4 +1181,115 @@ async fn workspace_conversation_lists_linked_comments_with_deliveries() {
         .await
         .unwrap();
     assert!(unlinked.issue.is_none());
+}
+
+// A launch that wrote its execution row and then failed is not delivery:
+// once fixed, an explicit retry starts a real turn instead of trusting the
+// failed row's marker.
+#[tokio::test]
+async fn a_failed_launch_is_not_evidence_of_delivery() {
+    let fx = Fixture::new().await;
+    let (_, session_id) = fx.linked_workspace().await;
+    fx.waiting(session_id).await;
+    fx.backend.state().start_failures = vec![StartFailure::LaunchFailed; 3];
+    let comment = fx.post("answer");
+
+    let first = fx.reply(comment, None).await;
+    assert_eq!(first.state, IssueCommentDeliveryState::Pending);
+    for _ in 0..2 {
+        sqlx::query("UPDATE issue_comment_deliveries SET next_attempt_at = ? WHERE id = ?")
+            .bind(Utc::now() - ChronoDuration::seconds(1))
+            .bind(first.id)
+            .execute(&fx.pool)
+            .await
+            .unwrap();
+        // The failed launch rows are the latest turns; let them age past
+        // the unconfirmed-boundary window.
+        sqlx::query(
+            "UPDATE execution_processes SET completed_at = ? WHERE session_id = ? AND status = 'failed'",
+        )
+        .bind(Utc::now() - ChronoDuration::seconds(600))
+        .bind(session_id)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+        fx.dispatcher.sweep().await.unwrap();
+    }
+    let failed = IssueCommentDelivery::find_by_id(&fx.pool, first.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(failed.state, IssueCommentDeliveryState::Failed);
+    assert!(fx.starts().is_empty());
+
+    // The latest turn is now a failed launch, so only an explicit choice
+    // may resume; it must start a real turn.
+    let retried = fx.reply(comment, Some(session_id)).await;
+    assert_eq!(retried.state, IssueCommentDeliveryState::Delivered);
+    assert_eq!(fx.starts().len(), 1);
+    assert_ne!(retried.execution_process_id, None);
+}
+
+// The target is re-checked at dispatch: a workspace unlinked (or archived on
+// the issue server) while the reply waited is not resumed.
+#[tokio::test]
+async fn a_reply_waiting_for_an_unlinked_workspace_is_not_delivered() {
+    let fx = Fixture::new().await;
+    let (workspace_id, session_id) = fx.linked_workspace().await;
+    insert_turn(
+        &fx.pool,
+        session_id,
+        "work",
+        ExecutionProcessStatus::Running,
+        None,
+    )
+    .await;
+    let unlinked = fx.reply(fx.post("answer"), None).await;
+    assert_eq!(unlinked.state, IssueCommentDeliveryState::Pending);
+
+    fx.backend
+        .state()
+        .links
+        .get_mut(&fx.issue_id)
+        .unwrap()
+        .workspaces
+        .clear();
+    fx.complete_running(session_id, 0).await;
+    fx.dispatcher.on_turn_finalized(session_id).await.unwrap();
+    let stored = IssueCommentDelivery::find_by_id(&fx.pool, unlinked.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.state, IssueCommentDeliveryState::NoTarget);
+    assert_eq!(
+        stored.reason,
+        Some(IssueCommentDeliveryReason::TargetNotLinked)
+    );
+    assert!(fx.starts().is_empty());
+    let _ = workspace_id;
+}
+
+// A boundary event confirms only the turn it was seen for: a newer turn that
+// just ended (its own handoff possibly still in flight) is not confirmed.
+#[tokio::test]
+async fn a_boundary_for_an_older_turn_does_not_confirm_a_newer_one() {
+    let fx = Fixture::new().await;
+    let (_, session_id) = fx.linked_workspace().await;
+    fx.waiting(session_id).await;
+    fx.dispatcher.on_turn_finalized(session_id).await.unwrap();
+    insert_turn(
+        &fx.pool,
+        session_id,
+        "next",
+        ExecutionProcessStatus::Completed,
+        None,
+    )
+    .await;
+
+    let delivery = fx.reply(fx.post("answer"), None).await;
+    assert_eq!(delivery.state, IssueCommentDeliveryState::Pending);
+    assert!(fx.starts().is_empty());
+
+    fx.dispatcher.on_turn_finalized(session_id).await.unwrap();
+    assert_eq!(fx.starts().len(), 1);
 }
