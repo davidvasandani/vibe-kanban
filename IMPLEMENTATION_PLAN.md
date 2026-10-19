@@ -1,10 +1,9 @@
-# Implementation plan
+# Implementation plan — Debug VK Load
 
-1. Complete ordered SpecKit constitution, specification, clarification, plan, tasks and analysis using the workspace command files and their task pointer.
-2. Inspect the existing browser launch, CDP input, ownership transitions, profiles and frame transport. Verify Cloudflare support guidance and attempt a read-only inspection of the reported session without taking it over.
-3. Add local-browser handoff guidance to BrowserPanelContainer, with safe HTTP(S) links, no credential transfer, and explicit instructions to recreate the cart locally. Keep the hosted page and control untouched.
-4. Classify console diagnostics at CDP ingestion and collect actual Network.loadingFailed events in a bounded ring, with no raw arguments, headers, URL, request bodies or payment data. Add regression tests.
-5. Extend session/control regression coverage to prove ownership changes preserve driver state and reject stale commands. Add a provider-test-key fixture if browser automation is available.
-6. Install locked dependencies; format and run targeted tests, type checks and lint. Record blockers rather than claiming skipped checks passed.
-7. Have a human verify the real checkout or fallback without purchasing. Record live observations separately from reported evidence.
-8. Run independent Codex review, address findings, record reusable knowledge and commit it. Open and merge the task PR only when validation and review support readiness.
+1. Follow workspace SpecKit commands using homelab/.specify/feature-dir; preserve the task-specific path.
+2. Correlate the observed 20:10 UTC follow-up failure with worker placement and bounded runtime metrics. Record evidence and limits in the task research artifact.
+3. Preserve admission thresholds and sticky ownership. Add recovery advice to pressure refusals and identify the assigned worker in coordinator dispatch errors and stored failure evidence.
+4. Add focused regression coverage for error details; retain admission boundary/replay and scheduler tests. No automatic migration or prolonged request retries.
+5. Install locked dependencies, format, run relevant Rust verification and document any environmental blockers.
+6. Run independent Codex CLI review, resolve significant findings, and re-verify.
+7. Record reusable findings in wiki topic/index with task vk/bdd8-debug-vk-load, commit, open PRs for the affected repositories, and merge after required checks pass.
