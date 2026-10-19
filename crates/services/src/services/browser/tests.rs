@@ -548,3 +548,38 @@ async fn takeover_release_and_reacquire_do_not_touch_the_remote_page() {
     ));
     assert!(!rt.is_closed());
 }
+
+#[tokio::test]
+async fn scrolling_requires_current_control_generation() {
+    let rt = runtime().await;
+    let owner = human(Uuid::new_v4());
+    let scroll = BrowserAction::Scroll {
+        x: 20,
+        y: 30,
+        delta_x: -10,
+        delta_y: 100,
+    };
+    assert!(matches!(
+        rt.execute(&owner, Uuid::new_v4(), None, &scroll).await,
+        Err(BrowserSessionError::ControlConflict { .. })
+    ));
+    rt.acquire(&owner, false, false, None).unwrap();
+    rt.execute(&owner, Uuid::new_v4(), Some(1), &scroll)
+        .await
+        .unwrap();
+    let other = human(Uuid::new_v4());
+    rt.acquire(&other, false, true, Some(1)).unwrap();
+    assert!(
+        rt.execute(&owner, Uuid::new_v4(), Some(1), &scroll)
+            .await
+            .is_err()
+    );
+    assert!(
+        rt.execute(&owner, Uuid::new_v4(), None, &scroll)
+            .await
+            .is_err()
+    );
+    rt.execute(&other, Uuid::new_v4(), Some(2), &scroll)
+        .await
+        .unwrap();
+}
