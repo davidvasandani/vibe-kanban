@@ -227,3 +227,37 @@ and forwarding, not whether a physical phone displays its OS keyboard.
 - vk/57e0-add-shared-human
 - vk/5673-cloudflare-acces
 - vk/5c0e-vk-browser (workspace `5c0e77f9-1063-4612-9ac7-922daf57452b`)
+
+## Touch and wheel scrolling (vk/5c0e-browser-scrolling)
+
+The remote browser needs an explicit `BrowserAction::Scroll` with integer
+`x`, `y`, `delta_x`, and `delta_y`. CDP receives `Input.dispatchMouseEvent`
+with `type: mouseWheel`, so hit testing targets nested scroll containers.
+It uses the same ownership/generation gate as other input. Regenerate shared
+types after extending the Rust action enum.
+
+The live surface attaches a non-passive wheel listener. Normalize pixel, line
+(16 CSS pixels), and page deltas, then scale to the remote viewport. Keep
+fractional deltas until integer dispatch and retain the remainder; rounding
+each high-resolution trackpad event can discard sustained scrolling. Bound
+work to one in-flight command and one accumulated delta. Pending movement is
+tied to its hit point; when that point changes, discard pending movement
+rather than applying another scroll container's movement to the new target.
+
+Touch/pen pointer capture distinguishes taps from swipes with an 8 CSS-pixel
+threshold. Swipes reverse finger displacement into wheel deltas at the
+original hit point. They never click or focus the keyboard. Cancel gestures
+on additional pointers, pointer cancellation, capture loss, disconnection,
+session change or control-generation change. Use `touch-action: none` only
+while controlling the remote surface. Keep gesture dependencies tied to frame
+width/height, not the per-frame metadata object: every incoming video frame
+otherwise resets an active gesture.
+
+Regression coverage lives in `BrowserPanelContainer.test.tsx` and the Rust
+browser tests. `live_scroll_targets_nested_content` is opt-in and verifies
+actual two-axis nested scrolling with local Chromium. If discovery fails,
+set `VIBE_BROWSER_CHROMIUM_PATH` to the installed Nix Chromium binary. These
+checks do not replace a physical phone test.
+
+Task: `vk/5c0e-browser-scrolling`, workspace
+`5c0e77f9-1063-4612-9ac7-922daf57452b`.

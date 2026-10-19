@@ -172,6 +172,13 @@ pub enum BrowserAction {
         x: i32,
         y: i32,
     },
+    /// Wheel deltas in viewport CSS pixels, positive right/down.
+    Scroll {
+        x: i32,
+        y: i32,
+        delta_x: i32,
+        delta_y: i32,
+    },
     Type {
         text: String,
     },

@@ -749,6 +749,7 @@ mod action_serde_tests {
             r#"{"type":"click","x":10,"y":20,"button":"left"}"#,
             r#"{"type":"click","x":10,"y":20}"#,
             r#"{"type":"mouse_move","x":1,"y":2}"#,
+            r#"{"type":"scroll","x":1,"y":2,"delta_x":-20,"delta_y":100}"#,
             r#"{"type":"set_viewport","width":800,"height":600}"#,
             r#"{"type":"key","key":"Enter"}"#,
             r#"{"type":"type","text":"hello"}"#,
