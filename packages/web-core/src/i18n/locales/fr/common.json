@@ -605,7 +605,8 @@
         "comment_deleted": "commentaire supprimé",
         "remote_unavailable": "le serveur des tickets est injoignable",
         "unauthorized": "pas autorisé à lire ce ticket",
-        "start_failed": "l'agent n'a pas pu démarrer"
+        "start_failed": "l'agent n'a pas pu démarrer",
+        "launch_uncertain": "un worker l'a peut-être déjà démarré — choisissez la session pour renvoyer"
       }
     }
   },

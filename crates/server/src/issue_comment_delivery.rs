@@ -463,12 +463,21 @@ impl DeliveryBackend for DeploymentBackend {
 
 // ── The dispatcher ──────────────────────────────────────────────────────
 
+enum EarlierAttempt {
+    Launched(Uuid),
+    Uncertain(Uuid),
+    None,
+}
+
 pub struct IssueCommentDispatcher<B: DeliveryBackend> {
     pool: SqlitePool,
     backend: B,
     session_locks: StdMutex<HashMap<Uuid, Arc<Mutex<()>>>>,
-    /// When this dispatcher (and so this server process) started.
-    started_at: DateTime<Utc>,
+    /// Turns that ended before this instant are boundaries: it starts as
+    /// this dispatcher's creation and moves to the end of startup
+    /// reconciliation (orphan cleanup marks interrupted turns without
+    /// `finalize_task`, then boot decides whether to resume them).
+    reconciled_at: StdMutex<DateTime<Utc>>,
 }
 
 /// One candidate with the presentation details the API reports.
@@ -484,7 +493,7 @@ impl<B: DeliveryBackend> IssueCommentDispatcher<B> {
             pool,
             backend,
             session_locks: StdMutex::new(HashMap::new()),
-            started_at: Utc::now(),
+            reconciled_at: StdMutex::new(Utc::now()),
         }
     }
 
@@ -503,7 +512,11 @@ impl<B: DeliveryBackend> IssueCommentDispatcher<B> {
         turn_id: Uuid,
         completed_at: Option<DateTime<Utc>>,
     ) -> Result<bool, sqlx::Error> {
-        if completed_at.is_some_and(|at| at < self.started_at) {
+        let reconciled_at = *self
+            .reconciled_at
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if completed_at.is_some_and(|at| at < reconciled_at) {
             return Ok(true);
         }
         Ok(SessionTurnBoundary::finalized_turn(&self.pool, session_id).await? == Some(turn_id))
@@ -1053,25 +1066,55 @@ impl<B: DeliveryBackend> IssueCommentDispatcher<B> {
         self.deliver_claimed(&session, deliverable).await
     }
 
-    /// A turn that carried `comment_id` and whose agent was actually
-    /// launched (see `find_coding_agent_turns_with_marker`), whatever its
-    /// status since: a turn that ran and then failed is still delivered and
-    /// is never replayed, while a launch that failed or was cut off by a
-    /// crash before the agent started is not evidence.
-    async fn started_turn(
+    /// What the session's executions say about an earlier attempt to deliver
+    /// `comment_id` (see `find_coding_agent_turns_with_marker`). A turn
+    /// whose agent launched is delivered, whatever its status since: a turn
+    /// that ran and then failed is never replayed. A launch that failed or
+    /// was cut off before the agent started is no evidence, so it is sent
+    /// again. A turn handed to a worker that never confirmed acceptance is
+    /// unknown: it is neither delivered nor retried automatically.
+    async fn earlier_attempt(
         &self,
         session_id: Uuid,
         comment_id: Uuid,
-    ) -> Result<Option<Uuid>, sqlx::Error> {
-        Ok(ExecutionProcess::find_coding_agent_turns_with_marker(
+    ) -> Result<EarlierAttempt, sqlx::Error> {
+        let turns = ExecutionProcess::find_coding_agent_turns_with_marker(
             &self.pool,
             session_id,
             &stored_marker_needle(comment_id),
         )
-        .await?
-        .into_iter()
-        .find(|turn| turn.launched)
-        .map(|turn| turn.id))
+        .await?;
+        if let Some(turn) = turns.iter().find(|turn| turn.launched) {
+            return Ok(EarlierAttempt::Launched(turn.id));
+        }
+        Ok(turns
+            .iter()
+            .find(|turn| turn.uncertain)
+            .map_or(EarlierAttempt::None, |turn| {
+                EarlierAttempt::Uncertain(turn.id)
+            }))
+    }
+
+    /// Record an unknown worker launch: visible, never auto-retried.
+    async fn fail_uncertain(
+        &self,
+        row: &IssueCommentDelivery,
+        execution_id: Uuid,
+    ) -> Result<(), sqlx::Error> {
+        IssueCommentDelivery::finish_dispatch(
+            &self.pool,
+            row.id,
+            IssueCommentDeliveryState::Failed,
+            Some(IssueCommentDeliveryReason::LaunchUncertain),
+            Some(&format!(
+                "execution {execution_id} was handed to a worker that never confirmed it started; \
+                 check the session, then choose it explicitly to send the comment again"
+            )),
+            None,
+            Utc::now(),
+        )
+        .await?;
+        Ok(())
     }
 
     /// Finish every claimed row of a batch with the same outcome.
@@ -1108,17 +1151,25 @@ impl<B: DeliveryBackend> IssueCommentDispatcher<B> {
         for row in claimed {
             // Positive evidence of an earlier start whose outcome was lost:
             // record it with the snapshot taken before that start.
-            if let Some(execution_id) = self.started_turn(session.id, row.comment_id).await? {
-                IssueCommentDelivery::mark_delivered(
-                    &self.pool,
-                    row.id,
-                    execution_id,
-                    row.delivered_message.as_deref().unwrap_or_default(),
-                    row.delivered_comment_updated_at,
-                    now,
-                )
-                .await?;
-                continue;
+            match self.earlier_attempt(session.id, row.comment_id).await? {
+                EarlierAttempt::Launched(execution_id) => {
+                    IssueCommentDelivery::mark_delivered(
+                        &self.pool,
+                        row.id,
+                        execution_id,
+                        row.delivered_message.as_deref().unwrap_or_default(),
+                        row.delivered_comment_updated_at,
+                        now,
+                    )
+                    .await?;
+                    continue;
+                }
+                // An explicit choice is consent to send it again.
+                EarlierAttempt::Uncertain(execution_id) if !row.allow_stopped_target => {
+                    self.fail_uncertain(&row, execution_id).await?;
+                    continue;
+                }
+                EarlierAttempt::Uncertain(_) | EarlierAttempt::None => {}
             }
             match self.backend.get_comment(row.comment_id).await {
                 Ok(comment) => ready.push((row, comment)),
@@ -1320,12 +1371,14 @@ impl<B: DeliveryBackend> IssueCommentDispatcher<B> {
     /// the marker means delivered, otherwise it is retried.
     pub async fn recover(&self) -> Result<(), sqlx::Error> {
         for row in IssueCommentDelivery::list_dispatching(&self.pool).await? {
-            let started = match row.session_id {
-                Some(session_id) => self.started_turn(session_id, row.comment_id).await?,
-                None => None,
+            let attempt = match row.session_id {
+                Some(session_id) => self.earlier_attempt(session_id, row.comment_id).await?,
+                None => EarlierAttempt::None,
             };
             let now = Utc::now();
-            if let Some(execution_id) = started {
+            if let EarlierAttempt::Uncertain(execution_id) = attempt {
+                self.fail_uncertain(&row, execution_id).await?;
+            } else if let EarlierAttempt::Launched(execution_id) = attempt {
                 // The snapshot was recorded before that turn could start.
                 IssueCommentDelivery::mark_delivered(
                     &self.pool,
@@ -1360,6 +1413,15 @@ impl<B: DeliveryBackend> IssueCommentDispatcher<B> {
             self.dispatch_session(session_id).await?;
         }
         Ok(())
+    }
+
+    /// Startup reconciliation is done: orphaned turns were marked and the
+    /// resume decision made (resumed turns are running, so they are busy).
+    pub fn mark_startup_reconciled(&self) {
+        *self
+            .reconciled_at
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Utc::now();
     }
 
     /// A turn boundary was announced for `session_id` (`finalize_task`

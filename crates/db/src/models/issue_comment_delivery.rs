@@ -88,6 +88,9 @@ pub enum IssueCommentDeliveryReason {
     /// The current user may not read the comment's issue.
     Unauthorized,
     StartFailed,
+    /// A worker received the turn but never confirmed it started; sending
+    /// again could run the agent twice, so only an explicit choice retries.
+    LaunchUncertain,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Type, Serialize, Deserialize, TS)]

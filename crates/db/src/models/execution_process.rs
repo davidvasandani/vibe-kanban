@@ -147,6 +147,9 @@ pub struct MarkedTurn {
     pub id: Uuid,
     pub status: ExecutionProcessStatus,
     pub launched: bool,
+    /// Handed to a worker that never confirmed acceptance: the agent may or
+    /// may not be running there, so this is neither evidence nor its absence.
+    pub uncertain: bool,
 }
 
 impl ExecutionProcess {
@@ -341,7 +344,9 @@ impl ExecutionProcess {
                            WHERE j.execution_process_id = ep.id AND j.accepted_at IS NOT NULL) \
                 OR EXISTS (SELECT 1 FROM coding_agent_turns t \
                            WHERE t.execution_process_id = ep.id \
-                           AND t.agent_session_id IS NOT NULL)) AS launched \
+                           AND t.agent_session_id IS NOT NULL)) AS launched, \
+               EXISTS (SELECT 1 FROM execution_worker_jobs j \
+                       WHERE j.execution_process_id = ep.id) AS uncertain \
              FROM execution_processes ep \
              WHERE ep.session_id = ? AND ep.run_reason = 'codingagent' \
              AND instr(ep.executor_action, ?) > 0 ORDER BY ep.created_at ASC",

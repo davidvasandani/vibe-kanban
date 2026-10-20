@@ -45,6 +45,8 @@ enum StartFailure {
     /// An execution row is written, then the launch fails (as when the
     /// executable is missing or the worker is unavailable).
     LaunchFailed,
+    /// Handed to a worker whose acceptance never came back.
+    WorkerUnconfirmed,
 }
 
 #[derive(Default)]
@@ -206,7 +208,11 @@ impl DeliveryBackend for FakeBackend {
             if failure == Some(StartFailure::Outright) {
                 return Err("container unavailable".into());
             }
-            let status = if failure == Some(StartFailure::LaunchFailed) {
+            let unstarted = matches!(
+                failure,
+                Some(StartFailure::LaunchFailed | StartFailure::WorkerUnconfirmed)
+            );
+            let status = if unstarted {
                 ExecutionProcessStatus::Failed
             } else {
                 ExecutionProcessStatus::Running
@@ -214,6 +220,29 @@ impl DeliveryBackend for FakeBackend {
             let id = insert_turn(&self.pool, session_id, &prompt, status, None).await;
             if failure == Some(StartFailure::LaunchFailed) {
                 return Err("executable not found".into());
+            }
+            if failure == Some(StartFailure::WorkerUnconfirmed) {
+                // No worker_nodes fixture: relax the FK for this one insert.
+                sqlx::query("PRAGMA foreign_keys = OFF")
+                    .execute(&self.pool)
+                    .await
+                    .unwrap();
+                sqlx::query(
+                    "INSERT INTO execution_worker_jobs \
+                     (execution_process_id, worker_node_id, worker_job_id, request_digest) \
+                     VALUES (?, ?, ?, 'digest')",
+                )
+                .bind(id)
+                .bind(Uuid::new_v4())
+                .bind(Uuid::new_v4())
+                .execute(&self.pool)
+                .await
+                .unwrap();
+                sqlx::query("PRAGMA foreign_keys = ON")
+                    .execute(&self.pool)
+                    .await
+                    .unwrap();
+                return Err("worker acceptance timed out".into());
             }
             // The agent process was spawned: durable launch evidence.
             ExecutionProcess::update_pgid(&self.pool, id, 4242)
@@ -1337,5 +1366,72 @@ async fn a_boundary_for_an_older_turn_does_not_confirm_a_newer_one() {
     assert!(fx.starts().is_empty());
 
     fx.finalize(session_id).await;
+    assert_eq!(fx.starts().len(), 1);
+}
+
+// A worker that may have started the turn without confirming it: never
+// reported as delivered and never resent automatically (it could run twice);
+// an explicit session choice is consent to send it again.
+#[tokio::test]
+async fn an_unconfirmed_worker_launch_is_not_resent_automatically() {
+    let fx = Fixture::new().await;
+    let (_, session_id) = fx.linked_workspace().await;
+    fx.waiting(session_id).await;
+    fx.backend.state().start_failures = vec![StartFailure::WorkerUnconfirmed];
+    let comment = fx.post("answer");
+
+    let first = fx.reply(comment, None).await;
+    assert_eq!(first.state, IssueCommentDeliveryState::Pending);
+    sqlx::query("UPDATE issue_comment_deliveries SET next_attempt_at = ? WHERE id = ?")
+        .bind(Utc::now() - ChronoDuration::seconds(1))
+        .bind(first.id)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    fx.dispatcher.sweep().await.unwrap();
+    let uncertain = IssueCommentDelivery::find_by_id(&fx.pool, first.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(uncertain.state, IssueCommentDeliveryState::Failed);
+    assert_eq!(
+        uncertain.reason,
+        Some(IssueCommentDeliveryReason::LaunchUncertain)
+    );
+    assert!(fx.starts().is_empty());
+
+    // A plain retry still sends nothing: the session's latest turn is the
+    // failed attempt, so only an explicit choice may continue it.
+    let plain = fx.reply(comment, None).await;
+    assert_ne!(plain.state, IssueCommentDeliveryState::Delivered);
+    assert!(fx.starts().is_empty());
+    let chosen = fx.reply(comment, Some(session_id)).await;
+    assert_eq!(chosen.state, IssueCommentDeliveryState::Delivered);
+    assert_eq!(fx.starts().len(), 1);
+}
+
+// Startup orphan cleanup marks interrupted turns without `finalize_task`;
+// once startup has decided not to resume them they are boundaries.
+#[tokio::test]
+async fn turns_interrupted_by_a_restart_become_boundaries_after_startup() {
+    let fx = Fixture::new().await;
+    let (_, session_id) = fx.linked_workspace().await;
+    insert_turn(
+        &fx.pool,
+        session_id,
+        "work",
+        ExecutionProcessStatus::Interrupted,
+        None,
+    )
+    .await;
+    let delivery = fx
+        .reply(fx.post("continue with this"), Some(session_id))
+        .await;
+    assert_eq!(delivery.state, IssueCommentDeliveryState::Pending);
+    fx.dispatcher.sweep().await.unwrap();
+    assert!(fx.starts().is_empty());
+
+    fx.dispatcher.mark_startup_reconciled();
+    fx.dispatcher.sweep().await.unwrap();
     assert_eq!(fx.starts().len(), 1);
 }

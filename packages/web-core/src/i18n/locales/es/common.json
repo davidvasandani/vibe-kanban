@@ -605,7 +605,8 @@
         "comment_deleted": "comentario eliminado",
         "remote_unavailable": "no se pudo contactar con el servidor de incidencias",
         "unauthorized": "sin permiso para leer esta incidencia",
-        "start_failed": "no se pudo iniciar el agente"
+        "start_failed": "no se pudo iniciar el agente",
+        "launch_uncertain": "puede que un worker ya lo haya iniciado; elige la sesión para enviarlo de nuevo"
       }
     }
   },

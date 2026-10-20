@@ -927,7 +927,7 @@ allow_stopped_target: boolean, created_at: string, updated_at: string, delivered
 
 export type IssueCommentDeliveryState = "pending" | "dispatching" | "delivered" | "needs_target" | "no_target" | "failed" | "blocked" | "cancelled";
 
-export type IssueCommentDeliveryReason = "agent_running" | "queued_message" | "retry_scheduled" | "no_linked_workspace" | "workspace_other_host" | "workspace_archived" | "issue_terminal" | "no_sessions" | "turn_stopped" | "target_not_linked" | "ambiguous" | "self_target" | "loop_guard" | "comment_deleted" | "remote_unavailable" | "unauthorized" | "start_failed";
+export type IssueCommentDeliveryReason = "agent_running" | "queued_message" | "retry_scheduled" | "no_linked_workspace" | "workspace_other_host" | "workspace_archived" | "issue_terminal" | "no_sessions" | "turn_stopped" | "target_not_linked" | "ambiguous" | "self_target" | "loop_guard" | "comment_deleted" | "remote_unavailable" | "unauthorized" | "start_failed" | "launch_uncertain";
 
 export type IssueCommentDeliverySource = "ui" | "mcp";
 

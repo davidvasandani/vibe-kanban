@@ -605,7 +605,8 @@
         "comment_deleted": "评论已删除",
         "remote_unavailable": "无法连接议题服务器",
         "unauthorized": "无权读取此议题",
-        "start_failed": "无法启动智能体"
+        "start_failed": "无法启动智能体",
+        "launch_uncertain": "工作节点可能已开始执行——选择会话以重新发送"
       }
     }
   },

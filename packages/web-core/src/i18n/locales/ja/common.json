@@ -605,7 +605,8 @@
         "comment_deleted": "コメントは削除されました",
         "remote_unavailable": "課題サーバーに接続できません",
         "unauthorized": "この課題を読む権限がありません",
-        "start_failed": "エージェントを開始できませんでした"
+        "start_failed": "エージェントを開始できませんでした",
+        "launch_uncertain": "ワーカーがすでに開始した可能性があります。再送するにはセッションを選択してください"
       }
     }
   },

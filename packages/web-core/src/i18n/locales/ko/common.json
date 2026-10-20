@@ -605,7 +605,8 @@
         "comment_deleted": "댓글 삭제됨",
         "remote_unavailable": "이슈 서버에 연결할 수 없음",
         "unauthorized": "이 이슈를 읽을 권한이 없음",
-        "start_failed": "에이전트를 시작할 수 없음"
+        "start_failed": "에이전트를 시작할 수 없음",
+        "launch_uncertain": "워커가 이미 시작했을 수 있음 — 다시 보내려면 세션을 선택하세요"
       }
     }
   },

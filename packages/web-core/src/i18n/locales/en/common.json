@@ -622,7 +622,8 @@
         "comment_deleted": "comment deleted",
         "remote_unavailable": "the issue server could not be reached",
         "unauthorized": "not allowed to read this issue",
-        "start_failed": "the agent could not be started"
+        "start_failed": "the agent could not be started",
+        "launch_uncertain": "a worker may have started it already — choose the session to send again"
       }
     }
   },
