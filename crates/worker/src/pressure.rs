@@ -53,7 +53,7 @@ impl fmt::Display for PressureRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "worker is under {} pressure (full avg60 {:.1}% >= {:.0}%); not admitting new executions",
+            "worker is under {} pressure (full avg60 {:.1}% >= {:.0}%); not admitting new executions. Wait for pressure to fall below the threshold, then retry.",
             self.resource, self.full_avg60, self.threshold
         )
     }
@@ -193,7 +193,7 @@ mod tests {
         assert_eq!(refusal.resource, "io");
         assert_eq!(
             refusal.to_string(),
-            "worker is under io pressure (full avg60 62.3% >= 40%); not admitting new executions"
+            "worker is under io pressure (full avg60 62.3% >= 40%); not admitting new executions. Wait for pressure to fall below the threshold, then retry."
         );
         assert!(pressure.status().admission_refusing);
 
