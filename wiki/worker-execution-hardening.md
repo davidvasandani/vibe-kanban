@@ -114,7 +114,11 @@ prior refusal or prove which process caused it.
   include wait-and-retry guidance. These diagnostics do not change admission,
   replay, retry count or placement behavior.
 
+Client-side recovery from such a refusal (typed 503, server suggestions,
+bounded backoff) is in [[refused-execution-recovery]].
+
 ## Contributed by
 
 - `vk/f268-harden-cluster-w`
 - `vk/bdd8-debug-vk-load`
+- `vk/bde2-graceful-degrada`
