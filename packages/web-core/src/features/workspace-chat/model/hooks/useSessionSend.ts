@@ -17,7 +17,11 @@ interface UseSessionSendOptions {
   /** Reconcile the process returned by a successful existing-session send. */
   onFollowUpAccepted?: (process: ExecutionProcess) => void;
   /** Observe a failed existing-session send, e.g. to offer recovery. */
-  onFollowUpFailed?: (prompt: string, error: unknown) => void;
+  onFollowUpFailed?: (
+    prompt: string,
+    error: unknown,
+    sessionId: string
+  ) => void;
 }
 
 interface UseSessionSendResult {
@@ -103,7 +107,7 @@ export function useSessionSend({
         } catch (e: unknown) {
           const err = e as { message?: string };
           setError(`Failed to send: ${err.message ?? 'Unknown error'}`);
-          onFollowUpFailed?.(trimmed, e);
+          onFollowUpFailed?.(trimmed, e, sessionId);
           return false;
         } finally {
           setIsSendingFollowUp(false);

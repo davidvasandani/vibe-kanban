@@ -578,14 +578,22 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
   const sendCleanupRef = useRef<SendCleanup>(NO_SEND_CLEANUP);
   const recoveryCleanupRef = useRef<SendCleanup>(NO_SEND_CLEANUP);
   const startRecoveryRef = useRef<
-    ((prompt: string, error: unknown) => boolean) | null
+    | ((
+        prompt: string,
+        error: unknown,
+        originSessionId: string | undefined
+      ) => boolean)
+    | null
   >(null);
-  const handleFollowUpFailed = useCallback((prompt: string, error: unknown) => {
-    const cleanup = sendCleanupRef.current;
-    if (startRecoveryRef.current?.(prompt, error)) {
-      recoveryCleanupRef.current = cleanup;
-    }
-  }, []);
+  const handleFollowUpFailed = useCallback(
+    (prompt: string, error: unknown, originSessionId: string) => {
+      const cleanup = sendCleanupRef.current;
+      if (startRecoveryRef.current?.(prompt, error, originSessionId)) {
+        recoveryCleanupRef.current = cleanup;
+      }
+    },
+    []
+  );
 
   // Send actions
   const {

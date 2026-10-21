@@ -130,10 +130,49 @@ describe('useWorkerUnavailableRecovery', () => {
     render();
     let started = true;
     act(() => {
-      started = hook.start('hello', new ApiError('boom', 500));
+      started = hook.start('hello', new ApiError('boom', 500), 'session');
     });
     expect(started).toBe(false);
     expect(hook.state).toBeNull();
+  });
+
+  it('ignores a refusal from a session that is no longer current', () => {
+    render('current');
+    let started = true;
+    act(() => {
+      started = hook.start('hello', refusal(), 'previous');
+    });
+    expect(started).toBe(false);
+    expect(hook.state).toBeNull();
+    expect(mocks.listWorkers).not.toHaveBeenCalled();
+  });
+
+  it('never auto-resends when the poll settles after the deadline', async () => {
+    mocks.listWorkers.mockResolvedValue([worker('think4', true)]);
+    render();
+    act(() => {
+      hook.start('hello', refusal(), 'session');
+    });
+    await flush();
+
+    // The next poll's request is slow: it resolves (with the server
+    // accepting again) only after the window has closed.
+    let resolveList: (workers: WorkerNode[]) => void = () => undefined;
+    mocks.listWorkers.mockImplementation(
+      () =>
+        new Promise<WorkerNode[]>((resolve) => {
+          resolveList = resolve;
+        })
+    );
+    await advance(5_000);
+    vi.setSystemTime(Date.now() + RECOVERY_WINDOW_MS);
+    await act(async () => {
+      resolveList([worker('think4')]);
+    });
+    await flush();
+
+    expect(resend).not.toHaveBeenCalled();
+    expect(hook.state?.phase).toBe('expired');
   });
 
   it('suggests eligible, non-refusing alternatives without resending', async () => {
@@ -146,7 +185,7 @@ describe('useWorkerUnavailableRecovery', () => {
     ]);
     render();
     act(() => {
-      hook.start('hello', refusal());
+      hook.start('hello', refusal(), 'session');
     });
     await flush();
 
@@ -161,7 +200,7 @@ describe('useWorkerUnavailableRecovery', () => {
     resend.mockResolvedValue(true);
     render();
     act(() => {
-      hook.start('hello', refusal());
+      hook.start('hello', refusal(), 'session');
     });
     await flush();
 
@@ -186,14 +225,14 @@ describe('useWorkerUnavailableRecovery', () => {
     mocks.listWorkers.mockResolvedValue([worker('think4', true)]);
     render();
     act(() => {
-      hook.start('hello', refusal());
+      hook.start('hello', refusal(), 'session');
     });
     await flush();
     const deadline = hook.state?.deadline;
 
     mocks.listWorkers.mockResolvedValue([worker('think4')]);
     resend.mockImplementation(async (prompt) => {
-      hook.start(prompt, refusal());
+      hook.start(prompt, refusal(), 'session');
       return false;
     });
     await advance(5_000);
@@ -209,7 +248,7 @@ describe('useWorkerUnavailableRecovery', () => {
     mocks.listWorkers.mockResolvedValue([worker('think4', true)]);
     render();
     act(() => {
-      hook.start('hello', refusal());
+      hook.start('hello', refusal(), 'session');
     });
     await flush();
 
@@ -243,7 +282,7 @@ describe('useWorkerUnavailableRecovery', () => {
     resend.mockResolvedValue(true);
     render();
     act(() => {
-      hook.start('hello', refusal());
+      hook.start('hello', refusal(), 'session');
     });
     await flush();
 
@@ -270,7 +309,7 @@ describe('useWorkerUnavailableRecovery', () => {
     );
     render();
     act(() => {
-      hook.start('hello', refusal());
+      hook.start('hello', refusal(), 'session');
     });
     await flush();
 
@@ -286,7 +325,7 @@ describe('useWorkerUnavailableRecovery', () => {
     mocks.listWorkers.mockResolvedValue([worker('think4', true)]);
     render();
     act(() => {
-      hook.start('hello', refusal());
+      hook.start('hello', refusal(), 'session');
     });
     await flush();
     act(() => hook.dismiss());
@@ -295,7 +334,7 @@ describe('useWorkerUnavailableRecovery', () => {
     expect(mocks.listWorkers).toHaveBeenCalledTimes(1);
 
     act(() => {
-      hook.start('hello', refusal());
+      hook.start('hello', refusal(), 'session');
     });
     await flush();
     render('other-session');

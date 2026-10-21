@@ -58,10 +58,15 @@ interface UseWorkerUnavailableRecoveryOptions {
 export interface UseWorkerUnavailableRecoveryResult {
   state: ServerRecoveryState | null;
   /**
-   * Begin (or continue) recovery for a failed send. Returns false when the
-   * error is not an unavailable execution server, so the caller shows it.
+   * Begin (or continue) recovery for a failed send to `originSessionId`.
+   * Returns false when the error is not an unavailable execution server, or
+   * the send belonged to a session that is no longer the current one.
    */
-  start: (prompt: string, error: unknown) => boolean;
+  start: (
+    prompt: string,
+    error: unknown,
+    originSessionId: string | undefined
+  ) => boolean;
   moveTo: (workerNodeId: string) => Promise<void>;
   retryNow: () => Promise<void>;
   dismiss: () => void;
@@ -95,6 +100,8 @@ export function useWorkerUnavailableRecovery({
   const busyRef = useRef(false);
   const resendRef = useRef(resend);
   resendRef.current = resend;
+  const sessionIdRef = useRef(sessionId);
+  sessionIdRef.current = sessionId;
   const profileRef = useRef(requiredExecutorProfile);
   profileRef.current = requiredExecutorProfile;
   const pollRef = useRef<(allowResend: boolean) => Promise<void>>(
@@ -200,6 +207,15 @@ export function useWorkerUnavailableRecovery({
     }
     if (generation !== generationRef.current || busyRef.current) return;
     const now = Date.now();
+    // The request may settle after the window closed (or the tab slept past
+    // it): never auto-resend once the advertised deadline has passed.
+    if (now >= session.deadline) {
+      clearTimer();
+      setState((current) =>
+        current ? { ...current, phase: 'expired', nextCheckAt: null } : null
+      );
+      return;
+    }
     const refused = workers.find(
       (worker) => worker.id === session.refusedWorkerId
     );
@@ -231,7 +247,16 @@ export function useWorkerUnavailableRecovery({
   };
 
   const start = useCallback(
-    (prompt: string, error: unknown): boolean => {
+    (
+      prompt: string,
+      error: unknown,
+      originSessionId: string | undefined
+    ): boolean => {
+      // A send that settles after the user switched sessions must not start
+      // recovery here: its resend would go to the wrong conversation.
+      if (!originSessionId || originSessionId !== sessionIdRef.current) {
+        return false;
+      }
       const data = asWorkerUnavailable(error);
       if (!data || !data.retryable) return false;
       const message = error instanceof Error ? error.message : String(error);
