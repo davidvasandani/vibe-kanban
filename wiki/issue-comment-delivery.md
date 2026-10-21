@@ -63,8 +63,10 @@ The fix is a durable boundary:
   session's latest coding-agent turn **synchronously**, before any early
   return, and only then emits the wake-up event.
 - The dispatcher may start a turn only when that row names the current
-  latest turn, or when the turn ended before this process started. No exit
-  monitor or in-memory queue survives a restart.
+  latest turn, or when the turn ended before startup reconciliation
+  finished (`mark_startup_reconciled`, after orphan cleanup and the resume
+  decision, because orphan cleanup marks turns `Interrupted` without
+  `finalize_task`). No exit monitor or in-memory queue survives a restart.
 - Do not identify the turn in the asynchronous event handler. A delayed
   event for turn A would "confirm" turn B.
 
@@ -87,7 +89,12 @@ Evidence is durable launch evidence from the same query:
 - or `coding_agent_turns.agent_session_id`.
 
 A marked turn that launched and then failed counts as delivered and is never
-replayed. When the latest turn is our own unlaunched attempt for the batch,
+replayed. A turn handed to a worker that never confirmed acceptance is
+**uncertain** (the worker deduplicates by execution id, so a resend with a new
+id could run twice): it becomes `failed{launch_uncertain}` and is resent only
+on an explicit session choice. Classify every failed start **immediately**
+from its own execution row; consent given for an earlier attempt must not
+carry over to a later uncertain one (Codex round 4). When the latest turn is our own unlaunched attempt for the batch,
 the agent did not stop, and that attempt counts as the boundary. Without
 that rule, a failed launch would turn its own retry into "turn stopped".
 

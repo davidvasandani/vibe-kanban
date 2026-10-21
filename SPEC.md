@@ -122,39 +122,45 @@ States:
 
 ### Dispatch
 
-- A per-session async mutex serializes dispatch on one host.
-- A row is claimed with a conditional update (`pending → dispatching`).
-- **Running/queued target:** stay `pending` (turn boundary). The exit
-  monitor calls `finalize_task` only when no queued follow-up was started.
-  A new `ContainerService::session_turn_finalized_sender()` broadcast from
-  `finalize_task` wakes the dispatcher immediately, so the comment is
-  delivered at the next boundary and **never starts a competing
-  execution**.
-- **Previous turn ended Failed/Killed:** the delivery becomes
-  `no_target{turn_stopped}`. The user retries explicitly, which matches
-  existing queue semantics.
-- **Idle target:**
-  - Check for an already-started execution whose prompt contains the
-    comment's delivery marker. If found, it is marked `delivered`.
-    This is the restart recovery between "start" and "record".
-  - Otherwise start the follow-up by calling the existing
-    `routes::sessions::follow_up` handler with the session's current
-    executor config, the same path as `run_session_prompt`.
-  - Several pending comments for one session are batched into **one**
-    prompt.
-- **Prompt framing:** attributed user content, not instructions. A header
-  `Issue comment from <author> on <issue key> (comment <id>)` precedes the
-  message, which is quoted. A versioned marker line `vk-issue-comment:<id>`
-  is used only for idempotency and rendering.
-- **Errors:** retry automatically 3 times with backoff (15 s, 60 s, 300 s),
-  then `failed`. A manual retry resets the attempts.
-- **Durability:**
-  - A sweeper runs every 15 s, plus once at startup.
-  - It re-dispatches `pending` rows that are due.
-  - It reconciles stale `dispatching` rows through the marker check.
-  - It requires the latest turn to have completed ≥ 5 s ago when it was not
-    woken by the finalize event. This avoids racing the queued-message
-    handoff.
+(This section was revised after three rounds of independent review.)
+
+- **Serialization.** A per-session async mutex serializes dispatch on one
+  host and is held until the turn has started. A row is claimed with a
+  conditional update (`pending → dispatching`).
+- **Busy target.** A running agent, a queued message, or a running
+  setup/cleanup script keeps the delivery `pending`.
+- **Turn boundary, recorded, never guessed.**
+  - `ContainerService::finalize_task` writes `session_turn_boundaries` for
+    the session's latest turn synchronously, before any early return.
+    `finalize_task` runs only when no queued follow-up was started.
+  - It then emits `turn_finalized_sender()` as a wake-up.
+  - A new turn may start only when that row names the current latest turn,
+    or when the turn ended before startup reconciliation finished.
+  - Elapsed time never authorizes a dispatch, so the exit monitor's
+    queued-message handoff is never raced.
+- **Stopped turn.** Implicit delivery to a failed/killed turn becomes
+  `no_target{turn_stopped}`. An explicit choice may resume it.
+- **Idle target.**
+  - **Evidence check.** An earlier attempt counts as delivered only if the
+    agent was **launched**: `pgid`, an accepted worker job, or the vendor
+    agent's session id. An execution row alone is not evidence.
+    - A worker that never confirmed acceptance is `failed{launch_uncertain}`.
+      It is not resent automatically.
+    - The latest turn being our own unlaunched attempt counts as a boundary,
+      not a stopped agent.
+  - **Re-check before launch.** The comment is re-read, and the issue status
+    and the workspace's remote link are re-checked.
+  - **Snapshot, then start.** The exact text is persisted before launch. The
+    follow-up then starts through `routes::sessions::follow_up`.
+  - **Batching.** Pending comments are batched into one prompt.
+- **Prompt framing.** Attributed user content: a header plus quoted text,
+  with a line-start marker `<!-- vk-issue-comment:v1:<id> -->`.
+- **Errors.** Two automatic retries with backoff (15 s, 60 s), then
+  `failed`. A manual retry resets the attempts.
+- **Durability.**
+  - Rows are resolved before insert, so no row waits without a target.
+  - A 15 s sweep and startup recovery resolve `dispatching` rows from launch
+    evidence.
 
 ### Edits and deletions
 
