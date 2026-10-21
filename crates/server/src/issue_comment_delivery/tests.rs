@@ -47,6 +47,9 @@ enum StartFailure {
     LaunchFailed,
     /// Handed to a worker whose acceptance never came back.
     WorkerUnconfirmed,
+    /// The turn starts, but neither the response nor its launch evidence has
+    /// been recorded yet when the caller gives up.
+    LostResponseUnrecorded,
 }
 
 #[derive(Default)]
@@ -243,6 +246,10 @@ impl DeliveryBackend for FakeBackend {
                     .await
                     .unwrap();
                 return Err("worker acceptance timed out".into());
+            }
+            if failure == Some(StartFailure::LostResponseUnrecorded) {
+                self.state().starts.push((session_id, prompt));
+                return Err("response lost".into());
             }
             // The agent process was spawned: durable launch evidence.
             ExecutionProcess::update_pgid(&self.pool, id, 4242)
@@ -885,14 +892,22 @@ async fn lost_start_response_is_recovered_from_evidence() {
     let fx = Fixture::new().await;
     let (_, session_id) = fx.linked_workspace().await;
     fx.waiting(session_id).await;
-    fx.backend.state().start_failures = vec![StartFailure::LostResponse];
+    fx.backend.state().start_failures = vec![StartFailure::LostResponseUnrecorded];
     let comment = fx.post("answer");
 
     let first = fx.reply(comment, None).await;
     assert_eq!(first.state, IssueCommentDeliveryState::Pending);
     assert_eq!(fx.starts().len(), 1);
 
-    // The started turn finishes; the retry comes due.
+    // The launch evidence lands later; the started turn finishes; the retry
+    // comes due and finds it.
+    sqlx::query(
+        "UPDATE execution_processes SET pgid = 4242 WHERE session_id = ? AND status = 'running'",
+    )
+    .bind(session_id)
+    .execute(&fx.pool)
+    .await
+    .unwrap();
     fx.complete_running(session_id, 300).await;
     sqlx::query("UPDATE issue_comment_deliveries SET next_attempt_at = ? WHERE id = ?")
         .bind(Utc::now() - ChronoDuration::seconds(1))
@@ -1377,27 +1392,17 @@ async fn an_unconfirmed_worker_launch_is_not_resent_automatically() {
     let fx = Fixture::new().await;
     let (_, session_id) = fx.linked_workspace().await;
     fx.waiting(session_id).await;
-    fx.backend.state().start_failures = vec![StartFailure::WorkerUnconfirmed];
+    fx.backend.state().start_failures = vec![StartFailure::WorkerUnconfirmed; 2];
     let comment = fx.post("answer");
 
+    // Classified at once: no automatic retry is even scheduled.
     let first = fx.reply(comment, None).await;
-    assert_eq!(first.state, IssueCommentDeliveryState::Pending);
-    sqlx::query("UPDATE issue_comment_deliveries SET next_attempt_at = ? WHERE id = ?")
-        .bind(Utc::now() - ChronoDuration::seconds(1))
-        .bind(first.id)
-        .execute(&fx.pool)
-        .await
-        .unwrap();
-    fx.dispatcher.sweep().await.unwrap();
-    let uncertain = IssueCommentDelivery::find_by_id(&fx.pool, first.id)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(uncertain.state, IssueCommentDeliveryState::Failed);
+    assert_eq!(first.state, IssueCommentDeliveryState::Failed);
     assert_eq!(
-        uncertain.reason,
+        first.reason,
         Some(IssueCommentDeliveryReason::LaunchUncertain)
     );
+    fx.dispatcher.sweep().await.unwrap();
     assert!(fx.starts().is_empty());
 
     // A plain retry still sends nothing: the session's latest turn is the
@@ -1405,8 +1410,36 @@ async fn an_unconfirmed_worker_launch_is_not_resent_automatically() {
     let plain = fx.reply(comment, None).await;
     assert_ne!(plain.state, IssueCommentDeliveryState::Delivered);
     assert!(fx.starts().is_empty());
+    // Explicit consent covers the known uncertain attempt only: if the
+    // resend is uncertain too, it stops again instead of retrying.
+    let resent = fx.reply(comment, Some(session_id)).await;
+    assert_eq!(resent.state, IssueCommentDeliveryState::Failed);
+    assert_eq!(
+        resent.reason,
+        Some(IssueCommentDeliveryReason::LaunchUncertain)
+    );
+    sqlx::query("UPDATE issue_comment_deliveries SET next_attempt_at = NULL")
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    fx.dispatcher.sweep().await.unwrap();
+    assert!(fx.starts().is_empty());
+
     let chosen = fx.reply(comment, Some(session_id)).await;
     assert_eq!(chosen.state, IssueCommentDeliveryState::Delivered);
+    assert_eq!(fx.starts().len(), 1);
+}
+
+// A start whose error response hides a real launch is delivered, not retried.
+#[tokio::test]
+async fn an_error_after_a_real_launch_is_recorded_as_delivered() {
+    let fx = Fixture::new().await;
+    let (_, session_id) = fx.linked_workspace().await;
+    fx.waiting(session_id).await;
+    fx.backend.state().start_failures = vec![StartFailure::LostResponse];
+    let delivery = fx.reply(fx.post("answer"), None).await;
+    assert_eq!(delivery.state, IssueCommentDeliveryState::Delivered);
+    assert!(delivery.execution_process_id.is_some());
     assert_eq!(fx.starts().len(), 1);
 }
 

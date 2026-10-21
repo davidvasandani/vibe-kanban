@@ -1095,6 +1095,25 @@ impl<B: DeliveryBackend> IssueCommentDispatcher<B> {
             }))
     }
 
+    /// The most recent attempt carrying `comment_id`, classified the same way.
+    async fn latest_attempt(
+        &self,
+        session_id: Uuid,
+        comment_id: Uuid,
+    ) -> Result<EarlierAttempt, sqlx::Error> {
+        let turns = ExecutionProcess::find_coding_agent_turns_with_marker(
+            &self.pool,
+            session_id,
+            &stored_marker_needle(comment_id),
+        )
+        .await?;
+        Ok(match turns.last() {
+            Some(turn) if turn.launched => EarlierAttempt::Launched(turn.id),
+            Some(turn) if turn.uncertain => EarlierAttempt::Uncertain(turn.id),
+            _ => EarlierAttempt::None,
+        })
+    }
+
     /// Record an unknown worker launch: visible, never auto-retried.
     async fn fail_uncertain(
         &self,
@@ -1313,13 +1332,38 @@ impl<B: DeliveryBackend> IssueCommentDispatcher<B> {
                 );
             }
             Err(error) => {
-                for row in &rows {
-                    self.retry_or_fail(
-                        row,
-                        IssueCommentDeliveryReason::StartFailed,
-                        &format!("could not start a turn in session {}: {error}", session.id),
-                    )
-                    .await?;
+                // Classify this attempt now, from its own execution row: an
+                // error response does not mean nothing started. Consent to
+                // resend covered only earlier attempts, so an uncertain one
+                // here always stops automatic retries.
+                for (row, comment) in &ready {
+                    match self.latest_attempt(session.id, row.comment_id).await? {
+                        EarlierAttempt::Launched(execution_id) => {
+                            IssueCommentDelivery::mark_delivered(
+                                &self.pool,
+                                row.id,
+                                execution_id,
+                                &comment.message,
+                                Some(comment.updated_at),
+                                Utc::now(),
+                            )
+                            .await?;
+                        }
+                        EarlierAttempt::Uncertain(execution_id) => {
+                            self.fail_uncertain(row, execution_id).await?;
+                        }
+                        EarlierAttempt::None => {
+                            self.retry_or_fail(
+                                row,
+                                IssueCommentDeliveryReason::StartFailed,
+                                &format!(
+                                    "could not start a turn in session {}: {error}",
+                                    session.id
+                                ),
+                            )
+                            .await?;
+                        }
+                    }
                 }
             }
         }
