@@ -30,6 +30,7 @@ import { useExecutorConfig } from '@/shared/hooks/useExecutorConfig';
 import { useSessionMessageEditor } from '../model/hooks/useSessionMessageEditor';
 import { useSessionQueueInteraction } from '../model/hooks/useSessionQueueInteraction';
 import { useSessionSend } from '../model/hooks/useSessionSend';
+import { useWorkerUnavailableRecovery } from '../model/hooks/useWorkerUnavailableRecovery';
 import { useSessionAttachments } from '../model/hooks/useSessionAttachments';
 import { useMessageEditRetry } from '../model/hooks/useMessageEditRetry';
 import { useBranchStatus } from '@/shared/hooks/useBranchStatus';
@@ -95,6 +96,20 @@ const RESUME_INTERRUPTED_PROMPT =
   'The previous run was interrupted by a vibe-kanban restart before it could finish. Review the current state of the working tree and continue the task from where it left off.';
 
 /** Compute execution status from boolean flags */
+/** What a successful send clears, captured when the send starts. */
+interface SendCleanup {
+  clearsComposer: boolean;
+  isSlashCommand: boolean;
+  /** Composer text at send time; a later edit is never cleared. */
+  composerText: string | null;
+}
+
+const NO_SEND_CLEANUP: SendCleanup = {
+  clearsComposer: false,
+  isSlashCommand: false,
+  composerText: null,
+};
+
 function computeExecutionStatus(params: {
   isInFeedbackMode: boolean;
   isInEditMode: boolean;
@@ -558,6 +573,28 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
     refreshQueueStatus,
   } = useSessionQueueInteraction({ sessionId });
 
+  // How to finish a send once it succeeds, for the send in flight and for a
+  // send that recovery resends later (the composer may hold its prompt).
+  const sendCleanupRef = useRef<SendCleanup>(NO_SEND_CLEANUP);
+  const recoveryCleanupRef = useRef<SendCleanup>(NO_SEND_CLEANUP);
+  const startRecoveryRef = useRef<
+    | ((
+        prompt: string,
+        error: unknown,
+        originSessionId: string | undefined
+      ) => boolean)
+    | null
+  >(null);
+  const handleFollowUpFailed = useCallback(
+    (prompt: string, error: unknown, originSessionId: string) => {
+      const cleanup = sendCleanupRef.current;
+      if (startRecoveryRef.current?.(prompt, error, originSessionId)) {
+        recoveryCleanupRef.current = cleanup;
+      }
+    },
+    []
+  );
+
   // Send actions
   const {
     send,
@@ -571,6 +608,7 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
     onSelectSession,
     executorConfig,
     onFollowUpAccepted: reconcileExecutionProcess,
+    onFollowUpFailed: handleFollowUpFailed,
   });
 
   const sessionHasRunningAgent = useMemo(
@@ -645,6 +683,95 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
     sessionId,
   ]);
 
+  const completeSuccessfulSend = useCallback(
+    async (cleanup: SendCleanup) => {
+      if (
+        cleanup.clearsComposer &&
+        cleanup.composerText === localMessageRef.current
+      ) {
+        cancelDebouncedSave();
+        setLocalMessage('');
+        clearUploadedAttachments();
+        if (isNewSessionMode) await clearDraft();
+        if (!cleanup.isSlashCommand) {
+          reviewContext?.clearComments();
+        }
+      }
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          onScrollToBottom('auto');
+        });
+      });
+    },
+    [
+      cancelDebouncedSave,
+      setLocalMessage,
+      clearUploadedAttachments,
+      isNewSessionMode,
+      clearDraft,
+      reviewContext,
+      onScrollToBottom,
+    ]
+  );
+
+  const recoveryProfile = executorConfig
+    ? executorConfig.variant
+      ? `${executorConfig.executor}:${executorConfig.variant}`
+      : executorConfig.executor
+    : undefined;
+  const currentSessionIdRef = useRef(sessionId);
+  currentSessionIdRef.current = sessionId;
+  const resendAfterRecovery = useCallback(
+    async (prompt: string) => {
+      const cleanup = recoveryCleanupRef.current;
+      const originSessionId = currentSessionIdRef.current;
+      sendCleanupRef.current = cleanup;
+      onScrollToBottom('auto');
+      const success = await send(prompt);
+      // The composer, attachments and review comments now belong to whatever
+      // session is shown; clear them only if that is still the origin.
+      if (success && currentSessionIdRef.current === originSessionId) {
+        clearError();
+        const keepsComposer =
+          !cleanup.clearsComposer ||
+          cleanup.composerText !== localMessageRef.current;
+        await completeSuccessfulSend(cleanup);
+        // A successful follow-up deletes the session's saved draft. Text the
+        // user typed while recovery waited stays in the composer, so save it
+        // again or it is lost on reload.
+        if (keepsComposer && localMessageRef.current.trim() && executorConfig) {
+          await saveToScratch(localMessageRef.current, executorConfig);
+        }
+      }
+      return success;
+    },
+    [
+      clearError,
+      completeSuccessfulSend,
+      executorConfig,
+      onScrollToBottom,
+      saveToScratch,
+      send,
+    ]
+  );
+  // An agent started by another route (a restart, another tab) must finish
+  // before recovery resends on its own.
+  const sessionHasRunningAgentRef = useRef(sessionHasRunningAgent);
+  sessionHasRunningAgentRef.current = sessionHasRunningAgent;
+  const canAutoResend = useCallback(
+    () => !sessionHasRunningAgentRef.current,
+    []
+  );
+  const serverRecovery = useWorkerUnavailableRecovery({
+    sessionId: isNewSessionMode ? undefined : sessionId,
+    workspaceId,
+    requiredExecutorProfile: recoveryProfile,
+    resend: resendAfterRecovery,
+    canAutoResend,
+  });
+  const { start: startRecovery, dismiss: dismissRecovery } = serverRecovery;
+  startRecoveryRef.current = startRecovery;
+
   const handleSend = useCallback(async () => {
     // Sending with an empty editor in an existing session submits the
     // default continue prompt advertised by the placeholder.
@@ -660,34 +787,28 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
 
     onScrollToBottom('auto');
 
+    // A new send supersedes any recovery still waiting on an older one.
+    dismissRecovery();
+    const cleanup = {
+      clearsComposer: true,
+      isSlashCommand,
+      composerText: localMessage,
+    };
+    sendCleanupRef.current = cleanup;
     const success = await send(prompt);
     if (success) {
-      cancelDebouncedSave();
-      setLocalMessage('');
-      clearUploadedAttachments();
-      if (isNewSessionMode) await clearDraft();
-      if (!isSlashCommand) {
-        reviewContext?.clearComments();
-      }
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          onScrollToBottom('auto');
-        });
-      });
+      await completeSuccessfulSend(cleanup);
     }
   }, [
     onScrollToBottom,
     send,
     localMessage,
     reviewMarkdown,
-    cancelDebouncedSave,
-    setLocalMessage,
-    clearUploadedAttachments,
     isNewSessionMode,
     hasInitialValue,
     isScratchLoading,
-    clearDraft,
-    reviewContext,
+    completeSuccessfulSend,
+    dismissRecovery,
   ]);
 
   // Interrupted-run resume affordance: the latest coding-agent process in
@@ -703,8 +824,10 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
 
   const handleResumeInterrupted = useCallback(async () => {
     onScrollToBottom('auto');
+    dismissRecovery();
+    sendCleanupRef.current = NO_SEND_CLEANUP;
     await send(RESUME_INTERRUPTED_PROMPT);
-  }, [send, onScrollToBottom]);
+  }, [send, onScrollToBottom, dismissRecovery]);
 
   // Track previous process count for queue refresh
   const prevProcessCountRef = useRef(processes.length);
@@ -734,6 +857,8 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
     const { prompt } = buildAgentPrompt(localMessage, [reviewMarkdown]);
 
     cancelDebouncedSave();
+    // The queued message supersedes any refused send awaiting recovery.
+    dismissRecovery();
     await saveToScratch(localMessage, executorConfig);
     await queueMessage(prompt, executorConfig);
 
@@ -742,6 +867,7 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
     clearUploadedAttachments();
     reviewContext?.clearComments();
   }, [
+    dismissRecovery,
     localMessage,
     reviewMarkdown,
     executorConfig,
@@ -855,6 +981,8 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
   const handleSubmitEdit = useCallback(async () => {
     if (!editContext.activeEdit || !localMessage.trim() || !executorConfig)
       return;
+    // The edited retry supersedes any refused send still awaiting recovery.
+    dismissRecovery();
     editRetryMutation.mutate({
       message: localMessage,
       executorConfig,
@@ -869,6 +997,7 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
     branchStatus,
     processes,
     editRetryMutation,
+    dismissRecovery,
   ]);
 
   // Handle cancel edit mode
@@ -1398,7 +1527,27 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
             }
           : undefined
       }
-      error={sendError}
+      serverRecoveryNotice={
+        serverRecovery.state
+          ? {
+              phase: serverRecovery.state.phase,
+              server: serverRecovery.state.refusedWorker,
+              message: serverRecovery.state.message,
+              alternatives: serverRecovery.state.alternatives.map((worker) => ({
+                id: worker.id,
+                label: worker.hostname,
+              })),
+              nextCheckAt: serverRecovery.state.nextCheckAt,
+              deadline: serverRecovery.state.deadline,
+              error: serverRecovery.state.error,
+              onMoveTo: (workerNodeId) =>
+                void serverRecovery.moveTo(workerNodeId),
+              onRetryNow: () => void serverRecovery.retryNow(),
+              onDismiss: serverRecovery.dismiss,
+            }
+          : undefined
+      }
+      error={serverRecovery.state ? null : sendError}
       agent={effectiveExecutor}
       todos={todos}
       inProgressTodo={inProgressTodo}

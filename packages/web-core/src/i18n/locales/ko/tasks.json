@@ -451,6 +451,17 @@
       "resume": "재개",
       "resuming": "재개 중"
     },
+    "serverRecovery": {
+      "suggesting": "{{server}}이(가) 지금은 새 작업을 받지 않습니다. 다른 서버에서 이 세션을 계속하세요:",
+      "waiting": "{{server}}이(가) 지금은 새 작업을 받지 않으며, 이 세션을 이어받을 수 있는 다른 서버도 없습니다. Vibe Kanban이 계속 확인하다가 {{server}}이(가) 복구되면 메시지를 보냅니다(최대 {{minutes}}분 더).",
+      "nextCheck": "{{seconds}}초 후 다시 확인합니다.",
+      "moving": "이 세션을 다른 서버로 옮기는 중…",
+      "resending": "메시지를 보내는 중…",
+      "expired": "10분이 지나도 {{server}}을(를) 사용할 수 없습니다. 메시지가 전송되지 않았습니다.",
+      "moveTo": "{{server}}(으)로 옮기고 보내기",
+      "retryNow": "{{server}}에서 다시 시도",
+      "dismiss": "닫기"
+    },
     "workspace": {
       "create": "만들기",
       "creating": "만드는 중..."

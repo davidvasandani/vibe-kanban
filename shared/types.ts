@@ -304,6 +304,19 @@ run_on_coordinator: boolean, requested_worker_node_id: string | null, restart_ru
 
 export enum WorkspaceAffinityUpdateOutcome { updated = "updated", restarted = "restarted", restart_failed = "restart_failed", session_transfer_failed = "session_transfer_failed" }
 
+export type WorkerUnavailableReasonCode = "not_registered" | "offline" | "lease_expired" | "refusing";
+
+export type WorkerUnavailableErrorData = { worker_node_id: string | null, 
+/**
+ * Hostname, or the id when the worker is not registered.
+ */
+worker: string, reason: WorkerUnavailableReasonCode, 
+/**
+ * Every current reason is temporary; reserved so clients need not
+ * hard-code that.
+ */
+retryable: boolean, };
+
 export type WorkspaceAffinityUpdateResponse = { placement: WorkspacePlacement, outcome: WorkspaceAffinityUpdateOutcome, stopped_execution_id: string | null, started_execution: ExecutionProcess | null, message: string | null, };
 
 export enum WorkspaceAffinityKind { local = "local", automatic = "automatic", worker = "worker", unassigned = "unassigned" }

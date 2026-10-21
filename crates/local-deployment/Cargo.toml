@@ -46,4 +46,5 @@ portable-pty = "0.8"
 dotenv = "0.15"
 
 [dev-dependencies]
+reqwest = { workspace = true }
 tempfile = "3.8"

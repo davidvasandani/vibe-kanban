@@ -16,6 +16,12 @@ interface UseSessionSendOptions {
   executorConfig?: ExecutorConfig | null;
   /** Reconcile the process returned by a successful existing-session send. */
   onFollowUpAccepted?: (process: ExecutionProcess) => void;
+  /** Observe a failed existing-session send, e.g. to offer recovery. */
+  onFollowUpFailed?: (
+    prompt: string,
+    error: unknown,
+    sessionId: string
+  ) => void;
 }
 
 interface UseSessionSendResult {
@@ -45,6 +51,7 @@ export function useSessionSend({
   onSelectSession,
   executorConfig,
   onFollowUpAccepted,
+  onFollowUpFailed,
 }: UseSessionSendOptions): UseSessionSendResult {
   const { mutateAsync: createSession, isPending: isCreatingSession } =
     useCreateSession();
@@ -100,6 +107,7 @@ export function useSessionSend({
         } catch (e: unknown) {
           const err = e as { message?: string };
           setError(`Failed to send: ${err.message ?? 'Unknown error'}`);
+          onFollowUpFailed?.(trimmed, e, sessionId);
           return false;
         } finally {
           setIsSendingFollowUp(false);
@@ -114,6 +122,7 @@ export function useSessionSend({
       onSelectSession,
       executorConfig,
       onFollowUpAccepted,
+      onFollowUpFailed,
     ]
   );
 

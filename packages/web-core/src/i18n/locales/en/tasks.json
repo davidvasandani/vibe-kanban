@@ -176,6 +176,17 @@
       "resume": "Resume",
       "resuming": "Resuming"
     },
+    "serverRecovery": {
+      "suggesting": "{{server}} isn't accepting new work right now. Continue this session on another server:",
+      "waiting": "{{server}} isn't accepting new work right now, and no other server can continue this session. Vibe Kanban will keep checking and send your message when {{server}} recovers (up to {{minutes}} more min).",
+      "nextCheck": "Next check in {{seconds}}s.",
+      "moving": "Moving this session to another server…",
+      "resending": "Sending your message…",
+      "expired": "{{server}} is still unavailable after 10 minutes. Your message was not sent.",
+      "moveTo": "Move to {{server}} and send",
+      "retryNow": "Retry on {{server}}",
+      "dismiss": "Dismiss"
+    },
     "workspace": {
       "create": "Create",
       "creating": "Creating..."

@@ -451,6 +451,17 @@
       "resume": "恢復",
       "resuming": "恢復中"
     },
+    "serverRecovery": {
+      "suggesting": "{{server}} 目前不接受新工作。請在其他伺服器上繼續此工作階段:",
+      "waiting": "{{server}} 目前不接受新工作,且沒有其他伺服器可以繼續此工作階段。Vibe Kanban 會持續檢查,並在 {{server}} 恢復後傳送你的訊息(最多再等 {{minutes}} 分鐘)。",
+      "nextCheck": "{{seconds}} 秒後再次檢查。",
+      "moving": "正在將此工作階段移至其他伺服器…",
+      "resending": "正在傳送你的訊息…",
+      "expired": "10 分鐘後 {{server}} 仍無法使用。你的訊息未傳送。",
+      "moveTo": "移至 {{server}} 並傳送",
+      "retryNow": "在 {{server}} 上重試",
+      "dismiss": "關閉"
+    },
     "workspace": {
       "create": "建立",
       "creating": "建立中..."

@@ -17,8 +17,10 @@ use relay_hosts::{
     RelayApiError, RelayConnectionError, RelayHostLookupError, RelayPairingClientError,
 };
 use relay_webrtc::WebRtcError;
+use serde::{Deserialize, Serialize};
 use services::services::{
     browser::types::BrowserSessionError,
+    cluster::{WorkerUnavailable, WorkerUnavailableReason},
     config::{ConfigError, EditorOpenError},
     container::ContainerError,
     file::FileError,
@@ -27,7 +29,9 @@ use services::services::{
 };
 use thiserror::Error;
 use trusted_key_auth::error::TrustedKeyAuthError;
+use ts_rs::TS;
 use utils::response::ApiResponse;
+use uuid::Uuid;
 use workspace_manager::WorkspaceError as WorkspaceManagerError;
 use worktree_manager::WorktreeError;
 
@@ -91,10 +95,11 @@ pub enum ApiError {
     /// could not be served, which is the whole diagnosis.
     #[error("{0}")]
     ClusterProvisioning(String),
-    /// The workspace's assigned execution server is not live. The message
-    /// names the server and tells the user to move the workspace or wait.
+    /// The workspace's assigned execution server is not live or refuses new
+    /// work. The message names the server and tells the user to move the
+    /// workspace or wait; the response also carries typed `error_data`.
     #[error("{0}")]
-    WorkerUnavailable(String),
+    WorkerUnavailable(WorkerUnavailable),
     #[error(transparent)]
     CommandBuilder(#[from] CommandBuildError),
     #[error(transparent)]
@@ -181,13 +186,56 @@ impl From<ContainerError> for ApiError {
             // Must stay above the catch-all: falling into `Container` is what
             // renders a failure as "An internal error occurred".
             ContainerError::SharedStore(msg) => ApiError::ClusterProvisioning(msg),
-            ContainerError::WorkerUnavailable(error) => {
-                ApiError::WorkerUnavailable(error.to_string())
-            }
+            ContainerError::WorkerUnavailable(error) => ApiError::WorkerUnavailable(error),
             // This typed error contains only curated, secret-free diagnostics.
             ContainerError::EnvironmentSecret(error) => ApiError::BadRequest(error.to_string()),
             ContainerError::GitHubOwnerToken(error) => ApiError::GitHubOwnerToken(error),
             other => ApiError::Container(other),
+        }
+    }
+}
+
+/// Machine-readable reason an execution server cannot take a dispatch.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerUnavailableReasonCode {
+    NotRegistered,
+    Offline,
+    LeaseExpired,
+    Refusing,
+}
+
+impl From<&WorkerUnavailableReason> for WorkerUnavailableReasonCode {
+    fn from(reason: &WorkerUnavailableReason) -> Self {
+        match reason {
+            WorkerUnavailableReason::NotRegistered => Self::NotRegistered,
+            WorkerUnavailableReason::Offline => Self::Offline,
+            WorkerUnavailableReason::LeaseExpired => Self::LeaseExpired,
+            WorkerUnavailableReason::Refusing { .. } => Self::Refusing,
+        }
+    }
+}
+
+/// `error_data` of the 503 answered when the workspace's execution server is
+/// unavailable, so the frontend can suggest another server or wait it out.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+pub struct WorkerUnavailableErrorData {
+    pub worker_node_id: Option<Uuid>,
+    /// Hostname, or the id when the worker is not registered.
+    pub worker: String,
+    pub reason: WorkerUnavailableReasonCode,
+    /// Every current reason is temporary; reserved so clients need not
+    /// hard-code that.
+    pub retryable: bool,
+}
+
+impl From<&WorkerUnavailable> for WorkerUnavailableErrorData {
+    fn from(error: &WorkerUnavailable) -> Self {
+        Self {
+            worker_node_id: error.worker_node_id,
+            worker: error.worker.clone(),
+            reason: (&error.reason).into(),
+            retryable: true,
         }
     }
 }
@@ -551,10 +599,10 @@ impl IntoResponse for ApiError {
                 "ClusterProvisioningError",
                 msg.clone(),
             ),
-            ApiError::WorkerUnavailable(msg) => ErrorInfo::with_status(
+            ApiError::WorkerUnavailable(error) => ErrorInfo::with_status(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "WorkerUnavailableError",
-                msg.clone(),
+                error.to_string(),
             ),
             ApiError::Multipart(_) => ErrorInfo::bad_request(
                 "MultipartError",
@@ -603,6 +651,16 @@ impl IntoResponse for ApiError {
         let message = info
             .message
             .unwrap_or_else(|| format!("{}: {}", info.error_type, self));
+        // The browser matches on `error_data` to offer recovery; every other
+        // client (MCP tools) reads `message`, so both are sent.
+        if let ApiError::WorkerUnavailable(error) = &self {
+            let response =
+                ApiResponse::<(), WorkerUnavailableErrorData>::error_with_data_and_message(
+                    WorkerUnavailableErrorData::from(error),
+                    &message,
+                );
+            return (info.status, Json(response)).into_response();
+        }
         let response = ApiResponse::<()>::error(&message);
         (info.status, Json(response)).into_response()
     }
@@ -774,6 +832,7 @@ mod cluster_provisioning_error_tests {
 
         let response = ApiError::from(ContainerError::WorkerUnavailable(WorkerUnavailable {
             worker: "think5".into(),
+            worker_node_id: None,
             last_heartbeat_at: None,
             reason: WorkerUnavailableReason::Offline,
         }))
@@ -788,6 +847,49 @@ mod cluster_provisioning_error_tests {
         );
         assert!(body.contains("Move this workspace to another execution server"));
         assert!(!body.contains("An internal error occurred"), "{body}");
+    }
+
+    /// The contract the chat's recovery banner and MCP clients both rely on:
+    /// a 503 with typed `error_data` *and* a human `message`.
+    #[tokio::test]
+    async fn refusing_worker_is_a_503_with_typed_error_data_and_message() {
+        use services::services::cluster::{WorkerUnavailable, WorkerUnavailableReason};
+
+        let worker_node_id = uuid::Uuid::from_u128(0x96eca719);
+        let response = ApiError::from(ContainerError::WorkerUnavailable(WorkerUnavailable {
+            worker: "think4".into(),
+            worker_node_id: Some(worker_node_id),
+            last_heartbeat_at: None,
+            reason: WorkerUnavailableReason::Refusing {
+                detail: "worker is under io pressure (full avg60 58.9% >= 40%); not admitting new executions.".into(),
+            },
+        }))
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["success"], false);
+        assert_eq!(
+            body["error_data"],
+            serde_json::json!({
+                "worker_node_id": worker_node_id,
+                "worker": "think4",
+                "reason": "refusing",
+                "retryable": true,
+            })
+        );
+        let message = body["message"].as_str().unwrap();
+        assert!(
+            message.starts_with(
+                "Execution server think4 is not accepting new executions: worker is under io pressure"
+            ),
+            "{message}"
+        );
+        assert!(
+            message.ends_with("retry once think4 recovers."),
+            "{message}"
+        );
     }
 
     #[tokio::test]

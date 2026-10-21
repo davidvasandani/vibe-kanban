@@ -25,6 +25,10 @@ import {
   DropdownMenuSeparator,
 } from './Dropdown';
 import { PrimaryButton } from './PrimaryButton';
+import {
+  ServerRecoveryBanner,
+  type ServerRecoveryNoticeProps,
+} from './ServerRecoveryBanner';
 import type { LocalAttachmentMetadata } from './WorkspaceContext';
 import { ToolbarDropdown, ToolbarIconButton } from './Toolbar';
 import { ContextUsageGauge, type ContextUsageInfo } from './ContextUsageGauge';
@@ -214,6 +218,8 @@ interface SessionChatBoxProps<TExecutor extends string = string> {
   askQuestionMode?: AskQuestionModeProps;
   reviewComments?: ReviewCommentsProps;
   interruptedNotice?: InterruptedNoticeProps;
+  /** The session's execution server refused a message; offer recovery. */
+  serverRecoveryNotice?: ServerRecoveryNoticeProps;
   toolbarActions?: ToolbarActionsProps;
   modelSelector?: ReactNode;
   error?: string | null;
@@ -281,6 +287,7 @@ export function SessionChatBox<TExecutor extends string = string>({
   askQuestionMode,
   reviewComments,
   interruptedNotice,
+  serverRecoveryNotice,
   toolbarActions,
   modelSelector,
   error,
@@ -718,6 +725,12 @@ export function SessionChatBox<TExecutor extends string = string>({
             actionIcon={interruptedNotice.isResuming ? 'spinner' : undefined}
           />
         </div>
+      );
+    }
+
+    if (serverRecoveryNotice) {
+      banners.push(
+        <ServerRecoveryBanner key="server-recovery" {...serverRecoveryNotice} />
       );
     }
 

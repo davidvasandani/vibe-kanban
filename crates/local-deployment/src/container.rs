@@ -64,7 +64,10 @@ use serde_json::json;
 use services::services::{
     analytics::AnalyticsContext,
     approvals::{Approvals, executor_approvals::ExecutorApprovalBridge},
-    cluster::{ClusterConfig, WorkerClient, dispatch_liveness},
+    cluster::{
+        ClusterConfig, WorkerClient, WorkerClientError, WorkerUnavailable, WorkerUnavailableReason,
+        dispatch_liveness,
+    },
     config::{Config, DEFAULT_COMMIT_REMINDER_PROMPT},
     container::{ContainerError, ContainerRef, ContainerService},
     diff_stream::{self, DiffStreamHandle},
@@ -4393,6 +4396,36 @@ fn failure_exit_status() -> std::process::ExitStatus {
     }
 }
 
+/// The error a rejected worker dispatch surfaces to the caller.
+///
+/// A 503 is a live worker refusing new work (memory/IO pressure, or draining):
+/// typed, so the API answers a retryable 503 naming the server and the client
+/// can offer another server or wait it out. Anything else stays opaque but
+/// names the server it was sent to.
+fn dispatch_failure_error(
+    worker_node_id: Uuid,
+    worker: Option<&WorkerNode>,
+    error: &WorkerClientError,
+) -> ContainerError {
+    let worker_hostname = worker.map(|worker| worker.hostname.as_str());
+    if let Some(detail) = error.service_unavailable_reason() {
+        return ContainerError::WorkerUnavailable(WorkerUnavailable {
+            worker: worker_hostname
+                .map(str::to_owned)
+                .unwrap_or_else(|| worker_node_id.to_string()),
+            worker_node_id: Some(worker_node_id),
+            last_heartbeat_at: worker.and_then(|worker| worker.last_heartbeat_at),
+            reason: WorkerUnavailableReason::Refusing {
+                detail: detail.to_owned(),
+            },
+        });
+    }
+    ContainerError::Other(anyhow!(
+        "Execution server {} ({worker_node_id}): {error}",
+        worker_hostname.unwrap_or("unknown")
+    ))
+}
+
 #[async_trait]
 impl ContainerService for LocalContainerService {
     async fn activate_workspace(&self, workspace_id: Uuid) -> Result<(), ContainerError> {
@@ -5152,10 +5185,11 @@ impl ContainerService for LocalContainerService {
                     Some(Utc::now()),
                 )
                 .await?;
-                return Err(ContainerError::Other(anyhow!(
-                    "Execution server {} ({worker_node_id}): {error}",
-                    worker_hostname.unwrap_or("unknown")
-                )));
+                return Err(dispatch_failure_error(
+                    worker_node_id,
+                    worker.as_ref(),
+                    &error,
+                ));
             }
         };
         if accepted.execution_id != execution_process.id
@@ -6601,6 +6635,58 @@ mod cluster_cleanup_tests {
             true,
             now
         ));
+    }
+
+    #[test]
+    fn a_503_dispatch_rejection_is_a_typed_refusal_naming_the_server() {
+        use reqwest::StatusCode;
+        use services::services::{
+            cluster::{WorkerClientError, WorkerUnavailableReason},
+            container::ContainerError,
+        };
+
+        use super::dispatch_failure_error;
+
+        let worker = worker(WorkerNodeStatus::Online, 30);
+        let detail = "worker is under io pressure (full avg60 58.9% >= 40%); not admitting new executions. Wait for pressure to fall below the threshold, then retry.";
+        let error = dispatch_failure_error(
+            worker.id,
+            Some(&worker),
+            &WorkerClientError::Rejected {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                message: detail.into(),
+            },
+        );
+        let ContainerError::WorkerUnavailable(unavailable) = &error else {
+            panic!("expected WorkerUnavailable, got {error:?}");
+        };
+        assert_eq!(unavailable.worker, "think3");
+        assert_eq!(unavailable.worker_node_id, Some(worker.id));
+        assert_eq!(
+            unavailable.reason,
+            WorkerUnavailableReason::Refusing {
+                detail: detail.into()
+            }
+        );
+        // The conversation log renders this as "Failed to start execution: …".
+        assert!(error.to_string().starts_with(
+            "Execution server think3 is not accepting new executions: worker is under io pressure"
+        ));
+
+        let other = dispatch_failure_error(
+            worker.id,
+            Some(&worker),
+            &WorkerClientError::Rejected {
+                status: StatusCode::BAD_REQUEST,
+                message: "bad".into(),
+            },
+        );
+        assert!(matches!(other, ContainerError::Other(_)));
+        assert!(
+            other
+                .to_string()
+                .starts_with(&format!("Execution server think3 ({})", worker.id))
+        );
     }
 }
 
