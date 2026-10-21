@@ -719,13 +719,18 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
       ? `${executorConfig.executor}:${executorConfig.variant}`
       : executorConfig.executor
     : undefined;
+  const currentSessionIdRef = useRef(sessionId);
+  currentSessionIdRef.current = sessionId;
   const resendAfterRecovery = useCallback(
     async (prompt: string) => {
       const cleanup = recoveryCleanupRef.current;
+      const originSessionId = currentSessionIdRef.current;
       sendCleanupRef.current = cleanup;
       onScrollToBottom('auto');
       const success = await send(prompt);
-      if (success) {
+      // The composer, attachments and review comments now belong to whatever
+      // session is shown; clear them only if that is still the origin.
+      if (success && currentSessionIdRef.current === originSessionId) {
         clearError();
         await completeSuccessfulSend(cleanup);
       }
