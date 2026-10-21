@@ -15,23 +15,39 @@ import {
   $isTableCellNode,
   TableCellHeaderStates,
 } from '@lexical/table';
-import { $isTextNode, type LexicalNode } from 'lexical';
+import { $isElementNode, $isTextNode, type LexicalNode } from 'lexical';
 
 const TABLE_ROW_REG_EXP = /^(?:\|)(.+)(?:\|)\s*$/;
 const TABLE_ROW_DIVIDER_REG_EXP = /^\|(?:\s*:?-+:?\s*\|)+\s*$/;
-// Cell separators are pipes not escaped with a backslash.
-const CELL_SEPARATOR_REG_EXP = /(?<!\\)\|/;
 
 function $createTableCell(textContent: string): TableCellNode {
-  textContent = textContent.replace(/\\n/g, '\n').replace(/\\\|/g, '|');
   const cell = $createTableCellNode(TableCellHeaderStates.NO_STATUS);
   $convertFromMarkdownString(textContent, TRANSFORMERS, cell);
   return cell;
 }
 
 function splitTableCells(textContent: string): string[] {
+  // Splits on unescaped pipes, honouring backslash parity as GFM does:
+  // `\|` is a literal pipe, while in `\\|` the backslash is escaped and the
+  // pipe separates cells. `\n` is a line break written by export. Other
+  // escapes are left for the cell's markdown.
   // Empty cells are kept so later cells stay in their column.
-  return textContent.split(CELL_SEPARATOR_REG_EXP).map((c) => c.trim());
+  const cells: string[] = [];
+  let cell = '';
+  for (let i = 0; i < textContent.length; i++) {
+    const char = textContent[i];
+    if (char === '\\' && i + 1 < textContent.length) {
+      const next = textContent[++i];
+      cell += next === '|' ? '|' : next === 'n' ? '\n' : char + next;
+    } else if (char === '|') {
+      cells.push(cell.trim());
+      cell = '';
+    } else {
+      cell += char;
+    }
+  }
+  cells.push(cell.trim());
+  return cells;
 }
 
 // Declines the match and leaves the line as ordinary text. On import the
@@ -67,7 +83,15 @@ export const TABLE_TRANSFORMER: ElementTransformer = {
       const cells = row.getChildren();
       const cellTexts = cells.map((cell) => {
         if (!$isTableCellNode(cell)) return '';
-        return traverseChildren(cell)
+        // Each block in the cell (usually a paragraph) goes on its own line.
+        return cell
+          .getChildren()
+          .map((block) =>
+            $isElementNode(block)
+              ? traverseChildren(block)
+              : block.getTextContent()
+          )
+          .join('\n')
           .replace(/\|/g, '\\|')
           .replace(/\n/g, '\\n');
       });

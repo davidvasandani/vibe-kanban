@@ -178,6 +178,15 @@ describe('TABLE_TRANSFORMER', () => {
     ]);
   });
 
+  it('splits on a pipe after an escaped backslash', () => {
+    const rows = onlyTable('| C:\\\\| next |\n|---|---|\n| a\\\\\\| b | c |');
+
+    expect(rows.map((r) => r.cells)).toEqual([
+      ['C:\\', 'next'],
+      ['a\\| b', 'c'],
+    ]);
+  });
+
   it('renders a plain table as before, with its header marked', () => {
     const rows = onlyTable('| Name | Value |\n| --- | --- |\n| x | 1 |');
 
@@ -190,6 +199,8 @@ describe('TABLE_TRANSFORMER', () => {
   it.each([
     '| | **A** | B |\n|---|---|---|\n| row | | 3 |',
     '| a \\| b | c |\n|---|---|\n| 1 | 2 |',
+    '| C:\\\\| a\\\\\\| b |\n|---|---|\n| 1 | 2 |',
+    '| C:\\\\new | two\\nlines |\n|---|---|\n| 1 | 2 |',
     '| A | B |\n|---|---|\n| 1 |',
   ])('re-imports its own export to the same table: %j', (markdown) => {
     const first = render(markdown);
