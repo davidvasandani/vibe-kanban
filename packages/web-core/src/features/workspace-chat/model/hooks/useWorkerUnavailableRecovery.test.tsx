@@ -321,6 +321,41 @@ describe('useWorkerUnavailableRecovery', () => {
     expect(hook.state?.error).toBe('Stop running lifecycle scripts first');
   });
 
+  it('does not restart when a resend in flight is refused after dismissal', async () => {
+    mocks.listWorkers.mockResolvedValue([worker('think4', true)]);
+    render();
+    act(() => {
+      hook.start('hello', refusal(), 'session');
+    });
+    await flush();
+
+    let refuse: () => void = () => undefined;
+    let restarted = true;
+    resend.mockImplementation(
+      (prompt) =>
+        new Promise<boolean>((resolve) => {
+          refuse = () => {
+            restarted = hook.start(prompt, refusal(), 'session');
+            resolve(false);
+          };
+        })
+    );
+    mocks.listWorkers.mockResolvedValue([worker('think4')]);
+    await advance(5_000);
+    expect(resend).toHaveBeenCalledTimes(1);
+
+    act(() => hook.dismiss());
+    await act(async () => {
+      refuse();
+    });
+    await flush();
+
+    expect(restarted).toBe(false);
+    expect(hook.state).toBeNull();
+    await advance(60_000);
+    expect(resend).toHaveBeenCalledTimes(1);
+  });
+
   it('stops polling when dismissed or when the session changes', async () => {
     mocks.listWorkers.mockResolvedValue([worker('think4', true)]);
     render();

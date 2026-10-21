@@ -98,6 +98,9 @@ export function useWorkerUnavailableRecovery({
   const continuedRef = useRef(false);
   // A move or resend is in flight; polls must neither act nor reschedule.
   const busyRef = useRef(false);
+  // Generation of the resend in flight, if any. Its failure reaches `start`
+  // through the send's own error callback, before `runResend` resumes.
+  const resendGenerationRef = useRef<number | null>(null);
   const resendRef = useRef(resend);
   resendRef.current = resend;
   const sessionIdRef = useRef(sessionId);
@@ -164,10 +167,14 @@ export function useWorkerUnavailableRecovery({
       );
       continuedRef.current = false;
       busyRef.current = true;
+      resendGenerationRef.current = generation;
       let ok = false;
       try {
         ok = await resendRef.current(session.prompt);
       } finally {
+        if (resendGenerationRef.current === generation) {
+          resendGenerationRef.current = null;
+        }
         if (generation === generationRef.current) busyRef.current = false;
       }
       if (generation !== generationRef.current) return;
@@ -255,6 +262,14 @@ export function useWorkerUnavailableRecovery({
       // A send that settles after the user switched sessions must not start
       // recovery here: its resend would go to the wrong conversation.
       if (!originSessionId || originSessionId !== sessionIdRef.current) {
+        return false;
+      }
+      // The user dismissed recovery (or a new send superseded it) while its
+      // resend was in flight: that resend's refusal must not restart it.
+      if (
+        resendGenerationRef.current !== null &&
+        resendGenerationRef.current !== generationRef.current
+      ) {
         return false;
       }
       const data = asWorkerUnavailable(error);
