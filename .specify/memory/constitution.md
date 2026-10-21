@@ -1364,6 +1364,10 @@ only adjacent semantically equal failures. The screenshot's multiline logger
 record is a required regression fixture. No new principle or version amendment
 is required.
 
+## Review: vk/5c0e-browser-scrolling
+
+Applied `/speckit.constitution`: II, III, IV and VI govern this change. Extend the existing guarded action protocol with typed scrolling, preserve session/control-generation boundaries and verify both frontend consumers. No new principle needed.
+
 ## Review: vk/e252-deliver-issue-co
 
 Applied `/speckit.constitution`. This task adds LVII (version 0.54.0).

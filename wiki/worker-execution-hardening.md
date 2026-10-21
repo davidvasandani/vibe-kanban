@@ -91,6 +91,30 @@ byte".
 and `ls /sys/fs/cgroup/system.slice/vibe-kanban-worker.service/jobs/` should
 list `shared` plus one `exec-<id>` per running execution.
 
+## Diagnosing a pressure refusal (2026-10-19)
+
+A follow-up on think4 failed at 20:10 UTC with IO `full avg60 41.6% >= 40%`.
+The same session completed another execution on think4 at 20:19 UTC, before
+any intervention. This was a transient admission refusal; the historical I/O
+producer was not established. Current low pressure does not disprove the
+prior refusal or prove which process caused it.
+
+- Find the failed execution's `execution_worker_jobs.worker_node_id`, join it
+  to `worker_nodes.hostname`, and correlate the coordinator journal timestamp.
+  A workspace's existing placement remains sticky even when another worker is
+  healthy. The scheduler's pressure penalty affects new placement.
+- Check that worker's `/health.pressure`: resource averages, threshold and
+  `admission_refusing`. Wait until pressure drops below the configured threshold
+  and retry. `avg60` is a smoothed average, not a promise of recovery in 60 seconds.
+- A dispatch makes at most one immediate retry for transient failures. That
+  retry is unlikely to resolve sustained pressure. Do not increase the threshold
+  or migrate a live session merely to hide the refusal.
+- Dispatch errors now name the assigned hostname and UUID; persisted failure
+  evidence includes `worker_hostname` and `worker_node_id`. Pressure errors
+  include wait-and-retry guidance. These diagnostics do not change admission,
+  replay, retry count or placement behavior.
+
 ## Contributed by
 
 - `vk/f268-harden-cluster-w`
+- `vk/bdd8-debug-vk-load`

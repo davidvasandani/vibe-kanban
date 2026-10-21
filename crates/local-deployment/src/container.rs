@@ -5137,8 +5137,11 @@ impl ContainerService for LocalContainerService {
         let accepted = match client.dispatch(worker_node_id, &dispatch).await {
             Ok(accepted) => accepted,
             Err(error) => {
+                let worker_hostname = worker.as_ref().map(|worker| worker.hostname.as_str());
                 let evidence = serde_json::json!({
                     "reason": "worker dispatch failed",
+                    "worker_node_id": worker_node_id,
+                    "worker_hostname": worker_hostname,
                     "error": error.to_string(),
                 });
                 ExecutionWorkerJob::update_state(
@@ -5149,7 +5152,10 @@ impl ContainerService for LocalContainerService {
                     Some(Utc::now()),
                 )
                 .await?;
-                return Err(ContainerError::Other(anyhow!(error)));
+                return Err(ContainerError::Other(anyhow!(
+                    "Execution server {} ({worker_node_id}): {error}",
+                    worker_hostname.unwrap_or("unknown")
+                )));
             }
         };
         if accepted.execution_id != execution_process.id

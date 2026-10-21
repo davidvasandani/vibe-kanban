@@ -92,6 +92,7 @@ contributed to it.
   whitespace, use product branding only as the empty-state fallback, and remain
   separate from visible breadcrumb identity.
 - [browser-session-control-arbiter.md](browser-session-control-arbiter.md) —
+  Touch/wheel scrolling, fractional deltas, bounded queues and gesture lifecycle (`vk/5c0e-browser-scrolling`);
   Mobile keyboard gesture focus, composition, plain-text clipboard fallbacks
   and control-scoped async results (`vk/5c0e-vk-browser`), plus
   Workspace browser sessions with shared human/agent control: the
@@ -325,7 +326,7 @@ contributed to it.
   (`vk/78a5-analyze-and-redu`). The summaries response is also bounded by a
   request-wide 3 s budget, using `get_within` with a last-known fallback, so
   cheap metadata never waits on git (`vk/b923-workspaces-loadi`).
-- [worker-execution-hardening.md](worker-execution-hardening.md) — Why each worker execution gets its own `jobs/exec-<id>` cgroup (and `jobs` becomes a parent with a `shared` leaf, because of the no-internal-process rule), PSI `full avg60` admission refusal that ranks a worker last rather than excluding it, and the startup-stall reaper (`Failed` is truthful once SIGKILL is pending; a pending spawn is reported, never dropped or published). Also the cancellation-straggler `killpg`, quiesce re-arm, the coordinator Indeterminate-event finalize, and the advisory `io.weight` on `none` schedulers (`vk/f268-harden-cluster-w`).
+- [worker-execution-hardening.md](worker-execution-hardening.md) — Why each worker execution gets its own `jobs/exec-<id>` cgroup (and `jobs` becomes a parent with a `shared` leaf, because of the no-internal-process rule), PSI `full avg60` admission refusal that ranks a worker last rather than excluding it, and the startup-stall reaper (`Failed` is truthful once SIGKILL is pending; a pending spawn is reported, never dropped or published). Also the cancellation-straggler `killpg`, quiesce re-arm, the coordinator Indeterminate-event finalize, and the advisory `io.weight` on `none` schedulers (`vk/f268-harden-cluster-w`). Pressure-refusal diagnosis, sticky placement, recovery evidence and worker identity in dispatch errors (`vk/bdd8-debug-vk-load`).
 - [worker-journal-agent-stream-boundary.md](worker-journal-agent-stream-boundary.md)
   — Worker `Structured` metadata (cancellation phases, worker/stream errors)
   must never be projected into agent stdout, where vendor parsers render it as

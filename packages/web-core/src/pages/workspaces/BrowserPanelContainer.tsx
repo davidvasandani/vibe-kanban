@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import {
+  useBrowserScrollInput,
+  type FramePoint,
+} from './useBrowserScrollInput';
 import { localBrowserOrigin } from './localBrowserHandoff';
 import { XIcon } from '@phosphor-icons/react';
 import type {
@@ -167,36 +171,53 @@ export function BrowserPanelContainer({
 
   // ── Input capture (only while we hold control) ─────────────────────────
   const textInputRef = useRef<BrowserTextInputHandle>(null);
+  const surfaceRef = useRef<HTMLDivElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
   const lastMouseMoveAtRef = useRef(0);
 
+  const frameWidth = frameSize?.width;
+  const frameHeight = frameSize?.height;
   const toFrameCoords = useCallback(
-    (clientX: number, clientY: number): { x: number; y: number } | null => {
+    (clientX: number, clientY: number): FramePoint | null => {
       const img = imgRef.current;
-      if (!img || !frameSize) return null;
+      if (!img || !frameWidth || !frameHeight) return null;
       const rect = img.getBoundingClientRect();
       if (rect.width <= 0 || rect.height <= 0) return null;
       // object-contain: the frame is letterboxed inside the rendered box.
       const scale = Math.min(
-        rect.width / frameSize.width,
-        rect.height / frameSize.height
+        rect.width / frameWidth,
+        rect.height / frameHeight
       );
       if (scale <= 0) return null;
-      const offsetX = (rect.width - frameSize.width * scale) / 2;
-      const offsetY = (rect.height - frameSize.height * scale) / 2;
+      const offsetX = (rect.width - frameWidth * scale) / 2;
+      const offsetY = (rect.height - frameHeight * scale) / 2;
       const x = (clientX - rect.left - offsetX) / scale;
       const y = (clientY - rect.top - offsetY) / scale;
-      if (x < 0 || y < 0 || x > frameSize.width || y > frameSize.height) {
+      if (x < 0 || y < 0 || x > frameWidth || y > frameHeight) {
         return null;
       }
-      return { x: Math.round(x), y: Math.round(y) };
+      return {
+        x: Math.round(x),
+        y: Math.round(y),
+        scale,
+        width: frameWidth * scale,
+        height: frameHeight * scale,
+      };
     },
-    [frameSize]
+    [frameWidth, frameHeight]
   );
+
+  const scrollInput = useBrowserScrollInput({
+    surfaceRef,
+    enabled: weControl,
+    context: `${selectedSessionId}:${connectionId}:${controlGeneration}`,
+    toFrameCoords,
+    sendInput,
+  });
 
   const handlePointerUp = useCallback(
     (e: React.PointerEvent) => {
-      if (!weControl) return;
+      if (scrollInput.pointerUp(e) || !weControl) return;
       const coords = toFrameCoords(e.clientX, e.clientY);
       if (!coords) return;
       e.preventDefault();
@@ -212,12 +233,12 @@ export function BrowserPanelContainer({
         button: toMouseButton(e.button),
       }).catch(() => {});
     },
-    [weControl, toFrameCoords, sendInput]
+    [weControl, toFrameCoords, sendInput, scrollInput]
   );
 
   const handlePointerMove = useCallback(
     (e: React.PointerEvent) => {
-      if (!weControl) return;
+      if (scrollInput.pointerMove(e) || !weControl) return;
       const now = Date.now();
       // Coalesce mouse moves to at most one input per 100ms.
       if (now - lastMouseMoveAtRef.current < 100) return;
@@ -230,7 +251,7 @@ export function BrowserPanelContainer({
         y: coords.y,
       }).catch(() => {});
     },
-    [weControl, toFrameCoords, sendInput]
+    [weControl, toFrameCoords, sendInput, scrollInput]
   );
 
   const handleKeyDown = useCallback(
@@ -415,6 +436,10 @@ export function BrowserPanelContainer({
       <div
         className="flex-1 min-h-0 flex items-center justify-center bg-black outline-none"
         tabIndex={0}
+        ref={surfaceRef}
+        onPointerDown={scrollInput.pointerDown}
+        onPointerCancel={scrollInput.pointerCancel}
+        onLostPointerCapture={scrollInput.pointerCancel}
         onPointerUp={handlePointerUp}
         onPointerMove={handlePointerMove}
         onKeyDown={handleKeyDown}
@@ -423,7 +448,10 @@ export function BrowserPanelContainer({
           e.preventDefault();
           textInputRef.current?.paste(e.clipboardData.getData('text/plain'));
         }}
-        style={{ cursor: weControl ? 'crosshair' : 'default' }}
+        style={{
+          cursor: weControl ? 'crosshair' : 'default',
+          touchAction: weControl ? 'none' : 'auto',
+        }}
       >
         {frameUrl ? (
           <img
