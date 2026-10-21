@@ -732,11 +732,27 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
       // session is shown; clear them only if that is still the origin.
       if (success && currentSessionIdRef.current === originSessionId) {
         clearError();
+        const keepsComposer =
+          !cleanup.clearsComposer ||
+          cleanup.composerText !== localMessageRef.current;
         await completeSuccessfulSend(cleanup);
+        // A successful follow-up deletes the session's saved draft. Text the
+        // user typed while recovery waited stays in the composer, so save it
+        // again or it is lost on reload.
+        if (keepsComposer && localMessageRef.current.trim() && executorConfig) {
+          await saveToScratch(localMessageRef.current, executorConfig);
+        }
       }
       return success;
     },
-    [clearError, completeSuccessfulSend, onScrollToBottom, send]
+    [
+      clearError,
+      completeSuccessfulSend,
+      executorConfig,
+      onScrollToBottom,
+      saveToScratch,
+      send,
+    ]
   );
   // An agent started by another route (a restart, another tab) must finish
   // before recovery resends on its own.
