@@ -1,14 +1,14 @@
-import { useEffect, useState } from "react";
-import { WarningIcon, XIcon } from "@phosphor-icons/react";
-import { useTranslation } from "react-i18next";
-import { PrimaryButton } from "./PrimaryButton";
+import { useEffect, useState } from 'react';
+import { WarningIcon, XIcon } from '@phosphor-icons/react';
+import { useTranslation } from 'react-i18next';
+import { PrimaryButton } from './PrimaryButton';
 
 export type ServerRecoveryPhase =
-  | "suggesting"
-  | "waiting"
-  | "moving"
-  | "resending"
-  | "expired";
+  | 'suggesting'
+  | 'waiting'
+  | 'moving'
+  | 'resending'
+  | 'expired';
 
 export interface ServerRecoveryNoticeProps {
   phase: ServerRecoveryPhase;
@@ -57,10 +57,10 @@ export function ServerRecoveryBanner({
   onRetryNow,
   onDismiss,
 }: ServerRecoveryNoticeProps) {
-  const { t } = useTranslation("tasks");
-  const counting = phase === "suggesting" || phase === "waiting";
+  const { t } = useTranslation('tasks');
+  const counting = phase === 'suggesting' || phase === 'waiting';
   const now = useNow(counting);
-  const busy = phase === "moving" || phase === "resending";
+  const busy = phase === 'moving' || phase === 'resending';
   const minutes = Math.max(1, Math.ceil((deadline - now) / 60_000));
   const seconds =
     nextCheckAt === null
@@ -69,16 +69,16 @@ export function ServerRecoveryBanner({
 
   const headline = (() => {
     switch (phase) {
-      case "suggesting":
-        return t("conversation.serverRecovery.suggesting", { server });
-      case "waiting":
-        return t("conversation.serverRecovery.waiting", { server, minutes });
-      case "moving":
-        return t("conversation.serverRecovery.moving");
-      case "resending":
-        return t("conversation.serverRecovery.resending");
-      case "expired":
-        return t("conversation.serverRecovery.expired", { server });
+      case 'suggesting':
+        return t('conversation.serverRecovery.suggesting', { server });
+      case 'waiting':
+        return t('conversation.serverRecovery.waiting', { server, minutes });
+      case 'moving':
+        return t('conversation.serverRecovery.moving');
+      case 'resending':
+        return t('conversation.serverRecovery.resending');
+      case 'expired':
+        return t('conversation.serverRecovery.expired', { server });
     }
   })();
 
@@ -94,7 +94,7 @@ export function ServerRecoveryBanner({
           <span className="text-xs text-low break-words">{message}</span>
           {counting && seconds !== null && (
             <span className="text-xs text-low">
-              {t("conversation.serverRecovery.nextCheck", { seconds })}
+              {t('conversation.serverRecovery.nextCheck', { seconds })}
             </span>
           )}
           {error && (
@@ -104,32 +104,32 @@ export function ServerRecoveryBanner({
         <button
           onClick={onDismiss}
           className="text-low hover:text-normal transition-colors p-1 -m-1"
-          title={t("conversation.serverRecovery.dismiss")}
-          aria-label={t("conversation.serverRecovery.dismiss")}
+          title={t('conversation.serverRecovery.dismiss')}
+          aria-label={t('conversation.serverRecovery.dismiss')}
         >
           <XIcon className="h-4 w-4" />
         </button>
       </div>
-      {(alternatives.length > 0 || phase === "expired" || busy) && (
+      {(alternatives.length > 0 || phase === 'expired' || busy) && (
         <div className="flex flex-wrap items-center gap-half pl-double">
           {alternatives.slice(0, MAX_SUGGESTIONS).map((alternative) => (
             <PrimaryButton
               key={alternative.id}
               variant="secondary"
-              value={t("conversation.serverRecovery.moveTo", {
+              value={t('conversation.serverRecovery.moveTo', {
                 server: alternative.label,
               })}
               onClick={() => onMoveTo(alternative.id)}
               disabled={busy}
             />
           ))}
-          {(phase === "expired" || busy) && (
+          {(phase === 'expired' || busy) && (
             <PrimaryButton
               variant="tertiary"
-              value={t("conversation.serverRecovery.retryNow", { server })}
+              value={t('conversation.serverRecovery.retryNow', { server })}
               onClick={onRetryNow}
               disabled={busy}
-              actionIcon={busy ? "spinner" : undefined}
+              actionIcon={busy ? 'spinner' : undefined}
             />
           )}
         </div>
