@@ -433,6 +433,17 @@
       "resume": "恢复",
       "resuming": "恢复中"
     },
+    "serverRecovery": {
+      "suggesting": "{{server}} 当前不接受新任务。请在其他服务器上继续此会话:",
+      "waiting": "{{server}} 当前不接受新任务,且没有其他服务器可以继续此会话。Vibe Kanban 将持续检查,并在 {{server}} 恢复后发送你的消息(最多再等 {{minutes}} 分钟)。",
+      "nextCheck": "{{seconds}} 秒后再次检查。",
+      "moving": "正在将此会话移至其他服务器…",
+      "resending": "正在发送你的消息…",
+      "expired": "10 分钟后 {{server}} 仍不可用。你的消息未发送。",
+      "moveTo": "移至 {{server}} 并发送",
+      "retryNow": "在 {{server}} 上重试",
+      "dismiss": "关闭"
+    },
     "workspace": {
       "create": "创建",
       "creating": "创建中..."

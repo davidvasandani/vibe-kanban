@@ -296,11 +296,17 @@ export const handleApiResponse = async <T, E = T>(
 ): Promise<T> => {
   if (!response.ok) {
     let errorMessage = `Request failed with status ${response.status}`;
+    // Typed errors can arrive on a non-2xx status too (an unavailable
+    // execution server is a 503 carrying the server's identity).
+    let errorDataPayload: E | undefined;
 
     try {
       const errorData = await response.json();
       if (errorData.message) {
         errorMessage = errorData.message;
+      }
+      if (errorData.error_data) {
+        errorDataPayload = errorData.error_data as E;
       }
     } catch {
       // Fallback to status text if JSON parsing fails
@@ -314,7 +320,12 @@ export const handleApiResponse = async <T, E = T>(
       endpoint: response.url,
       timestamp: new Date().toISOString(),
     });
-    throw new ApiError<E>(errorMessage, response.status, response);
+    throw new ApiError<E>(
+      errorMessage,
+      response.status,
+      response,
+      errorDataPayload
+    );
   }
 
   if (response.status === 204) {

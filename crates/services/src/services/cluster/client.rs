@@ -60,6 +60,21 @@ pub enum WorkerClientError {
     MalformedResponse(String),
 }
 
+impl WorkerClientError {
+    /// The worker's own reason when it answered `503`: it is live but is not
+    /// admitting new work (memory/IO pressure, or draining for a release).
+    /// That is a temporary refusal a client can recover from, unlike a
+    /// transport fault or a rejected request.
+    pub fn service_unavailable_reason(&self) -> Option<&str> {
+        match self {
+            Self::Rejected { status, message } if *status == StatusCode::SERVICE_UNAVAILABLE => {
+                Some(message)
+            }
+            _ => None,
+        }
+    }
+}
+
 /// Far below the client's 30s default: metrics are polled on a 2s tick, so a
 /// node that has not answered in 5s has already missed its slot.
 const METRICS_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -795,5 +810,25 @@ mod tests {
         assert!(!retryable_dispatch_error(
             &WorkerClientError::DigestConflict
         ));
+    }
+
+    #[test]
+    fn only_a_503_rejection_is_a_service_unavailable_refusal() {
+        let rejected = |status| WorkerClientError::Rejected {
+            status,
+            message: "worker is draining for a release handoff".into(),
+        };
+        assert_eq!(
+            rejected(StatusCode::SERVICE_UNAVAILABLE).service_unavailable_reason(),
+            Some("worker is draining for a release handoff")
+        );
+        assert_eq!(
+            rejected(StatusCode::INTERNAL_SERVER_ERROR).service_unavailable_reason(),
+            None
+        );
+        assert_eq!(
+            WorkerClientError::DigestConflict.service_unavailable_reason(),
+            None
+        );
     }
 }

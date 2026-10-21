@@ -144,11 +144,16 @@ pub fn eligibility(
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkerUnavailableReason {
     NotRegistered,
     Offline,
     LeaseExpired,
+    /// The worker is live but answered the dispatch with 503: it is under
+    /// memory/IO pressure or draining. `detail` is the worker's own reason.
+    Refusing {
+        detail: String,
+    },
 }
 
 /// The assigned worker of a sticky workspace cannot take a dispatch. The
@@ -157,6 +162,9 @@ pub enum WorkerUnavailableReason {
 #[error("{}", self.message())]
 pub struct WorkerUnavailable {
     pub worker: String,
+    /// Known whenever the workspace's placement names the worker, which is
+    /// every dispatch; lets a client offer to move the workspace elsewhere.
+    pub worker_node_id: Option<Uuid>,
     pub last_heartbeat_at: Option<DateTime<Utc>>,
     pub reason: WorkerUnavailableReason,
 }
@@ -167,7 +175,7 @@ impl WorkerUnavailable {
             .last_heartbeat_at
             .map(|at| at.format("%Y-%m-%d %H:%M:%S UTC").to_string())
             .unwrap_or_else(|| "never".into());
-        let state = match self.reason {
+        let state = match &self.reason {
             WorkerUnavailableReason::NotRegistered => {
                 format!(
                     "Execution server {} is not registered with this coordinator.",
@@ -180,6 +188,10 @@ impl WorkerUnavailable {
             ),
             WorkerUnavailableReason::LeaseExpired => format!(
                 "Execution server {} has stopped responding (last heartbeat {last_seen}).",
+                self.worker
+            ),
+            WorkerUnavailableReason::Refusing { detail } => format!(
+                "Execution server {} is not accepting new executions: {detail}",
                 self.worker
             ),
         };
@@ -205,6 +217,7 @@ pub fn dispatch_liveness(
     let Some(worker) = worker else {
         return Err(WorkerUnavailable {
             worker: worker_node_id.to_string(),
+            worker_node_id: Some(worker_node_id),
             last_heartbeat_at: None,
             reason: WorkerUnavailableReason::NotRegistered,
         });
@@ -221,6 +234,7 @@ pub fn dispatch_liveness(
     };
     Err(WorkerUnavailable {
         worker: worker.hostname.clone(),
+        worker_node_id: Some(worker_node_id),
         last_heartbeat_at: worker.last_heartbeat_at,
         reason,
     })
@@ -505,6 +519,7 @@ mod tests {
 
         let error = dispatch_liveness(offline.id, Some(&offline), now).unwrap_err();
         assert_eq!(error.reason, WorkerUnavailableReason::Offline);
+        assert_eq!(error.worker_node_id, Some(offline.id));
         assert_eq!(
             error.to_string(),
             "Execution server think5 is offline (last heartbeat 2026-09-28 17:06:35 UTC). \
@@ -539,6 +554,25 @@ mod tests {
                 .unwrap_err()
                 .reason,
             WorkerUnavailableReason::LeaseExpired
+        );
+    }
+
+    #[test]
+    fn refusing_worker_message_names_server_and_keeps_worker_reason() {
+        let error = WorkerUnavailable {
+            worker: "think4".into(),
+            worker_node_id: Some(Uuid::from_u128(4)),
+            last_heartbeat_at: None,
+            reason: WorkerUnavailableReason::Refusing {
+                detail: "worker is under io pressure (full avg60 58.9% >= 40%); not admitting new executions. Wait for pressure to fall below the threshold, then retry.".into(),
+            },
+        };
+        assert_eq!(
+            error.to_string(),
+            "Execution server think4 is not accepting new executions: worker is under io \
+             pressure (full avg60 58.9% >= 40%); not admitting new executions. Wait for \
+             pressure to fall below the threshold, then retry. Move this workspace to \
+             another execution server, or retry once think4 recovers."
         );
     }
 
