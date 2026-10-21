@@ -1,48 +1,79 @@
-# Prior knowledge: graceful degradation for refused executions
+# Prior knowledge — vk/e252-deliver-issue-co
 
-Read-only search of `wiki/INDEX.md` for worker, placement, affinity, 503,
-retry and `error_data`. Relevant pages: `worker-execution-hardening.md`,
-`vk-pollers.md`, `mcp-pr-tools-and-connection-notices.md`,
-`frontend-linting.md`, `coordinator-restart-handoff.md`.
+This file distils pages from the knowledge base (`wiki/`, 56 pages) that are
+relevant to delivering issue comments to workspace sessions. The knowledge
+base was not modified; it was only read.
 
-## Worker admission and placement (`worker-execution-hardening.md`)
+## Directly relevant
 
-- A worker refuses new dispatches with 503 when memory or IO PSI
-  `full avg60` is at or above `VK_WORKER_ADMISSION_MAX_PRESSURE` (default 40).
-  Replays of accepted work are answered before the check. Heartbeats carry
-  `admission_refusing` in `resource_snapshot`.
-- The scheduler adds +1000 to a refusing worker's score instead of excluding
-  it. Placement is sticky, so an existing workspace keeps targeting its
-  assigned worker even when another worker is healthy. Only new placement
-  benefits from the penalty.
-- A dispatch makes at most one immediate retry. That retry rarely helps with
-  sustained pressure. Do not raise the threshold, and do not migrate a live
-  session silently just to hide the refusal (`vk/bdd8-debug-vk-load`).
-- `avg60` is a smoothed average. Recovery can take minutes, not seconds.
-- Dispatch errors already name the server's hostname and UUID, and the
-  persisted evidence includes `worker_hostname`/`worker_node_id`.
+- **issue-workspace-lifecycle** (`vk/e464`): "comment-driven activation"
+  there means *workspace conversation messages*. The clarify stage of that
+  task explicitly excluded issue-level comments, so this task fills that gap.
+  Reusable rules:
+  - Route accepted activity through `ContainerService::activate_workspace`.
+  - Publish queued work **before** awaiting remote I/O, because a turn can
+    finish while the request is in flight.
+  - Never put remote HTTP latency ahead of queue insertion or dispatch.
+  - SQLite and Postgres are separate stores. There is no distributed
+    transaction.
+- **auto-error-remediation**:
+  - `finalize_task` is the one convergence point for every exit path,
+    including the local exit monitor, skipped-cleanup and worker
+    reconciliation.
+  - Emit from it with a non-blocking `broadcast::send` through a trait
+    accessor that defaults to `None` (`error_remediation_sender`). Subscribe
+    **before** boot resumes interrupted agents.
+  - Server-side consumers may call route handlers directly (Axum extractors
+    are tuple structs).
+  - Reserve before I/O and fail closed.
+  - Use a durable recursion guard; in-memory guards do not survive restarts.
+  - `RemoteClient::create_issue_comment` already exists; remediation uses it.
+- **worker-execution-hardening / 9f36 queued-message spec**:
+  - The queued follow-up is in memory and holds one message per session.
+  - It is **dropped after any failed/killed/interrupted turn** (existing
+    policy), and it is not persisted across restarts.
+  - The no-change cleanup-skip path must dispatch queued work before
+    finalizing.
+- **session-chat-history-search**:
+  - A session's turns are its non-dropped `CodingAgent` executions.
+  - Keep "could not read" distinct from "read, nothing matched" for any
+    aggregate reader. This also applies to remote lookups during target
+    resolution: a failed lookup is not "no target".
+- **kanban-items-state-and-activity-grouping**: the UI's "Waiting for feedback"
+  group means *not running and no pending approval*. It is derived and never
+  persisted, and issue status is not agent state. This matches the
+  task's requirement that "In progress" is not evidence of a running agent.
+- **kanban-issue-panel-sections**:
+  - The comments section is a render-prop slot in `KanbanIssuePanel`.
+  - Component tests live in `packages/remote-web/src/test/*.test.tsx` and
+    must run with `NODE_ENV=test`.
+  - Without an i18n provider, `t()` returns raw keys.
+- **read-only-markdown-links**: conversation and comment markdown is rendered
+  read-only. Composers are disabled only while they are submitting.
+- **host-env-sensitive-tests**: some Slack/GitHub-routing tests fail only
+  because of host env vars. Re-run with those vars unset before blaming a
+  diff. Run tests in the foreground.
 
-## Error contracts (`vk-pollers.md`, `mcp-pr-tools-and-connection-notices.md`)
+## Constitution principles that bind this design
 
-- Any route an MCP tool can reach must use `error_with_data_and_message`:
-  non-browser clients only surface `message`, so a typed `error_data` alone
-  reaches them as "Unknown error".
-- Test the contract that crosses the boundary (status, body), not only the
-  internal enum.
+- **V:** remote mutations are transactional and covered by a txid.
+  - New remote routes stay read-only here, so no new mutation is needed.
+  - Terminal statuses are identified by name, case-insensitively
+    (`is_active_status_name`).
+- **XII:** asynchronous handoffs have one owner. A claim boundary is needed
+  against authoritative state, without holding locks across awaits, and
+  tests must cover both orderings.
+- **XVIII/XXII:** retries are idempotent and can never create a second
+  execution. A missing response is not evidence of success.
+- **XX (time):** a derived row inherits its parent event's timestamp. An
+  issue-comment card shows the comment's `created_at`, not the turn's.
+- **XXI:** reuse existing resolvers (`is_active_status_name`, MCP
+  `issue_url`, `follow_up` executor checks) instead of re-deriving them.
+  Failures name what failed.
 
-## Affinity moves (`coordinator-restart-handoff.md`, source)
+## Gaps confirmed by investigation (not in the knowledge base)
 
-- `PATCH /api/workspaces/{id}/affinity` with `requested_worker_node_id` moves an
-  idle workspace (including Codex rollout transfer). It refuses while scripts,
-  dev servers or helpers run. Existing `Local` workspaces cannot move to a
-  worker.
-- The Server Affinity picker uses `isWorkerEligible` (online, healthy mount,
-  live lease, executor-profile capability).
-
-## Frontend conventions (`frontend-linting.md`)
-
-- No ESLint directive comments. Every `exhaustive-deps` warning fails lint.
-- A feature may not import `@/features/**`, including itself, so use relative
-  imports within a feature. `.tsx` files are PascalCase unless they start with
-  `use`.
-- Read values that must not retrigger an effect through a ref.
+- There is no comment→session routing, no local comment proxy, no MCP
+  comment tools, and no comment `source` field.
+- There is no persisted "waiting for input" state. Agent state must be
+  derived from execution status.

@@ -158,6 +158,8 @@ pub async fn initialize_deployment(
     // receiver is lost. The consumer checks the (default-off) setting per
     // event, so toggling it needs no restart.
     crate::error_remediation::spawn(&deployment);
+    // Same reason: turn boundaries wake waiting issue comment deliveries.
+    crate::issue_comment_delivery::spawn(&deployment);
     migrate_legacy_attachment_directories(&deployment).await?;
     deployment.update_sentry_scope().await?;
     let interrupted_processes = deployment
@@ -196,6 +198,9 @@ pub async fn initialize_deployment(
             .resume_interrupted_coding_agents(&interrupted_processes)
             .await;
     }
+    // Turns interrupted by the previous process are settled now; issue
+    // comments waiting for them may treat them as turn boundaries.
+    crate::issue_comment_delivery::dispatcher(&deployment).mark_startup_reconciled();
     deployment
         .container()
         .backfill_before_head_commits()

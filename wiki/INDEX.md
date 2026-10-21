@@ -45,6 +45,14 @@ contributed to it.
 
 - [mcp-oauth-connection-identity.md](mcp-oauth-connection-identity.md) — Preserve owner-bound gateway identity across identifier changes and both OAuth completion paths.
 
+- [issue-comment-delivery.md](issue-comment-delivery.md) — Routing issue
+  comments to linked agent sessions through one UI/MCP path with explicit
+  note/reply intent and a single target. Covers why a turn boundary must be
+  recorded by `finalize_task` (never guessed from elapsed time), why an
+  execution row is not launch evidence (`pgid` / accepted worker job / agent
+  session id; unconfirmed worker launches are uncertain), resolve-before-
+  insert, pre-launch snapshots, loop guards, and conversation-row placement
+  (`vk/e252-deliver-issue-co`).
 - [issue-workspace-lifecycle.md](issue-workspace-lifecycle.md) — Comment-driven activation, transactional Done reopening, queue handoff ordering and local/remote sync boundaries.
 
 - [issue-workspace-advisory.md](issue-workspace-advisory.md) — Exact issue matching, sibling-scoped evidence, dismissible creation warnings, collapsed active counts and host-safe navigation.

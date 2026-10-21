@@ -19,3 +19,12 @@ pub struct Workspace {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
+
+/// Workspaces linked to one issue, for routing issue comments to sessions.
+/// `workspaces` holds only the active (non-archived) links; archived links are
+/// counted so callers can explain why nothing is eligible.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct ListIssueWorkspacesResponse {
+    pub workspaces: Vec<Workspace>,
+    pub archived_count: i64,
+}

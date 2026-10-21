@@ -68,6 +68,9 @@ import {
   PencilSimpleIcon,
 } from '@phosphor-icons/react';
 import { ConversationTimestamp } from './ConversationTimestamp';
+import { IssueCommentEntry } from './IssueCommentEntry';
+import { useIssueCommentsInConversation } from '../model/contexts/IssueCommentsContext';
+import { standaloneCommentId } from '@/shared/lib/issueCommentDelivery';
 
 type Props = {
   displayEntry: DisplayEntry;
@@ -313,6 +316,16 @@ function DisplayConversationEntry(props: Props) {
     resetAction,
   } = props;
   const sessionId = workspaceWithSession?.session?.id;
+  const issueComments = useIssueCommentsInConversation();
+  const renderCommentMarkdown = (content: string) => (
+    <AppChatMarkdown
+      content={content}
+      workspaceId={workspaceWithSession?.id}
+      sessionId={sessionId}
+      className={undefined}
+      maxWidth={undefined}
+    />
+  );
   const executorCanFork = !!(
     workspaceWithSession?.session?.executor &&
     capabilities?.[workspaceWithSession.session.executor]?.includes(
@@ -346,13 +359,44 @@ function DisplayConversationEntry(props: Props) {
     return null;
   }
 
+  // A linked issue comment that did not start a turn in this session.
+  const standaloneId = standaloneCommentId(executionProcessId);
+  if (standaloneId) {
+    const item = issueComments.standaloneById.get(standaloneId);
+    return item ? (
+      <IssueCommentEntry
+        item={item}
+        deliveredHere={false}
+        renderMarkdown={renderCommentMarkdown}
+      />
+    ) : null;
+  }
+
   const entryType = entry.entry_type;
 
   switch (entryType.type) {
     case 'tool_use':
       return renderToolUseEntry(entryType, entry, props, t);
 
-    case 'user_message':
+    case 'user_message': {
+      // A turn started by delivered issue comments shows those comments,
+      // not a second copy of the framed prompt.
+      const carried =
+        issueComments.deliveredByExecution.get(executionProcessId);
+      if (carried && carried.length > 0) {
+        return (
+          <div className="flex flex-col gap-base">
+            {carried.map((item) => (
+              <IssueCommentEntry
+                key={item.entry.comment.id}
+                item={item}
+                deliveredHere
+                renderMarkdown={renderCommentMarkdown}
+              />
+            ))}
+          </div>
+        );
+      }
       return (
         <UserMessageEntry
           content={entry.content}
@@ -364,6 +408,7 @@ function DisplayConversationEntry(props: Props) {
           resetAction={resetAction}
         />
       );
+    }
 
     case 'assistant_message':
       return (

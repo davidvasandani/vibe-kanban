@@ -25,6 +25,7 @@ use db::{
         execution_worker_job::ExecutionWorkerJob,
         repo::Repo,
         session::{CreateSession, Session, SessionError},
+        session_turn_boundary::SessionTurnBoundary,
         workspace::{Workspace, WorkspaceError},
         workspace_creation_progress::{WorkspaceCreationPhase, WorkspaceCreationProgress},
         workspace_repo::WorkspaceRepo,
@@ -74,7 +75,9 @@ use worktree_manager::WorktreeError;
 
 use crate::services::{
     error_remediation::{self, ErrorRemediationEvent},
-    execution_process, normalized_log_cache,
+    execution_process,
+    issue_comment_delivery::TurnFinalizedEvent,
+    normalized_log_cache,
     notification::NotificationService,
 };
 
@@ -652,6 +655,13 @@ pub trait ContainerService {
         None
     }
 
+    /// Channel announcing that a session's turn chain finalized with no queued
+    /// follow-up started in its place: the turn boundary at which issue
+    /// comments waiting for that session are delivered. `None` disables it.
+    fn turn_finalized_sender(&self) -> Option<&broadcast::Sender<TurnFinalizedEvent>> {
+        None
+    }
+
     async fn refresh_mcp_tools(
         &self,
         workspace_id: Uuid,
@@ -936,6 +946,14 @@ pub trait ContainerService {
 
     /// Finalize workspace execution by sending notifications
     async fn finalize_task(&self, ctx: &ExecutionContext) {
+        // Every terminal chain reaches here only when no queued follow-up was
+        // started in its place: record that turn boundary durably and for this
+        // exact turn, before any early return, so issue comment delivery can
+        // never race the exit monitor's own handoff.
+        if let Err(error) = SessionTurnBoundary::record(&self.db().pool, ctx.session.id).await {
+            tracing::warn!(?error, session_id = %ctx.session.id, "failed to record turn boundary");
+        }
+
         // Skip notification if process was intentionally killed by user
         // or interrupted by a server shutdown/restart
         if matches!(
@@ -945,6 +963,17 @@ pub trait ContainerService {
                 | ExecutionProcessStatus::Indeterminate
         ) {
             return;
+        }
+
+        // Wake the issue comment dispatcher for this session. Non-blocking;
+        // the consumer re-reads authoritative state before acting, and its
+        // periodic sweep covers a missed event.
+        if let Some(sender) = self.turn_finalized_sender() {
+            let _ = sender.send(TurnFinalizedEvent {
+                workspace_id: ctx.workspace.id,
+                session_id: ctx.session.id,
+                execution_process_id: ctx.execution_process.id,
+            });
         }
 
         let workspace_name = ctx

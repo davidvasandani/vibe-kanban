@@ -1,101 +1,251 @@
-# Graceful degradation when an execution server refuses work
+# Issue comment delivery to linked workspace sessions
 
-## Problem
+Task: `vk/e252-deliver-issue-co`
 
-A follow-up in a clustered workspace fails when the workspace's sticky
-execution server refuses the dispatch, for example:
+## Problem and evidence
 
-```
-Failed to start execution: Execution server think4 (96eca719-…): worker rejected
-request with status 503 Service Unavailable: worker is under io pressure
-(full avg60 58.9% >= 40%); not admitting new executions. Wait for pressure to
-fall below the threshold, then retry.
-```
+On VAS-859 an agent stopped at specification clarification, waiting for a
+device address and secret references. Those details were posted as an issue
+comment. The comment was saved (still visible after a fresh navigation), but
+the linked workspace conversation never received it and the agent never
+resumed. A separate `run_session_prompt` call was needed.
 
-Today the coordinator wraps that refusal in `ContainerError::Other`, so the
-HTTP response is a generic 500 ("An internal error occurred"). The chat box
-shows that text, and the user has to work out on their own that they should
-move the workspace in the Server Affinity panel or keep retrying by hand.
+- Issue `cee841f2-4c0d-4518-9d0a-3ff993e6d93d`, workspace
+  `87d37e45-9885-4587-a62b-8005513e8399`, session
+  `e6618fc8-feb4-40fc-a44d-3d55e19a4dc3`.
+- Waiting execution `d4078149-…` completed 04:28 UTC; comment posted ≈04:45;
+  manual follow-up `3bd95943-…` started 04:48.
+- The VK MCP had no issue-comment create/read tools; the comment needed a
+  browser.
 
-## Goal
+## Root cause (investigated)
 
-When the assigned server cannot take a new execution:
+This is **missing routing between two intentionally separate models**, not a
+broken subscription:
 
-1. The frontend explains what happened and **suggests an alternative execution
-   server** that can continue the session. One action moves the workspace there
-   and resends the message.
-2. If **no alternative is available**, the frontend says so and **keeps
-   polling** with exponential backoff for up to **10 minutes**. When the
-   original server recovers, it resends the message. If an alternative appears
-   first, it suggests that server. After 10 minutes it stops and says so.
+- Issue comments live only in the remote Postgres `issue_comments` table
+  (`crates/remote/src/db/issue_comments.rs`). The UI writes them through the
+  Electric mutation (`useIssueContext().insertComment`). Create has two side
+  effects only: analytics and `notify_issue_subscribers`.
+- Workspace conversations are local SQLite `execution_processes` per
+  `session`. A turn's user message is the prompt in its `executor_action`.
+- No code on the local server, in services, local-deployment or MCP reacts to
+  comments. The local `RemoteClient` can only *create* comments (used by
+  auto error remediation). There is no local proxy route and no MCP tool.
+- There is no persisted "waiting for input" state.
+  `ExecutionProcessStatus` is
+  `Running|Completed|Failed|Killed|Interrupted|Indeterminate`. "Waiting"
+  can only mean that the session's latest coding-agent turn ended
+  `Completed` and nothing runs now.
+- The follow-up queue (`QueuedMessageService`) is in memory, holds one
+  message per session (a new one replaces the old), and is lost on restart.
+  The exit monitor consumes it at a turn boundary. It is not suitable as
+  durable delivery storage.
 
-## Requirements
+## Design
 
-### Backend (coordinator)
+### Delivery record (local SQLite, authoritative for delivery)
 
-- R1. A worker dispatch rejected with HTTP 503 (pressure admission refusal,
-  release draining) becomes a typed `WorkerUnavailable` error with reason
-  `Refusing`, not `ContainerError::Other`. The message names the server and
-  includes the worker's own reason.
-- R2. `WorkerUnavailable` carries the worker's node id when it is known. The
-  `/follow-up` (and every other) API response for it is HTTP 503 with a typed
-  `error_data` payload: `{ worker_node_id, worker, reason, retryable }`.
-  `message` still holds the human-readable text for MCP and other clients.
-- R3. Admission thresholds, replay-before-admission, the single immediate
-  dispatch retry, sticky placement and failure evidence stay as they are.
-  The coordinator still does no automatic migration and no extra server-side
-  retries.
-- R4. The stderr log line in the conversation still starts with
-  `Failed to start execution:` and names the server.
+The new table `issue_comment_deliveries` is keyed **uniquely by
+`comment_id`**. Each comment gets at most one delivery to an agent, so a
+repeated client request, a retry or recovery cannot duplicate a delivery.
+It records:
 
-### Frontend
+- **Comment details:** `issue_id`, `comment_id`, author id, the comment's
+  `created_at`, and the delivered message snapshot.
+- **Origin:** `source` (`ui` | `mcp`), `origin_session_id`, `hop_count`.
+- **Target:** `workspace_id`, `session_id`, `execution_process_id`.
+- **Status:** `state`, a `reason` code, `error`, `attempt_count`,
+  `next_attempt_at`, and the timestamps (`delivered_at`).
 
-- R5. `handleApiResponse` keeps `error_data` on non-2xx responses, so callers
-  can match on typed 503 data.
-- R6. When a follow-up in an existing session fails with a `WorkerUnavailable`
-  error, the chat box shows a recovery banner in place of the plain error. A
-  refused first message of a new session shows the typed message only, because
-  the session already exists and resending would duplicate it.
-- R7. Alternative servers are workers that pass the same eligibility check as
-  the Server Affinity picker (online, healthy mount, live lease, supports the
-  session's executor profile), are not reporting `admission_refusing`, and are
-  not the server that refused.
-- R8. With alternatives available, the banner lists them, best first (lowest
-  load). "Move & resend" calls the existing affinity API
-  (`requested_worker_node_id`, `restart_running: false`) and then resends the
-  same prompt. A failed move shows the API's message and keeps the banner.
-- R9. With none available, the banner says no other server can take the
-  session and polls the worker list with exponential backoff (5 s doubling,
-  capped at 60 s) until 10 minutes after the first failure. Each poll:
-  - if the refusing server is now eligible and not refusing, resend
-    automatically (a repeat refusal continues the same 10-minute window);
-  - if an alternative has become eligible, switch to the suggestion state
-    (polling continues so the original can still recover).
-- R10. When the window expires, the banner says the server is still
-  unavailable and offers a manual "Retry now". The user can dismiss the banner
-  at any time, which stops polling. Recovery state is per session, and
-  switching sessions resets it.
-- R11. On a successful resend the editor is cleared the same way a normal
-  successful send clears it. The resent prompt is the exact prompt that failed.
-- R12. All new strings are translated in every locale under
-  `packages/web-core/src/i18n/locales/*`.
+States:
 
-## Non-goals
+| state | meaning | user action |
+|---|---|---|
+| `pending` | accepted; target busy (agent running / queued message) or retry scheduled | none (auto) |
+| `dispatching` | claimed by the dispatcher | none |
+| `delivered` | follow-up execution started (`execution_process_id`) | open conversation |
+| `needs_target` | several eligible sessions, none established | choose target |
+| `no_target` | no eligible session (reason: no linked workspace, other host, archived, issue Done/Cancelled, last turn failed/stopped…) | retry / choose target |
+| `failed` | dispatch error after automatic retries | retry |
+| `blocked` | loop guard or self-delivery | none |
+| `cancelled` | comment deleted before dispatch | none |
 
-- No change to worker admission, scheduler scoring or server-side retry.
-- No automatic migration without the user's action. Moving a session to
-  another server is always a user choice. The only automatic action is
-  resending to the *same* server once it recovers.
-- Workspace creation and other dispatch paths (scripts, reviews) keep their
-  current error display. They benefit from the typed 503 but get no banner.
+### Shared delivery path
 
-## Acceptance
+`server::issue_comment_delivery` owns one service used by the UI and MCP:
 
-- Rust unit tests: a 503 dispatch rejection maps to
-  `WorkerUnavailable { reason: Refusing, worker_node_id }`; the API response is
-  503 with typed `error_data` and a message that names the server.
-- Vitest: the recovery logic picks eligible, non-refusing alternatives; backoff
-  delays double and cap; it resends when the original recovers and stops at
-  the 10-minute deadline.
-- `pnpm run check`, `pnpm run lint`, `cargo test` for affected crates,
-  `pnpm run generate-types:check` and `pnpm run format` all pass.
+- `request_delivery(comment_id, issue_id, target_session_id?, source,
+  origin_session_id?)`
+  - Fetches the comment **from the remote** using the signed-in user's
+    credentials. That fetch is the authorization check, and remote content
+    is authoritative over client-supplied text.
+  - Inserts the delivery idempotently.
+  - Resolves the target and dispatches.
+- `create_comment(issue_id, message, parent_id?, intent, target?, id?)`
+  (MCP path)
+  - Creates the remote comment with a client id. A 409 on retry is resolved
+    by fetching and verifying the existing comment, so retries are idempotent.
+  - When `intent = reply_to_agent`, calls `request_delivery`.
+- The UI keeps its optimistic Electric insert. With **Reply to agent**
+  selected, it awaits `persisted` and then calls `POST
+  /api/issue-comment-deliveries`. A failed call shows "not delivered —
+  Retry" rather than success.
+
+### Target resolution (deterministic, no text matching)
+
+1. Candidates are the remote workspaces linked to the issue (new remote
+   route `GET /v1/issues/{issue_id}/workspaces`, gated by
+   `ensure_issue_access`) whose `local_workspace_id` exists on this host and
+   is not archived locally.
+2. The issue's status must be active (`is_active_status_name`, the existing
+   rule). Done/Cancelled issues give `no_target{issue_terminal}`. Issue
+   status is never used as evidence that an agent runs.
+3. Sessions are the candidate workspaces' sessions that have at least one
+   coding-agent turn.
+   - Agent state comes from executions: `running` (a coding agent is running
+     or a message is queued), `waiting` (latest turn `Completed`),
+     `stopped` (latest turn `Failed`/`Killed`/`Interrupted`/
+     `Indeterminate`), `never_run`.
+4. An explicit `target_session_id` must belong to a candidate. Otherwise the
+   result is an authorization-style rejection, `no_target{target_not_linked}`.
+5. Without an explicit target:
+   - 0 sessions → `no_target`.
+   - One running session (or one waiting session) is the "established active
+     target".
+   - Otherwise → `needs_target`, with the candidate list.
+   - Nothing is ever broadcast.
+6. Loop guards:
+   - `origin_session_id == target` → `blocked{self}`.
+   - `hop_count` = the origin execution's delivery hop + 1. Above
+     `MAX_AGENT_HOPS = 2` → `blocked{loop_guard}`. Human UI comments have hop 0.
+
+### Dispatch
+
+(This section was revised after three rounds of independent review.)
+
+- **Serialization.** A per-session async mutex serializes dispatch on one
+  host and is held until the turn has started. A row is claimed with a
+  conditional update (`pending → dispatching`).
+- **Busy target.** A running agent, a queued message, or a running
+  setup/cleanup script keeps the delivery `pending`.
+- **Turn boundary, recorded, never guessed.**
+  - `ContainerService::finalize_task` writes `session_turn_boundaries` for
+    the session's latest turn synchronously, before any early return.
+    `finalize_task` runs only when no queued follow-up was started.
+  - It then emits `turn_finalized_sender()` as a wake-up.
+  - A new turn may start only when that row names the current latest turn,
+    or when the turn ended before startup reconciliation finished.
+  - Elapsed time never authorizes a dispatch, so the exit monitor's
+    queued-message handoff is never raced.
+- **Stopped turn.** Implicit delivery to a failed/killed turn becomes
+  `no_target{turn_stopped}`. An explicit choice may resume it.
+- **Idle target.**
+  - **Evidence check.** An earlier attempt counts as delivered only if the
+    agent was **launched**: `pgid`, an accepted worker job, or the vendor
+    agent's session id. An execution row alone is not evidence.
+    - A worker that never confirmed acceptance is `failed{launch_uncertain}`.
+      It is not resent automatically.
+    - The latest turn being our own unlaunched attempt counts as a boundary,
+      not a stopped agent.
+  - **Re-check before launch.** The comment is re-read, and the issue status
+    and the workspace's remote link are re-checked.
+  - **Snapshot, then start.** The exact text is persisted before launch. The
+    follow-up then starts through `routes::sessions::follow_up`.
+  - **Batching.** Pending comments are batched into one prompt.
+- **Prompt framing.** Attributed user content: a header plus quoted text,
+  with a line-start marker `<!-- vk-issue-comment:v1:<id> -->`.
+- **Errors.** Two automatic retries with backoff (15 s, 60 s), then
+  `failed`. A manual retry resets the attempts.
+- **Durability.**
+  - Rows are resolved before insert, so no row waits without a target.
+  - A 15 s sweep and startup recovery resolve `dispatching` rows from launch
+    evidence.
+
+### Edits and deletions
+
+- Delivered text is a snapshot. Editing never redelivers. Both surfaces show
+  "edited after delivery — agent received the original".
+- A pending delivery re-reads the comment when it dispatches, so the latest
+  text is sent because nothing was delivered yet. A comment deleted before
+  dispatch → `cancelled`.
+- A comment deleted after delivery keeps its delivery record. The
+  conversation card renders the snapshot labelled "deleted from issue".
+
+### API surface (local server)
+
+- `GET /api/issues/{issue_id}/agent-targets` → candidate workspaces/sessions
+  with agent state, `default_session_id` (only when exactly one session is
+  eligible and waiting/running), and `issue_active`.
+- `GET /api/issues/{issue_id}/comment-deliveries` → delivery records.
+- `POST /api/issue-comment-deliveries` `{comment_id, issue_id,
+  target_session_id?}` → delivery record (idempotent; retry/select target on
+  an existing `failed`/`no_target`/`needs_target` row re-runs resolution).
+- `POST /api/issue-comments` (MCP create) → `{comment, issue_url, delivery?}`.
+- `GET /api/issues/{issue_id}/comments` → remote comments plus deliveries.
+- `GET /api/workspaces/{id}/issue-comments` → the linked issue plus comments
+  plus deliveries, for the conversation.
+
+### MCP tools
+
+- `create_issue_comment{issue_id, message, intent: note|reply_to_agent
+  (required), target_session_id?, parent_id?, comment_id?}` returns:
+  - `comment_id`, `issue_url`, `saved_on_issue: true`
+  - `delivery: {state, reason, workspace_id, session_id,
+    execution_id, candidates}` (or `not_requested` for notes)
+- `list_issue_comments{issue_id}` returns comments with author, timestamps
+  and delivery state.
+- `deliver_issue_comment{comment_id, issue_id, target_session_id?}` retries
+  or selects the target for an existing comment.
+- Origin session is taken from the MCP's resolved context (loop guard).
+
+### UI
+
+- **Issue panel composer:** a two-option toggle, "Note" and "Reply to
+  agent".
+  - It shows the target name and agent state.
+  - It defaults to Reply only when `default_session_id` exists, and to Note
+    otherwise.
+  - Reply is disabled with a reason when nothing is eligible.
+- **Each comment:** shows a delivery chip with Retry / Choose session
+  actions:
+  - Saved on issue · Not sent to agent
+  - Queued for <session> (agent running)
+  - Delivered · resumed <session>
+  - Needs target
+  - No eligible session (reason)
+  - Delivery failed
+  - Edited after delivery
+- **Workspace conversation:**
+  - A turn whose execution came from a delivery renders its user message as
+    an **issue-comment card**. The card shows an issue-comment indicator,
+    the author and the comment's own timestamp, and links back to the issue
+    comment (`/projects/{p}/issues/{i}`).
+  - The raw framed prompt is not shown twice.
+  - Linked comments not delivered to this session render as compact cards
+    placed chronologically between turns.
+- **Remote-web, or no local host:** the delivery calls fail closed. The
+  comment shows "delivery status unavailable" and never "delivered".
+
+## Acceptance mapping
+
+- **AC1/AC2:** UI reply and MCP `create_issue_comment` both resume the single
+  waiting session. Each returns the comment id and execution id.
+- **AC3:** a note never creates a delivery. Done/Cancelled issues, archived
+  workspaces and stopped turns never auto-start.
+- **AC4:** a running target stays `pending` until finalize, then exactly one
+  execution starts. Batching means one message.
+- **AC5:** dispatcher unit tests cover ambiguous, none, archived,
+  completed/cancelled, authorization (remote 403/404), backend failure,
+  restart recovery (dispatching plus marker), duplicate requests (unique
+  `comment_id`) and edits (snapshot).
+- **AC6/AC7:** both surfaces read the persisted delivery records and expose
+  Retry/Choose-target actions.
+- **AC8:** real VK verification, independent review, pipeline, PR, merge.
+
+## Out of scope
+
+- Steering inside a running turn (vendor stdin injection).
+- Delivering to workspaces on other hosts.
+- Changes to the remote comment schema.
+- Hosting changes.

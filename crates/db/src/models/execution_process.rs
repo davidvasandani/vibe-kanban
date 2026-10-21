@@ -141,6 +141,17 @@ pub struct MissingBeforeContext {
     pub repo_path: Option<String>,
 }
 
+/// A coding-agent execution found by prompt marker.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct MarkedTurn {
+    pub id: Uuid,
+    pub status: ExecutionProcessStatus,
+    pub launched: bool,
+    /// Handed to a worker that never confirmed acceptance: the agent may or
+    /// may not be running there, so this is neither evidence nor its absence.
+    pub uncertain: bool,
+}
+
 impl ExecutionProcess {
     /// Find execution process by ID
     pub async fn find_by_id(pool: &SqlitePool, id: Uuid) -> Result<Option<Self>, sqlx::Error> {
@@ -292,6 +303,56 @@ impl ExecutionProcess {
                     ep.updated_at as "updated_at!: DateTime<Utc>"
                FROM execution_processes ep WHERE ep.status = 'running' ORDER BY ep.created_at ASC"#,
         )
+        .fetch_all(pool)
+        .await
+    }
+
+    /// The session's latest non-dropped coding-agent turn: its id, status and
+    /// completion time. Used to derive whether the agent is running, waiting
+    /// for input (last turn completed) or stopped.
+    pub async fn latest_coding_agent_turn_for_session(
+        pool: &SqlitePool,
+        session_id: Uuid,
+    ) -> Result<Option<(Uuid, ExecutionProcessStatus, Option<DateTime<Utc>>)>, sqlx::Error> {
+        sqlx::query_as::<_, (Uuid, ExecutionProcessStatus, Option<DateTime<Utc>>)>(
+            "SELECT id, status, completed_at FROM execution_processes \
+             WHERE session_id = ? AND run_reason = 'codingagent' AND dropped = FALSE \
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(session_id)
+        .fetch_optional(pool)
+        .await
+    }
+
+    /// Coding-agent executions in a session whose stored action contains
+    /// `marker` (e.g. an issue comment delivery marker), oldest first, with
+    /// their status and whether the agent was actually launched. A row is
+    /// written as soon as a start is attempted and survives a launch that
+    /// failed or was cut off by a crash, so the row alone is not evidence.
+    /// Launch evidence is durable: a local process group (`pgid`, never
+    /// cleared), a worker job the worker accepted, or the vendor agent
+    /// reporting its session id.
+    pub async fn find_coding_agent_turns_with_marker(
+        pool: &SqlitePool,
+        session_id: Uuid,
+        marker: &str,
+    ) -> Result<Vec<MarkedTurn>, sqlx::Error> {
+        sqlx::query_as::<_, MarkedTurn>(
+            "SELECT ep.id, ep.status, \
+               (ep.pgid IS NOT NULL \
+                OR EXISTS (SELECT 1 FROM execution_worker_jobs j \
+                           WHERE j.execution_process_id = ep.id AND j.accepted_at IS NOT NULL) \
+                OR EXISTS (SELECT 1 FROM coding_agent_turns t \
+                           WHERE t.execution_process_id = ep.id \
+                           AND t.agent_session_id IS NOT NULL)) AS launched, \
+               EXISTS (SELECT 1 FROM execution_worker_jobs j \
+                       WHERE j.execution_process_id = ep.id) AS uncertain \
+             FROM execution_processes ep \
+             WHERE ep.session_id = ? AND ep.run_reason = 'codingagent' \
+             AND instr(ep.executor_action, ?) > 0 ORDER BY ep.created_at ASC",
+        )
+        .bind(session_id)
+        .bind(marker)
         .fetch_all(pool)
         .await
     }

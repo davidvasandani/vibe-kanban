@@ -10,11 +10,12 @@ use api_types::{
     DeleteWorkspaceRequest, GetInvitationResponse, GetOrganizationResponse, HandoffInitRequest,
     HandoffInitResponse, HandoffRedeemRequest, HandoffRedeemResponse, Issue, IssueAssignee,
     IssueComment, IssueRelationship, IssueTag, ListAttachmentsResponse, ListInvitationsResponse,
-    ListIssueAssigneesResponse, ListIssueRelationshipsResponse, ListIssueTagsResponse,
-    ListIssuesResponse, ListMembersResponse, ListOrganizationsResponse,
-    ListProjectStatusesResponse, ListProjectsResponse, ListPullRequestsResponse, ListTagsResponse,
-    LocalLoginRequest, LocalLoginResponse, MutationResponse, Organization, ProfileResponse,
-    PullRequest, ResolvedOrganizationEnvVarsResponse, RevokeInvitationRequest, SearchIssuesRequest,
+    ListIssueAssigneesResponse, ListIssueCommentsResponse, ListIssueRelationshipsResponse,
+    ListIssueTagsResponse, ListIssueWorkspacesResponse, ListIssuesResponse, ListMembersResponse,
+    ListOrganizationsResponse, ListProjectStatusesResponse, ListProjectsResponse,
+    ListPullRequestsResponse, ListTagsResponse, LocalLoginRequest, LocalLoginResponse,
+    MutationResponse, Organization, ProfileResponse, PullRequest,
+    ResolvedOrganizationEnvVarsResponse, RevokeInvitationRequest, SearchIssuesRequest,
     SingleUserLoginResponse, Tag, TokenRefreshRequest, TokenRefreshResponse, UpdateIssueRequest,
     UpdateMemberRoleRequest, UpdateMemberRoleResponse, UpdateOrganizationRequest,
     UpdatePullRequestApiRequest, UpdateWorkspaceRequest, UpsertPullRequestRequest, Workspace,
@@ -939,6 +940,34 @@ impl RemoteClient {
     /// Gets a single issue-tag relation by ID.
     pub async fn get_issue_tag(&self, issue_tag_id: Uuid) -> Result<IssueTag, RemoteClientError> {
         self.get_authed(&format!("/v1/issue_tags/{issue_tag_id}"))
+            .await
+    }
+
+    /// Gets one issue comment (404 when deleted, 403 without issue access).
+    pub async fn get_issue_comment(
+        &self,
+        comment_id: Uuid,
+    ) -> Result<IssueComment, RemoteClientError> {
+        self.get_authed(&format!("/v1/issue_comments/{comment_id}"))
+            .await
+    }
+
+    /// Lists an issue's comments, oldest first.
+    pub async fn list_issue_comments(
+        &self,
+        issue_id: Uuid,
+    ) -> Result<ListIssueCommentsResponse, RemoteClientError> {
+        self.get_authed(&format!("/v1/issue_comments?issue_id={issue_id}"))
+            .await
+    }
+
+    /// Lists the active workspaces linked to an issue, plus the number of
+    /// archived links.
+    pub async fn list_issue_workspaces(
+        &self,
+        issue_id: Uuid,
+    ) -> Result<ListIssueWorkspacesResponse, RemoteClientError> {
+        self.get_authed(&format!("/v1/workspaces/by-issue/{issue_id}"))
             .await
     }
 

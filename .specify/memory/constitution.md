@@ -874,6 +874,32 @@ exits. Every terminal path, including indeterminate ones, runs the same
 finalization, so session recovery can never be stranded behind a row that
 never finalized.
 
+### LVII. Content routed to an agent is attributed, targeted once, and reported truthfully
+A message that originates on another surface (an issue comment, an external
+tool, another agent) reaches a coding agent only through one shared delivery
+path that every surface (UI and MCP) uses. The sender states the intent
+explicitly ("note" versus "reply to agent"). Intent is never inferred from the
+message text, and a note never starts work. Delivery targets exactly one
+session: an explicit target, or the single established active one. Ambiguity
+asks for a choice and is never broadcast. Archived workspaces, terminal issues
+and turns the user stopped or that failed are never resumed just because
+content arrived. A busy target receives the message at its next turn
+boundary and never gets a competing execution.
+
+Delivery is durable and at most once per source item. A unique source
+identity, a claim before dispatch, and positive evidence of an
+already-started execution make repeated requests, retries and restarts
+idempotent (XXVIII). The agent receives the content framed as attributed
+user content (author, origin and stable id), never as system instructions.
+Agent-originated content cannot target its own session, and it carries a
+bounded hop count so that agents cannot resume each other indefinitely.
+Delivered text is a snapshot. Editing the source never replays it, and both
+surfaces say that the agent saw the original. The outcome the sender sees
+names the last durable boundary reached: saved only, queued for a named
+session, resumed (with the execution id), needs a target, no eligible
+target (with the reason), or failed (with retry). Saving the source is never
+reported as delivery.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -895,7 +921,7 @@ never finalized.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.53.0 (adds LVI, bounding each worker execution in its own cgroup, refusing admission under node pressure with a distinct visible error, reaping executions that never produced output on worker evidence, and finalizing every terminal path including indeterminate ones; 0.52.0 added LV, making secret-reference resolution failures name the failing input and a fixed cause category, rate-limited, token rejected, not found or not shared, or unknown, classified in-process from bounded provider diagnostics that are never surfaced; 0.51.0 added LIV, making fixed-width desktop chrome decide visibility from the measured host width of the rendered panels instead of a one-shot window breakpoint, keep space-driven hiding derived and unpersisted so it never overwrites the saved preference, share one derived "shown" value with every dependent affordance, and let an explicit toggle override lack of space only transiently; 0.50.0 added LIII, making dense rows on narrow viewports declare a content priority, move lower-priority metadata to a second line, truncate or count it rather than overlap the title or widen the scroller, and keep desktop markup unchanged; 0.49.0 added LII, making session-wide history reads reuse the per-turn projection, check scope, prune turns by metadata before loading, load sequentially, page with totals, filter on untruncated text, fall back to turn start for missing timestamps, and answer within a budget that names unscanned turns; 0.48.0 added LI, making creation defaults resolve once in a backend resolver shared by the UI and MCP, with explicit > project > organization > machine precedence, present-but-empty overrides meaning none, explicit empty choices honoured, missing defaults skipped, and unresolvable defaults degrading to none; 0.47.0 added L, making picker-hiding preferences display filters that keep the current selection visible, skip hidden options only in implicit fallbacks, refuse to hide the last or a depended-on option, and store per-host agent preferences on `ExecutorProfile`; 0.46.0 added XLIX, admitting remote MCP clients that cannot hold deployment credentials only through an opt-in VK-issued OAuth 2.1 grant with PKCE, hashed opaque rotating tokens, SSO-gated non-framable consent, bounded registration and replay revocation; 0.45.0 added XLVIII, requiring every shipped frontend package to be linted by `pnpm run lint` and CI from one shared rule set, with tsconfig coverage for tests, fixes in code instead of package-wide disables, and per-case judgement on hook dependencies; 0.44.0 added XLVII, requiring every rendered URL, bare or written as a markdown link, to be clickable through a scheme allow-list, with read-only detection that skips code blocks and never reaches stored markdown; 0.43.0 added XLVI: before resuming, an executor that can prove its vendor continuation artifact is missing starts a visible fresh session in the same workspace, with a fail-open probe, an agent notice, a stderr diagnostic and no fabricated history; 0.42.1 refines XVIII: a producer journal that regressed below the consumer cursor is a discontinuity resolved from matching terminal evidence or classified indeterminate; 0.42.0 added XLV, selecting server-side credentials per request from the settings authority by target resource, with ambient credentials only as a logged fallback, fail-closed unreadable entries, command-scoped delivery, and source-attributed auth errors; 0.41.0 added XLIV, treating each WebSocket as a queued handshake: finite reads go over HTTP with a settled flag and deadline, sockets are shared per identity with a linger, hidden panels defer their sockets, and settled items load once per scope; 0.40.0 added XLIII, bounding bulk enrichment responses by a
+**Version**: 0.54.0 (adds LVII, routing cross-surface content such as issue comments to agents through one shared path with explicit note/reply intent, a single explicit or established target, no auto-start of archived, terminal or stopped work, turn-boundary delivery for busy agents, durable at-most-once delivery with recovery from positive evidence, attributed framing, self-target and hop-count loop guards, snapshot semantics for edits, and outcomes that name the last durable boundary; 0.53.0 added LVI, bounding each worker execution in its own cgroup, refusing admission under node pressure with a distinct visible error, reaping executions that never produced output on worker evidence, and finalizing every terminal path including indeterminate ones; 0.52.0 added LV, making secret-reference resolution failures name the failing input and a fixed cause category, rate-limited, token rejected, not found or not shared, or unknown, classified in-process from bounded provider diagnostics that are never surfaced; 0.51.0 added LIV, making fixed-width desktop chrome decide visibility from the measured host width of the rendered panels instead of a one-shot window breakpoint, keep space-driven hiding derived and unpersisted so it never overwrites the saved preference, share one derived "shown" value with every dependent affordance, and let an explicit toggle override lack of space only transiently; 0.50.0 added LIII, making dense rows on narrow viewports declare a content priority, move lower-priority metadata to a second line, truncate or count it rather than overlap the title or widen the scroller, and keep desktop markup unchanged; 0.49.0 added LII, making session-wide history reads reuse the per-turn projection, check scope, prune turns by metadata before loading, load sequentially, page with totals, filter on untruncated text, fall back to turn start for missing timestamps, and answer within a budget that names unscanned turns; 0.48.0 added LI, making creation defaults resolve once in a backend resolver shared by the UI and MCP, with explicit > project > organization > machine precedence, present-but-empty overrides meaning none, explicit empty choices honoured, missing defaults skipped, and unresolvable defaults degrading to none; 0.47.0 added L, making picker-hiding preferences display filters that keep the current selection visible, skip hidden options only in implicit fallbacks, refuse to hide the last or a depended-on option, and store per-host agent preferences on `ExecutorProfile`; 0.46.0 added XLIX, admitting remote MCP clients that cannot hold deployment credentials only through an opt-in VK-issued OAuth 2.1 grant with PKCE, hashed opaque rotating tokens, SSO-gated non-framable consent, bounded registration and replay revocation; 0.45.0 added XLVIII, requiring every shipped frontend package to be linted by `pnpm run lint` and CI from one shared rule set, with tsconfig coverage for tests, fixes in code instead of package-wide disables, and per-case judgement on hook dependencies; 0.44.0 added XLVII, requiring every rendered URL, bare or written as a markdown link, to be clickable through a scheme allow-list, with read-only detection that skips code blocks and never reaches stored markdown; 0.43.0 added XLVI: before resuming, an executor that can prove its vendor continuation artifact is missing starts a visible fresh session in the same workspace, with a fail-open probe, an agent notice, a stderr diagnostic and no fabricated history; 0.42.1 refines XVIII: a producer journal that regressed below the consumer cursor is a discontinuity resolved from matching terminal evidence or classified indeterminate; 0.42.0 added XLV, selecting server-side credentials per request from the settings authority by target resource, with ambient credentials only as a logged fallback, fail-closed unreadable entries, command-scoped delivery, and source-attributed auth errors; 0.41.0 added XLIV, treating each WebSocket as a queued handshake: finite reads go over HTTP with a settled flag and deadline, sockets are shared per identity with a linger, hidden panels defer their sockets, and settled items load once per scope; 0.40.0 added XLIII, bounding bulk enrichment responses by a
 request-wide budget with last-known fallback and requiring deadlines plus
 cancellation on polled client requests; 0.39.0 added XLII, making auxiliary surfaces such as Settings
 non-modal docked drawers that toggle, guard unsaved changes on every close path,
@@ -1341,3 +1367,16 @@ is required.
 ## Review: vk/5c0e-browser-scrolling
 
 Applied `/speckit.constitution`: II, III, IV and VI govern this change. Extend the existing guarded action protocol with typed scrolling, preserve session/control-generation boundaries and verify both frontend consumers. No new principle needed.
+
+## Review: vk/e252-deliver-issue-co
+
+Applied `/speckit.constitution`. This task adds LVII (version 0.54.0).
+XII and XXVIII already require a single owner and durable accepted work.
+No principle said that content from another surface needs explicit intent,
+a single target, attribution and a truthful delivery outcome before it can
+resume an agent. Without one, a saved issue comment was reasonably taken
+for a delivered one. V (read-only remote additions), XX (comment timestamps
+on derived rows) and XXI (reuse `is_active_status_name`, `issue_url` and the
+follow-up path) also govern this change. The homelab constitution named by
+the command template was not changed, because this project manages only the
+Vibe Kanban repository.

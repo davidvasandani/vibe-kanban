@@ -1,4 +1,6 @@
-use api_types::{DeleteWorkspaceRequest, UpdateWorkspaceRequest, Workspace};
+use api_types::{
+    DeleteWorkspaceRequest, ListIssueWorkspacesResponse, UpdateWorkspaceRequest, Workspace,
+};
 use axum::{
     Json, Router,
     extract::{Extension, Path, State},
@@ -11,7 +13,7 @@ use uuid::Uuid;
 
 use super::{
     error::{ErrorResponse, db_error},
-    organization_members::ensure_project_access,
+    organization_members::{ensure_issue_access, ensure_project_access},
 };
 use crate::{
     AppState,
@@ -50,6 +52,10 @@ pub(super) fn router() -> Router<AppState> {
         .route(
             "/workspaces/by-local-id/{local_workspace_id}",
             get(get_workspace_by_local_id),
+        )
+        .route(
+            "/workspaces/by-issue/{issue_id}",
+            get(list_workspaces_by_issue),
         )
         .route(
             "/workspaces/exists/{local_workspace_id}",
@@ -289,6 +295,41 @@ async fn get_workspace_by_local_id(
     ensure_project_access(state.pool(), ctx.user.id, workspace.project_id).await?;
 
     Ok(Json(workspace))
+}
+
+/// Workspaces linked to an issue, for routing issue comments to sessions.
+/// Read-only; gated by issue access like the comments it routes.
+#[instrument(
+    name = "workspaces.list_workspaces_by_issue",
+    skip(state, ctx),
+    fields(issue_id = %issue_id, user_id = %ctx.user.id)
+)]
+async fn list_workspaces_by_issue(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<RequestContext>,
+    Path(issue_id): Path<Uuid>,
+) -> Result<Json<ListIssueWorkspacesResponse>, ErrorResponse> {
+    ensure_issue_access(state.pool(), ctx.user.id, issue_id).await?;
+
+    let failed = |error| {
+        tracing::error!(?error, %issue_id, "failed to list issue workspaces");
+        ErrorResponse::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to list workspaces linked to issue",
+        )
+    };
+    let workspaces = WorkspaceRepository::list_active_by_issue_id(state.pool(), issue_id)
+        .await
+        .map_err(failed)?;
+    let total = WorkspaceRepository::count_by_issue_id(state.pool(), issue_id)
+        .await
+        .map_err(failed)?;
+    let archived_count = (total - workspaces.len() as i64).max(0);
+
+    Ok(Json(ListIssueWorkspacesResponse {
+        workspaces,
+        archived_count,
+    }))
 }
 
 #[instrument(

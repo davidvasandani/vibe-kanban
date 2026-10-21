@@ -21,6 +21,7 @@ pub mod github_owner_tokens;
 pub mod global_search;
 pub mod health;
 pub mod host_relay;
+pub mod issue_comment_deliveries;
 pub mod mcp_auth;
 pub mod oauth;
 pub mod organizations;
@@ -82,6 +83,7 @@ pub fn router(
         .merge(preview::api_router())
         .merge(releases::router())
         .merge(sessions::router(&deployment))
+        .merge(issue_comment_deliveries::router())
         .merge(terminal::router())
         .route("/ssh-session", get(ssh_session::ssh_session_ws))
         .nest("/remote", remote::router())
