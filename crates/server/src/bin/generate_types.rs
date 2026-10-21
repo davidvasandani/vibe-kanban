@@ -81,6 +81,8 @@ fn generate_types_content() -> String {
         db::models::worker_node::WorkerMountStatus::decl(),
         server::routes::workspaces::affinity::UpdateWorkspaceAffinityRequest::decl(),
         server::routes::workspaces::affinity::WorkspaceAffinityUpdateOutcome::decl(),
+        server::error::WorkerUnavailableReasonCode::decl(),
+        server::error::WorkerUnavailableErrorData::decl(),
         server::routes::workspaces::affinity::WorkspaceAffinityUpdateResponse::decl(),
         server::routes::workspaces::workspace_summary::WorkspaceAffinityKind::decl(),
         server::routes::workspaces::workspace_summary::WorkspaceAffinitySummary::decl(),

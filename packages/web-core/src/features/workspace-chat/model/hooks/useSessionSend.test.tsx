@@ -108,6 +108,30 @@ describe('useSessionSend', () => {
     expect(sendHook.error).toBe('Failed to send: offline');
   });
 
+  it('reports a failed follow-up with its trimmed prompt and error', async () => {
+    const failure = new Error('think4 is not accepting new executions');
+    mocks.followUp.mockRejectedValue(failure);
+    const onFollowUpFailed = vi.fn();
+    act(() =>
+      root.render(
+        <Harness
+          sessionId="session"
+          workspaceId="workspace"
+          isNewSessionMode={false}
+          executorConfig={executorConfig}
+          onFollowUpFailed={onFollowUpFailed}
+        />
+      )
+    );
+
+    await act(async () => {
+      await sendHook.send(' hello ');
+    });
+
+    expect(onFollowUpFailed).toHaveBeenCalledOnce();
+    expect(onFollowUpFailed).toHaveBeenCalledWith('hello', failure);
+  });
+
   it('does not reconcile new-session creation', async () => {
     mocks.createSession.mockResolvedValue({ id: 'new-session' } as Session);
     const onFollowUpAccepted = vi.fn();

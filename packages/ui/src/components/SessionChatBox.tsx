@@ -1,4 +1,4 @@
-import { type ChangeEvent, type ReactNode, useRef } from 'react';
+import { type ChangeEvent, type ReactNode, useRef } from "react";
 import {
   type Icon,
   PaperclipIcon,
@@ -14,36 +14,40 @@ import {
   ArrowsOutIcon,
   GithubLogoIcon,
   PencilSimpleIcon,
-} from '@phosphor-icons/react';
-import { useTranslation } from 'react-i18next';
-import { ChatBoxBase, VisualVariant, type DropzoneProps } from './ChatBoxBase';
-import { type EditorProps, type ExecutorProps } from './CreateChatBox';
-import type { AskUserQuestionItem, QuestionAnswer } from 'shared/types';
+} from "@phosphor-icons/react";
+import { useTranslation } from "react-i18next";
+import { ChatBoxBase, VisualVariant, type DropzoneProps } from "./ChatBoxBase";
+import { type EditorProps, type ExecutorProps } from "./CreateChatBox";
+import type { AskUserQuestionItem, QuestionAnswer } from "shared/types";
 import {
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
-} from './Dropdown';
-import { PrimaryButton } from './PrimaryButton';
-import type { LocalAttachmentMetadata } from './WorkspaceContext';
-import { ToolbarDropdown, ToolbarIconButton } from './Toolbar';
-import { ContextUsageGauge, type ContextUsageInfo } from './ContextUsageGauge';
-import { TodoProgressPopup, type TodoProgressItem } from './TodoProgressPopup';
+} from "./Dropdown";
+import { PrimaryButton } from "./PrimaryButton";
+import {
+  ServerRecoveryBanner,
+  type ServerRecoveryNoticeProps,
+} from "./ServerRecoveryBanner";
+import type { LocalAttachmentMetadata } from "./WorkspaceContext";
+import { ToolbarDropdown, ToolbarIconButton } from "./Toolbar";
+import { ContextUsageGauge, type ContextUsageInfo } from "./ContextUsageGauge";
+import { TodoProgressPopup, type TodoProgressItem } from "./TodoProgressPopup";
 import {
   AskUserQuestionBanner,
   type AskUserQuestionBannerHandle,
-} from './AskUserQuestionBanner';
+} from "./AskUserQuestionBanner";
 import {
   TurnNavigationPopup,
   type TurnNavigationItem,
-} from './TurnNavigationPopup';
+} from "./TurnNavigationPopup";
 
 /**
  * Prompt sent when the user hits Send with an empty editor in an existing
  * session. The placeholder advertises exactly this prompt, so the two must
  * stay in sync.
  */
-export const DEFAULT_CONTINUE_PROMPT = 'Continue working on this task';
+export const DEFAULT_CONTINUE_PROMPT = "Continue working on this task";
 
 /**
  * Message to submit from the session chat box: an empty box in an existing
@@ -73,14 +77,14 @@ export function resolveSessionSendMessage(options: {
 
 // Status enum - single source of truth for execution state
 export type ExecutionStatus =
-  | 'idle'
-  | 'sending'
-  | 'running'
-  | 'queued'
-  | 'stopping'
-  | 'queue-loading'
-  | 'feedback'
-  | 'edit';
+  | "idle"
+  | "sending"
+  | "running"
+  | "queued"
+  | "stopping"
+  | "queue-loading"
+  | "feedback"
+  | "edit";
 
 interface ActionsProps {
   onSend: () => void;
@@ -203,7 +207,7 @@ interface SessionChatBoxProps<TExecutor extends string = string> {
    */
   isDraftLoading?: boolean;
   renderEditor: (
-    props: SessionChatBoxEditorRenderProps<TExecutor>
+    props: SessionChatBoxEditorRenderProps<TExecutor>,
   ) => ReactNode;
   actions: ActionsProps;
   session: SessionProps<TExecutor>;
@@ -214,6 +218,8 @@ interface SessionChatBoxProps<TExecutor extends string = string> {
   askQuestionMode?: AskQuestionModeProps;
   reviewComments?: ReviewCommentsProps;
   interruptedNotice?: InterruptedNoticeProps;
+  /** The session's execution server refused a message; offer recovery. */
+  serverRecoveryNotice?: ServerRecoveryNoticeProps;
   toolbarActions?: ToolbarActionsProps;
   modelSelector?: ReactNode;
   error?: string | null;
@@ -224,7 +230,7 @@ interface SessionChatBoxProps<TExecutor extends string = string> {
   emptyExecutorLabel?: string;
   renderAgentIcon?: (
     executor: TExecutor | string | null | undefined,
-    className?: string
+    className?: string,
   ) => ReactNode;
   formatSessionDate?: (createdAt: string | Date) => string;
   todos?: TodoProgressItem[];
@@ -244,7 +250,7 @@ interface SessionChatBoxProps<TExecutor extends string = string> {
 
 function defaultExecutorLabel(executor: string) {
   return executor
-    .replace(/[_-]+/g, ' ')
+    .replace(/[_-]+/g, " ")
     .toLowerCase()
     .replace(/\b\w/g, (char) => char.toUpperCase());
 }
@@ -256,10 +262,10 @@ function defaultFormatSessionDate(createdAt: string | Date) {
   }
 
   return date.toLocaleString(undefined, {
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
   });
 }
 
@@ -281,6 +287,7 @@ export function SessionChatBox<TExecutor extends string = string>({
   askQuestionMode,
   reviewComments,
   interruptedNotice,
+  serverRecoveryNotice,
   toolbarActions,
   modelSelector,
   error,
@@ -288,7 +295,7 @@ export function SessionChatBox<TExecutor extends string = string>({
   agent,
   executor,
   formatExecutorLabel = defaultExecutorLabel,
-  emptyExecutorLabel = 'Select Executor',
+  emptyExecutorLabel = "Select Executor",
   renderAgentIcon,
   formatSessionDate = defaultFormatSessionDate,
   todos,
@@ -305,7 +312,7 @@ export function SessionChatBox<TExecutor extends string = string>({
   supportsContextUsage,
   dropzone,
 }: SessionChatBoxProps<TExecutor>) {
-  const { t } = useTranslation('tasks');
+  const { t } = useTranslation("tasks");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const askQuestionBannerRef = useRef<AskUserQuestionBannerHandle>(null);
 
@@ -317,28 +324,28 @@ export function SessionChatBox<TExecutor extends string = string>({
 
   // Key to force editor remount when entering feedback/edit/approval/question mode (triggers auto-focus)
   const focusKey = isInFeedbackMode
-    ? 'feedback'
+    ? "feedback"
     : isInEditMode
-      ? 'edit'
+      ? "edit"
       : isInApprovalMode
-        ? 'approval'
+        ? "approval"
         : isInAskQuestionMode
-          ? 'question'
-          : 'normal';
+          ? "question"
+          : "normal";
 
   // Derived state from status
   const isDisabled = Boolean(
-    status === 'sending' ||
-      status === 'stopping' ||
+    status === "sending" ||
+      status === "stopping" ||
       feedbackMode?.isSubmitting ||
       editMode?.isSubmitting ||
       approvalMode?.isSubmitting ||
-      askQuestionMode?.isSubmitting
+      askQuestionMode?.isSubmitting,
   );
   const hasContent =
     editor.value.trim().length > 0 || (reviewComments?.count ?? 0) > 0;
   const canSend =
-    hasContent && !['sending', 'stopping', 'queue-loading'].includes(status);
+    hasContent && !["sending", "stopping", "queue-loading"].includes(status);
   // With an empty editor in an existing session, the Send button submits the
   // default continue prompt advertised by the placeholder. Button only:
   // keyboard shortcuts still require typed content to avoid accidental sends.
@@ -348,29 +355,29 @@ export function SessionChatBox<TExecutor extends string = string>({
   // resolver refuses to substitute the prompt until the draft has loaded).
   const canSendContinue =
     !hasContent &&
-    status === 'idle' &&
+    status === "idle" &&
     !session.isNewSessionMode &&
     Boolean(session.selectedSessionId) &&
     !isDraftLoading;
-  const isQueued = status === 'queued';
-  const isRunning = status === 'running' || status === 'queued';
+  const isQueued = status === "queued";
+  const isRunning = status === "running" || status === "queued";
   const areContentInsertActionsDisabled = isDisabled || isQueued;
   const showRunningAnimation =
-    (status === 'running' || status === 'queued' || status === 'sending') &&
+    (status === "running" || status === "queued" || status === "sending") &&
     !isInApprovalMode &&
     !isInAskQuestionMode &&
     editor.value.trim().length === 0;
 
   const placeholder = isInFeedbackMode
-    ? 'Provide feedback for the plan...'
+    ? "Provide feedback for the plan..."
     : isInEditMode
-      ? 'Edit your message...'
+      ? "Edit your message..."
       : isInApprovalMode
-        ? 'Provide feedback to request changes...'
+        ? "Provide feedback to request changes..."
         : isInAskQuestionMode
-          ? 'Type a different answer...'
+          ? "Type a different answer..."
           : session.isNewSessionMode
-            ? 'Start a new conversation...'
+            ? "Start a new conversation..."
             : `${DEFAULT_CONTINUE_PROMPT}...`;
 
   // Cmd+Enter handler
@@ -378,7 +385,7 @@ export function SessionChatBox<TExecutor extends string = string>({
     // AskUserQuestion mode: Enter submits custom text as answer
     if (isInAskQuestionMode && hasContent) {
       askQuestionBannerRef.current?.submitCustomAnswer(editor.value);
-      editor.onChange('');
+      editor.onChange("");
       return;
     }
     // Approval mode: Cmd+Enter triggers approve or request changes based on input
@@ -394,9 +401,9 @@ export function SessionChatBox<TExecutor extends string = string>({
       feedbackMode?.onSubmitFeedback();
     } else if (isInEditMode && canSend) {
       editMode?.onSubmitEdit();
-    } else if (status === 'running' && canSend) {
+    } else if (status === "running" && canSend) {
       actions.onQueue();
-    } else if (status === 'idle' && canSend) {
+    } else if (status === "idle" && canSend) {
       actions.onSend();
     }
   };
@@ -407,7 +414,7 @@ export function SessionChatBox<TExecutor extends string = string>({
     if (files.length > 0) {
       actions.onPasteFiles(files);
     }
-    e.target.value = '';
+    e.target.value = "";
   };
 
   const handleAttachClick = () => {
@@ -426,12 +433,12 @@ export function SessionChatBox<TExecutor extends string = string>({
     sessions.length > 0 && selectedSessionId === sessions[0].id;
   const selectedSessionObj = sessions.find((s) => s.id === selectedSessionId);
   const sessionLabel = isNewSessionMode
-    ? t('conversation.sessions.newSession')
+    ? t("conversation.sessions.newSession")
     : selectedSessionObj?.name
       ? selectedSessionObj.name
       : isLatestSelected
-        ? t('conversation.sessions.latest')
-        : t('conversation.sessions.previous');
+        ? t("conversation.sessions.latest")
+        : t("conversation.sessions.previous");
 
   // Stats
   const filesChanged = stats?.filesChanged ?? 0;
@@ -447,7 +454,7 @@ export function SessionChatBox<TExecutor extends string = string>({
           <PrimaryButton
             variant="secondary"
             onClick={feedbackMode.onCancel}
-            value={t('conversation.actions.cancel')}
+            value={t("conversation.actions.cancel")}
           />
         );
       }
@@ -456,13 +463,13 @@ export function SessionChatBox<TExecutor extends string = string>({
           <PrimaryButton
             variant="secondary"
             onClick={feedbackMode?.onCancel}
-            value={t('conversation.actions.cancel')}
+            value={t("conversation.actions.cancel")}
           />
           <PrimaryButton
             onClick={feedbackMode?.onSubmitFeedback}
             disabled={!canSend || feedbackMode?.isSubmitting}
-            actionIcon={feedbackMode?.isSubmitting ? 'spinner' : undefined}
-            value={t('conversation.actions.submitFeedback')}
+            actionIcon={feedbackMode?.isSubmitting ? "spinner" : undefined}
+            value={t("conversation.actions.submitFeedback")}
           />
         </>
       );
@@ -475,13 +482,13 @@ export function SessionChatBox<TExecutor extends string = string>({
           <PrimaryButton
             variant="secondary"
             onClick={editMode?.onCancel}
-            value={t('conversation.actions.cancel')}
+            value={t("conversation.actions.cancel")}
           />
           <PrimaryButton
             onClick={editMode?.onSubmitEdit}
             disabled={!canSend || editMode?.isSubmitting}
-            actionIcon={editMode?.isSubmitting ? 'spinner' : undefined}
-            value={t('conversation.retry')}
+            actionIcon={editMode?.isSubmitting ? "spinner" : undefined}
+            value={t("conversation.retry")}
           />
         </>
       );
@@ -494,7 +501,7 @@ export function SessionChatBox<TExecutor extends string = string>({
           <PrimaryButton
             variant="secondary"
             onClick={actions.onStop}
-            value={t('conversation.actions.stop')}
+            value={t("conversation.actions.stop")}
           />
         );
       }
@@ -506,14 +513,14 @@ export function SessionChatBox<TExecutor extends string = string>({
           <PrimaryButton
             variant="secondary"
             onClick={actions.onStop}
-            value={t('conversation.actions.stop')}
+            value={t("conversation.actions.stop")}
           />
           {hasMessage ? (
             <PrimaryButton
               onClick={approvalMode?.onRequestChanges}
               disabled={approvalMode?.isSubmitting}
-              actionIcon={approvalMode?.isSubmitting ? 'spinner' : undefined}
-              value={t('conversation.actions.requestChanges')}
+              actionIcon={approvalMode?.isSubmitting ? "spinner" : undefined}
+              value={t("conversation.actions.requestChanges")}
             />
           ) : (
             <>
@@ -523,16 +530,16 @@ export function SessionChatBox<TExecutor extends string = string>({
                   onClick={approvalMode.onClearContextAndAccept}
                   disabled={approvalMode?.isSubmitting}
                   actionIcon={
-                    approvalMode?.isSubmitting ? 'spinner' : undefined
+                    approvalMode?.isSubmitting ? "spinner" : undefined
                   }
-                  value={t('conversation.actions.forkNewWorkspace')}
+                  value={t("conversation.actions.forkNewWorkspace")}
                 />
               )}
               <PrimaryButton
                 onClick={approvalMode?.onApprove}
                 disabled={approvalMode?.isSubmitting}
-                actionIcon={approvalMode?.isSubmitting ? 'spinner' : undefined}
-                value={t('conversation.actions.approve')}
+                actionIcon={approvalMode?.isSubmitting ? "spinner" : undefined}
+                value={t("conversation.actions.approve")}
               />
             </>
           )}
@@ -547,7 +554,7 @@ export function SessionChatBox<TExecutor extends string = string>({
           <PrimaryButton
             variant="secondary"
             onClick={actions.onStop}
-            value={t('conversation.actions.stop')}
+            value={t("conversation.actions.stop")}
           />
         );
       }
@@ -559,17 +566,17 @@ export function SessionChatBox<TExecutor extends string = string>({
           <PrimaryButton
             variant="secondary"
             onClick={actions.onStop}
-            value={t('conversation.actions.stop')}
+            value={t("conversation.actions.stop")}
           />
           {hasMessage && (
             <PrimaryButton
               onClick={() => {
                 askQuestionBannerRef.current?.submitCustomAnswer(editor.value);
-                editor.onChange('');
+                editor.onChange("");
               }}
               disabled={askQuestionMode?.isSubmitting}
-              actionIcon={askQuestionMode?.isSubmitting ? 'spinner' : undefined}
-              value={t('conversation.actions.send')}
+              actionIcon={askQuestionMode?.isSubmitting ? "spinner" : undefined}
+              value={t("conversation.actions.send")}
             />
           )}
         </>
@@ -577,76 +584,76 @@ export function SessionChatBox<TExecutor extends string = string>({
     }
 
     switch (status) {
-      case 'idle':
+      case "idle":
         return (
           <PrimaryButton
             onClick={actions.onSend}
             disabled={!canSend && !canSendContinue}
-            value={t('conversation.actions.send')}
+            value={t("conversation.actions.send")}
           />
         );
 
-      case 'sending':
+      case "sending":
         return (
           <PrimaryButton
             onClick={actions.onStop}
             actionIcon="spinner"
-            value={t('conversation.actions.sending')}
+            value={t("conversation.actions.sending")}
           />
         );
 
-      case 'running':
+      case "running":
         return (
           <>
             <PrimaryButton
               onClick={actions.onQueue}
               disabled={!canSend}
-              value={t('conversation.actions.queue')}
+              value={t("conversation.actions.queue")}
             />
             <PrimaryButton
               onClick={actions.onStop}
               variant="secondary"
-              value={t('conversation.actions.stop')}
+              value={t("conversation.actions.stop")}
               actionIcon="spinner"
             />
           </>
         );
 
-      case 'queued':
+      case "queued":
         return (
           <>
             <PrimaryButton
               onClick={actions.onCancelQueue}
-              value={t('conversation.actions.cancelQueue')}
+              value={t("conversation.actions.cancelQueue")}
               actionIcon={XIcon}
             />
             <PrimaryButton
               onClick={actions.onStop}
               variant="secondary"
-              value={t('conversation.actions.stop')}
+              value={t("conversation.actions.stop")}
               actionIcon="spinner"
             />
           </>
         );
 
-      case 'stopping':
+      case "stopping":
         return (
           <PrimaryButton
             disabled
-            value={t('conversation.actions.stopping')}
+            value={t("conversation.actions.stopping")}
             actionIcon="spinner"
           />
         );
-      case 'queue-loading':
+      case "queue-loading":
         return (
           <PrimaryButton
             disabled
-            value={t('conversation.actions.loading')}
+            value={t("conversation.actions.loading")}
             actionIcon="spinner"
           />
         );
-      case 'feedback':
-      case 'edit':
+      case "feedback":
+      case "edit":
         return null;
     }
   };
@@ -664,18 +671,18 @@ export function SessionChatBox<TExecutor extends string = string>({
         >
           <ChatCircleIcon className="h-4 w-4 text-brand flex-shrink-0" />
           <span className="text-sm text-normal flex-1">
-            {t('conversation.reviewComments.count', {
+            {t("conversation.reviewComments.count", {
               count: reviewComments.count,
             })}
           </span>
           <button
             onClick={reviewComments.onClear}
             className="text-low hover:text-normal transition-colors p-1 -m-1"
-            title={t('conversation.actions.clearReviewComments')}
+            title={t("conversation.actions.clearReviewComments")}
           >
             <TrashIcon className="h-4 w-4" />
           </button>
-        </div>
+        </div>,
       );
     }
 
@@ -690,7 +697,7 @@ export function SessionChatBox<TExecutor extends string = string>({
           isSubmitting={askQuestionMode.isSubmitting}
           isTimedOut={askQuestionMode.isTimedOut}
           error={askQuestionMode.error ?? null}
-        />
+        />,
       );
     }
 
@@ -704,20 +711,29 @@ export function SessionChatBox<TExecutor extends string = string>({
         >
           <WarningIcon className="h-4 w-4 text-warning flex-shrink-0" />
           <span className="text-sm text-normal flex-1">
-            {t('conversation.interrupted.message')}
+            {t("conversation.interrupted.message")}
           </span>
           <PrimaryButton
             variant="secondary"
             value={
               interruptedNotice.isResuming
-                ? t('conversation.interrupted.resuming')
-                : t('conversation.interrupted.resume')
+                ? t("conversation.interrupted.resuming")
+                : t("conversation.interrupted.resume")
             }
             onClick={interruptedNotice.onResume}
             disabled={interruptedNotice.isResuming}
-            actionIcon={interruptedNotice.isResuming ? 'spinner' : undefined}
+            actionIcon={interruptedNotice.isResuming ? "spinner" : undefined}
           />
-        </div>
+        </div>,
+      );
+    }
+
+    if (serverRecoveryNotice) {
+      banners.push(
+        <ServerRecoveryBanner
+          key="server-recovery"
+          {...serverRecoveryNotice}
+        />,
       );
     }
 
@@ -730,9 +746,9 @@ export function SessionChatBox<TExecutor extends string = string>({
         >
           <ClockIcon className="h-4 w-4 text-low" />
           <span className="text-sm text-low">
-            {t('followUp.queuedMessage')}
+            {t("followUp.queuedMessage")}
           </span>
-        </div>
+        </div>,
       );
     }
 
@@ -779,7 +795,7 @@ export function SessionChatBox<TExecutor extends string = string>({
           {/* New session mode: agent icon + executor dropdown */}
           {isNewSessionMode && executor && (
             <>
-              {renderAgentIcon?.(agent, 'size-icon-xl')}
+              {renderAgentIcon?.(agent, "size-icon-xl")}
               <ToolbarDropdown
                 label={
                   executor.selected
@@ -788,7 +804,7 @@ export function SessionChatBox<TExecutor extends string = string>({
                 }
               >
                 <DropdownMenuLabel>
-                  {t('conversation.executors')}
+                  {t("conversation.executors")}
                 </DropdownMenuLabel>
                 {executor.options.map((exec) => (
                   <DropdownMenuItem
@@ -816,12 +832,12 @@ export function SessionChatBox<TExecutor extends string = string>({
                     <button
                       type="button"
                       className="flex items-center gap-1 text-warning text-sm min-w-0 cursor-pointer hover:underline"
-                      title={t('conversation.approval.conflictWarning')}
+                      title={t("conversation.approval.conflictWarning")}
                       onClick={stats.onResolveConflicts}
                     >
                       <WarningIcon className="size-icon-sm flex-shrink-0" />
                       <span className="truncate">
-                        {t('conversation.approval.conflicts', {
+                        {t("conversation.approval.conflicts", {
                           count: stats.conflictedFilesCount,
                         })}
                       </span>
@@ -843,7 +859,7 @@ export function SessionChatBox<TExecutor extends string = string>({
                     >
                       <span className="text-sm space-x-half whitespace-nowrap truncate">
                         <span>
-                          {t('diff.filesChanged', { count: filesChanged })}
+                          {t("diff.filesChanged", { count: filesChanged })}
                         </span>
                         {(linesAdded !== undefined ||
                           linesRemoved !== undefined) && (
@@ -865,7 +881,7 @@ export function SessionChatBox<TExecutor extends string = string>({
                   ) : (
                     <span className="text-sm text-low space-x-half whitespace-nowrap truncate min-w-0">
                       <span>
-                        {t('diff.filesChanged', { count: filesChanged })}
+                        {t("diff.filesChanged", { count: filesChanged })}
                       </span>
                       {(linesAdded !== undefined ||
                         linesRemoved !== undefined) && (
@@ -899,15 +915,15 @@ export function SessionChatBox<TExecutor extends string = string>({
                 >
                   <ToolbarIconButton
                     icon={ArrowUpIcon}
-                    title={t('conversation.actions.scrollToPreviousMessage')}
+                    title={t("conversation.actions.scrollToPreviousMessage")}
                     aria-label={t(
-                      'conversation.actions.scrollToPreviousMessage'
+                      "conversation.actions.scrollToPreviousMessage",
                     )}
                     onClick={onScrollToPreviousMessage}
                   />
                 </TurnNavigationPopup>
               )}
-              {renderAgentIcon?.(agent, 'size-icon-xl')}
+              {renderAgentIcon?.(agent, "size-icon-xl")}
             </>
           )}
           {/* Todo progress popup - always rendered, disabled when no todos */}
@@ -925,13 +941,13 @@ export function SessionChatBox<TExecutor extends string = string>({
               icon={isNewSessionMode ? CheckIcon : PlusIcon}
               onClick={() => onNewSession?.()}
             >
-              {t('conversation.sessions.newSession')}
+              {t("conversation.sessions.newSession")}
             </DropdownMenuItem>
             {sessions.length > 0 && <DropdownMenuSeparator />}
             {sessions.length > 0 ? (
               <>
                 <DropdownMenuLabel>
-                  {t('conversation.sessions.label')}
+                  {t("conversation.sessions.label")}
                 </DropdownMenuLabel>
                 {sessions.map((s, index) => (
                   <DropdownMenuItem
@@ -946,13 +962,13 @@ export function SessionChatBox<TExecutor extends string = string>({
                     <span className="flex items-center gap-1.5 max-w-[200px]">
                       {renderAgentIcon?.(
                         s.executor ?? null,
-                        'size-icon shrink-0'
+                        "size-icon shrink-0",
                       )}
                       <span className="truncate">
                         {s.name
                           ? s.name
                           : index === 0
-                            ? t('conversation.sessions.latest')
+                            ? t("conversation.sessions.latest")
                             : formatSessionDate(s.created_at)}
                       </span>
                     </span>
@@ -961,7 +977,7 @@ export function SessionChatBox<TExecutor extends string = string>({
               </>
             ) : (
               <DropdownMenuItem disabled>
-                {t('conversation.sessions.noPreviousSessions')}
+                {t("conversation.sessions.noPreviousSessions")}
               </DropdownMenuItem>
             )}
             {onRenameSession && selectedSessionId && !isNewSessionMode && (
@@ -972,11 +988,11 @@ export function SessionChatBox<TExecutor extends string = string>({
                   onClick={() =>
                     onRenameSession(
                       selectedSessionId,
-                      selectedSessionObj?.name ?? ''
+                      selectedSessionObj?.name ?? "",
                     )
                   }
                 >
-                  {t('conversation.sessions.rename')}
+                  {t("conversation.sessions.rename")}
                 </DropdownMenuItem>
               </>
             )}
@@ -987,8 +1003,8 @@ export function SessionChatBox<TExecutor extends string = string>({
         <>
           <ToolbarIconButton
             icon={PaperclipIcon}
-            aria-label={t('tasks:taskFormDialog.attachFile')}
-            title={t('tasks:taskFormDialog.attachFile')}
+            aria-label={t("tasks:taskFormDialog.attachFile")}
+            title={t("tasks:taskFormDialog.attachFile")}
             onClick={handleAttachClick}
             disabled={areContentInsertActionsDisabled}
           />
