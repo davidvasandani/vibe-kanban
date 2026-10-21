@@ -371,6 +371,12 @@ contributed to it.
   byte-identical on export. So display-only changes use tagged, microtask-
   queued updates, export is skipped while a read-only tree holds auto links,
   and links are unwrapped on becoming editable (`vk/e4ef-urls-always-clic`).
+- [markdown-tables.md](markdown-tables.md) — How `TABLE_TRANSFORMER`
+  imports and exports GFM tables. Lexical 0.36 strips the matched line
+  before `replace`, so decide from `match`, and restore the text when
+  declining on import. Covers empty cells, backslash-parity splitting,
+  header and divider rules, and the export normalisation that keeps tables
+  round-tripping (`vk/37ef-fix-tables`).
 - [frontend-linting.md](frontend-linting.md) — One shared ESLint rule set (`eslint.frontend.cjs`) for local-web, web-core and remote-web. Plugins resolve from the consuming package, and a tsconfig that covers tests prevents parse errors. Directive comments are banned outright, and layer boundaries forbid same-feature aliased imports. Covers the `ignoreRestSiblings` trap and patterns for fixing `exhaustive-deps` without changing when hooks fire (`vk/848f-lint-packages-we`).
 - [session-chat-history-search.md](session-chat-history-search.md) — Reading
   any part of a session's chat log through the MCP (`search_session_messages`,
