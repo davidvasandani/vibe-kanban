@@ -53,6 +53,11 @@ interface UseWorkerUnavailableRecoveryOptions {
    * refusal is reported back through `start`, which continues the window.
    */
   resend: (prompt: string) => Promise<boolean>;
+  /**
+   * Whether an automatic resend may run now (e.g. no agent is running in the
+   * session). When false, the poll keeps waiting instead.
+   */
+  canAutoResend?: () => boolean;
 }
 
 export interface UseWorkerUnavailableRecoveryResult {
@@ -85,6 +90,7 @@ export function useWorkerUnavailableRecovery({
   workspaceId,
   requiredExecutorProfile,
   resend,
+  canAutoResend,
 }: UseWorkerUnavailableRecoveryOptions): UseWorkerUnavailableRecoveryResult {
   const queryClient = useQueryClient();
   const [state, setState] = useState<ServerRecoveryState | null>(null);
@@ -103,6 +109,8 @@ export function useWorkerUnavailableRecovery({
   const resendGenerationRef = useRef<number | null>(null);
   const resendRef = useRef(resend);
   resendRef.current = resend;
+  const canAutoResendRef = useRef(canAutoResend);
+  canAutoResendRef.current = canAutoResend;
   const sessionIdRef = useRef(sessionId);
   sessionIdRef.current = sessionId;
   const profileRef = useRef(requiredExecutorProfile);
@@ -229,7 +237,8 @@ export function useWorkerUnavailableRecovery({
     if (
       allowResend &&
       refused &&
-      isWorkerAccepting(refused, profileRef.current, now)
+      isWorkerAccepting(refused, profileRef.current, now) &&
+      (canAutoResendRef.current?.() ?? true)
     ) {
       await runResend(generation);
       return;

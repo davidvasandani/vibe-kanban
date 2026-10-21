@@ -738,11 +738,20 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
     },
     [clearError, completeSuccessfulSend, onScrollToBottom, send]
   );
+  // An agent started by another route (a restart, another tab) must finish
+  // before recovery resends on its own.
+  const sessionHasRunningAgentRef = useRef(sessionHasRunningAgent);
+  sessionHasRunningAgentRef.current = sessionHasRunningAgent;
+  const canAutoResend = useCallback(
+    () => !sessionHasRunningAgentRef.current,
+    []
+  );
   const serverRecovery = useWorkerUnavailableRecovery({
     sessionId: isNewSessionMode ? undefined : sessionId,
     workspaceId,
     requiredExecutorProfile: recoveryProfile,
     resend: resendAfterRecovery,
+    canAutoResend,
   });
   const { start: startRecovery, dismiss: dismissRecovery } = serverRecovery;
   startRecoveryRef.current = startRecovery;
@@ -832,6 +841,8 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
     const { prompt } = buildAgentPrompt(localMessage, [reviewMarkdown]);
 
     cancelDebouncedSave();
+    // The queued message supersedes any refused send awaiting recovery.
+    dismissRecovery();
     await saveToScratch(localMessage, executorConfig);
     await queueMessage(prompt, executorConfig);
 
@@ -840,6 +851,7 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
     clearUploadedAttachments();
     reviewContext?.clearComments();
   }, [
+    dismissRecovery,
     localMessage,
     reviewMarkdown,
     executorConfig,
@@ -953,6 +965,8 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
   const handleSubmitEdit = useCallback(async () => {
     if (!editContext.activeEdit || !localMessage.trim() || !executorConfig)
       return;
+    // The edited retry supersedes any refused send still awaiting recovery.
+    dismissRecovery();
     editRetryMutation.mutate({
       message: localMessage,
       executorConfig,
@@ -967,6 +981,7 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
     branchStatus,
     processes,
     editRetryMutation,
+    dismissRecovery,
   ]);
 
   // Handle cancel edit mode

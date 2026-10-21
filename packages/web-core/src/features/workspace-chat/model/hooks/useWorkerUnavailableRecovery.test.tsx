@@ -221,6 +221,38 @@ describe('useWorkerUnavailableRecovery', () => {
     expect(hook.state).toBeNull();
   });
 
+  it('holds the automatic resend while the session is busy', async () => {
+    mocks.listWorkers.mockResolvedValue([worker('think4')]);
+    resend.mockResolvedValue(true);
+    let busy = true;
+    const queryClient = new QueryClient();
+    act(() =>
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <Harness
+            sessionId="session"
+            workspaceId="workspace"
+            requiredExecutorProfile={PROFILE}
+            resend={resend}
+            canAutoResend={() => !busy}
+          />
+        </QueryClientProvider>
+      )
+    );
+    act(() => {
+      hook.start('hello', refusal(), 'session');
+    });
+    await flush();
+
+    await advance(5_000);
+    expect(resend).not.toHaveBeenCalled();
+    expect(hook.state?.phase).toBe('waiting');
+
+    busy = false;
+    await advance(10_000);
+    expect(resend).toHaveBeenCalledWith('hello');
+  });
+
   it('continues the same window when the resend is refused again', async () => {
     mocks.listWorkers.mockResolvedValue([worker('think4', true)]);
     render();
