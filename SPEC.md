@@ -29,6 +29,16 @@ poller behavior.
 - Cover the changed lifecycle or enforcement boundary with regression tests.
 - Run independent Codex review, record reusable knowledge, and merge a PR.
 
-## Open question
-Confirm whether the requested change covers both visible subtasks and parent
-resumption, or one of those behaviors. Implementation awaits that distinction.
+## Clarification
+The user confirmed both tracked subtasks and automatic parent resumption.
+
+## Final design
+Use existing child issues and independent workspaces. `start_workspace` gains
+opt-in `resume_parent`; the backend persists ownership before launch, links the
+child before setup, and records an immutable outcome. Existing durable comment
+delivery resumes exactly the originating session at a confirmed boundary.
+Setup-only failures, turn failures, cancellation and restart recovery report
+truthful outcomes. Stopped/archived/terminal parents are not revived.
+
+Delegation is bounded to five pending children per parent, twenty starts per
+hour globally, one depth, and the existing two-hop continuation budget.

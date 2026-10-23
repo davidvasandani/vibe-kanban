@@ -19,6 +19,25 @@ impl SessionTurnBoundary {
         else {
             return Ok(());
         };
+        Self::write(pool, session_id, turn_id).await
+    }
+
+    /// Finalize a chain even when setup ended before an agent could start.
+    /// Coding-agent delivery still compares against the latest coding turn;
+    /// child observers can also recognize a settled setup-only chain.
+    pub async fn record_finalized(
+        pool: &SqlitePool,
+        session_id: Uuid,
+        process_id: Uuid,
+    ) -> Result<(), sqlx::Error> {
+        let turn_id = ExecutionProcess::latest_coding_agent_turn_for_session(pool, session_id)
+            .await?
+            .map(|(id, _, _)| id)
+            .unwrap_or(process_id);
+        Self::write(pool, session_id, turn_id).await
+    }
+
+    async fn write(pool: &SqlitePool, session_id: Uuid, turn_id: Uuid) -> Result<(), sqlx::Error> {
         sqlx::query(
             "INSERT INTO session_turn_boundaries (session_id, turn_execution_id, finalized_at) \
              VALUES (?, ?, ?) ON CONFLICT(session_id) DO UPDATE SET \

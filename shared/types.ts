@@ -1156,7 +1156,11 @@ export type GetPrCommentsError = { "type": "no_pr_attached" } | { "type": "cli_n
 
 export type GetPrCommentsQuery = { repo_id: string, };
 
-export type CreateAndStartWorkspaceRequest = { name: string | null, repos: Array<WorkspaceRepoInput>, linked_issue: LinkedIssueInfo | null, executor_config: ExecutorConfig, prompt: string, attachment_ids: Array<string> | null, 
+export type CreateAndStartWorkspaceRequest = { 
+/**
+ * Register this child issue/workspace for automatic parent continuation.
+ */
+parent_session_id?: string, name: string | null, repos: Array<WorkspaceRepoInput>, linked_issue: LinkedIssueInfo | null, executor_config: ExecutorConfig, prompt: string, attachment_ids: Array<string> | null, 
 /**
  * Explicitly retain coordinator-local placement in cluster mode.
  */

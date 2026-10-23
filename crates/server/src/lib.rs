@@ -1,3 +1,4 @@
+pub mod background_subtasks;
 pub mod error;
 pub mod error_remediation;
 pub mod issue_comment_delivery;

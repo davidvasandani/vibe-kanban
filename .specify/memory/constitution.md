@@ -1399,3 +1399,12 @@ detecting divider rows after a Lexical upgrade. II (test the contract) and
 IV (`packages/ui` change affects both frontends) also govern this change.
 The homelab constitution named by the command template was not changed,
 because this project manages only the Vibe Kanban repository.
+
+## Review: vk/5de6-background-jobs
+
+Applied `/speckit.constitution`. II, III, IX, XII, XLI and LVII govern
+tracked background subtasks: durable ownership before launch, bounded fanout
+and depth, actionable replacement for unsupported CLI background work, and
+exact parent targeting without implicit consent to revive stopped work.
+Completion is an observed turn outcome, not proof of task success. Preserve
+command poller behavior and reuse the existing durable delivery dispatcher.

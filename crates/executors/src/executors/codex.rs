@@ -203,6 +203,8 @@ mod tests {
         let instructions = params
             .developer_instructions
             .expect("developer instructions must be set even with none configured");
+        assert!(instructions.contains("resume_parent: true"));
+        assert!(instructions.contains("parent_issue_id"));
 
         assert!(
             instructions.contains("spawn_poller"),
@@ -589,7 +591,18 @@ lifetime including hung commands), or both. Manual stopping alone is insufficien
 Do not try to work around this with `nohup`, `setsid`, `&`, `disown`, or a \
 detached subshell: those are reaped with the turn just the same. Prefer running \
 the command in the foreground when you only need its result now, and reach for \
-`spawn_poller` when the work genuinely has to outlive this turn.";
+`spawn_poller` when the work genuinely has to outlive this turn.
+
+For delegated background agent work, create a child issue with `create_issue` \
+(parent_issue_id: the current issue, pipeline_ids: []), then `start_workspace` \
+(issue_id: that child, resume_parent: true, repositories: the intended branches). \
+This creates a tracked subtask in its own workspace. Vibe Kanban persists its \
+completion and resumes this parent session at an eligible turn boundary. \
+Native background subagents cannot resume a Vibe Kanban parent after it exits. \
+Use foreground agents only within a turn; do not end a turn waiting for a native \
+subagent notification. Child checkouts are independent; commit and integrate \
+changes explicitly. A child turn ending is a result to inspect, not proof of \
+semantic task completion.";
 
 /// Prepend the poller notice to any operator-configured `developer_instructions`.
 ///

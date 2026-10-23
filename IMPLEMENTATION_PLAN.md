@@ -16,5 +16,6 @@
 7. Update and commit reusable project knowledge with this task identifier.
 8. Open and merge the task PR against the confirmed base branch.
 
-The concrete code changes depend on clarifying whether this request includes
-automatic parent resumption as well as visible child-task tracking.
+The user confirmed both behaviors. Concrete implementation and dependency
+ordering are recorded in the workspace SpecKit feature directory
+`homelab/specs/vk/5de6-background-jobs/`.

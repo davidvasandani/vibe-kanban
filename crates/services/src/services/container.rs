@@ -950,7 +950,13 @@ pub trait ContainerService {
         // started in its place: record that turn boundary durably and for this
         // exact turn, before any early return, so issue comment delivery can
         // never race the exit monitor's own handoff.
-        if let Err(error) = SessionTurnBoundary::record(&self.db().pool, ctx.session.id).await {
+        if let Err(error) = SessionTurnBoundary::record_finalized(
+            &self.db().pool,
+            ctx.session.id,
+            ctx.execution_process.id,
+        )
+        .await
+        {
             tracing::warn!(?error, session_id = %ctx.session.id, "failed to record turn boundary");
         }
 
@@ -2731,13 +2737,28 @@ pub trait ContainerService {
             ) => ExecutionProcessRunReason::CodingAgent,
         };
 
-        self.start_execution_after_workspace_restart(
-            &ctx.workspace,
-            &ctx.session,
-            next_action,
-            &next_run_reason,
-        )
-        .await?;
+        if let Err(error) = self
+            .start_execution_after_workspace_restart(
+                &ctx.workspace,
+                &ctx.session,
+                next_action,
+                &next_run_reason,
+            )
+            .await
+        {
+            // No exit monitor exists for a failed handoff. Settle this chain
+            // even if launch failed before creating the next process row.
+            if let Err(boundary_error) = SessionTurnBoundary::record_finalized(
+                &self.db().pool,
+                ctx.session.id,
+                ctx.execution_process.id,
+            )
+            .await
+            {
+                tracing::error!(?boundary_error, "Failed to record failed handoff boundary");
+            }
+            return Err(error);
+        }
 
         tracing::debug!("Started next action: {:?}", next_action);
         Ok(())

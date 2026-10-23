@@ -314,6 +314,7 @@ async fn launch(
     let started = create_and_start_workspace(
         State(deployment.clone()),
         Json(CreateAndStartWorkspaceRequest {
+            parent_session_id: None,
             name: Some(draft.title.clone()),
             repos,
             linked_issue: Some(LinkedIssueInfo {

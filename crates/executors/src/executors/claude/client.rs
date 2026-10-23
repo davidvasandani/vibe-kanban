@@ -52,6 +52,9 @@ pub fn schedule_wakeup_deny_response() -> serde_json::Value {
 /// because the control is *parameter*-granular: `Bash` itself must keep
 /// working. See [`super::BACKGROUND_POLLER_TOOLS`] for why denying the
 /// background-polling tool names alone is not sufficient.
+pub const DENY_BACKGROUND_AGENT_CALLBACK_ID: &str = "DENY_BACKGROUND_AGENT_CALLBACK_ID";
+pub const BACKGROUND_AGENT_DENY_REASON: &str = "Background agents die when this Vibe Kanban turn ends. Create a tracked child issue with create_issue(parent_issue_id: the current issue, pipeline_ids: []), then use start_workspace(issue_id: that child, resume_parent: true, repositories: the intended branches). Vibe Kanban persists the child and delivers its turn outcome to this parent session automatically. Use a foreground agent for work you need within this turn. Do not wait for a native background-agent notification.";
+
 pub const DENY_BACKGROUND_BASH_CALLBACK_ID: &str = "DENY_BACKGROUND_BASH_CALLBACK_ID";
 /// Reason surfaced to the agent when it tries to start a background process
 /// inside a VK turn. A turn is one OS process group and VK reaps it at turn end
@@ -827,6 +830,13 @@ impl ClaudeAgentClient {
             }
         }
 
+        if callback_id == DENY_BACKGROUND_AGENT_CALLBACK_ID && is_background_bash_input(&input) {
+            return Ok(serde_json::json!({"hookSpecificOutput": {
+                "hookEventName": "PreToolUse", "permissionDecision": "deny",
+                "permissionDecisionReason": BACKGROUND_AGENT_DENY_REASON
+            }}));
+        }
+
         if self.auto_approve {
             Ok(serde_json::json!({
                 "hookSpecificOutput": {
@@ -850,7 +860,9 @@ impl ClaudeAgentClient {
                 // (auto-approve in plan mode, `tool_approval` in approvals
                 // mode). Forwarding to can_use_tool here instead would turn
                 // every plan-mode `Bash` into a user prompt.
-                DENY_BACKGROUND_BASH_CALLBACK_ID => Ok(serde_json::json!({})),
+                DENY_BACKGROUND_BASH_CALLBACK_ID | DENY_BACKGROUND_AGENT_CALLBACK_ID => {
+                    Ok(serde_json::json!({}))
+                }
                 _ => {
                     // Hook callbacks is only used to forward approval requests to can_use_tool.
                     // This works because `ask` decision in hook callback triggers a can_use_tool request
@@ -926,6 +938,34 @@ mod tests {
             "tool_name": "Bash",
             "tool_input": tool_input,
         })
+    }
+
+    #[tokio::test]
+    async fn background_agents_redirect_in_all_modes_but_foreground_agents_survive() {
+        for client in [auto_approve_client(), approval_client()] {
+            for tool in ["Agent", "Task"] {
+                for background in [true, false] {
+                    let response = client.on_hook_callback(
+                        DENY_BACKGROUND_AGENT_CALLBACK_ID.to_string(),
+                        serde_json::json!({"tool_name": tool, "tool_input": {"run_in_background": background}}),
+                        None,
+                    ).await.unwrap();
+                    assert_eq!(permission_decision(&response) == Some("deny"), background);
+                    if background {
+                        assert!(response.to_string().contains("resume_parent: true"));
+                    }
+                }
+                let response = client
+                    .on_hook_callback(
+                        DENY_BACKGROUND_AGENT_CALLBACK_ID.to_string(),
+                        serde_json::json!({"tool_name": tool, "tool_input": {"prompt": "inspect"}}),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                assert_ne!(permission_decision(&response), Some("deny"));
+            }
+        }
     }
 
     #[test]

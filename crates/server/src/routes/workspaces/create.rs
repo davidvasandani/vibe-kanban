@@ -306,6 +306,18 @@ async fn run_create_and_start_workspace(
     attachment_ids: Option<Vec<Uuid>>,
     placement_intent: PlacementIntent,
 ) -> Result<(), ApiError> {
+    if let Some(child) = &linked_issue
+        && db::models::background_subtask::BackgroundSubtask::for_issue(
+            &deployment.db().pool,
+            child.issue_id,
+        )
+        .await?
+        .is_some_and(|row| row.child_workspace_id == workspace.id)
+    {
+        crate::background_subtasks::link_child(&deployment, &workspace, child).await?;
+        workspace_prompt.push_str("\n\nThis is a tracked Vibe Kanban background subtask. Complete the assigned work in this turn and summarize results, limitations and any commit IDs. Your turn outcome is delivered automatically to the parent session. Do not send a separate parent notification or delegate further background subtasks. Your checkout is independent of the parent's.");
+    }
+
     WorkspaceCreationProgress::report(
         &deployment.db().pool,
         workspace.id,
@@ -489,6 +501,7 @@ pub async fn create_and_start_workspace(
     Json(payload): Json<CreateAndStartWorkspaceRequest>,
 ) -> Result<ResponseJson<ApiResponse<CreateAndStartWorkspaceResponse>>, ApiError> {
     let CreateAndStartWorkspaceRequest {
+        parent_session_id,
         name,
         repos,
         linked_issue,
@@ -513,6 +526,44 @@ pub async fn create_and_start_workspace(
         ));
     }
 
+    let _registration_guard = if parent_session_id.is_some() {
+        Some(crate::background_subtasks::REGISTRATION_LOCK.lock().await)
+    } else {
+        None
+    };
+    let parent = if let Some(session_id) = parent_session_id {
+        let child = linked_issue.as_ref().ok_or_else(|| {
+            ApiError::BadRequest("Background subtasks require a linked child issue".into())
+        })?;
+        if let Some(existing) = db::models::background_subtask::BackgroundSubtask::for_issue(
+            &deployment.db().pool,
+            child.issue_id,
+        )
+        .await?
+        {
+            if existing.parent_session_id != session_id {
+                return Err(ApiError::Conflict(
+                    "Child is already owned by another parent session".into(),
+                ));
+            }
+            let workspace =
+                Workspace::find_by_id(&deployment.db().pool, existing.child_workspace_id)
+                    .await?
+                    .ok_or_else(|| {
+                        ApiError::Conflict(
+                            "The accepted child workspace was deleted; create a new child issue"
+                                .into(),
+                        )
+                    })?;
+            return Ok(ResponseJson(ApiResponse::success(
+                CreateAndStartWorkspaceResponse { workspace },
+            )));
+        }
+        Some(crate::background_subtasks::validate(&deployment, session_id, child).await?)
+    } else {
+        None
+    };
+
     let workspace = create_workspace_record(&deployment, name).await?;
     if !Workspace::queue_creation(&deployment.db().pool, workspace.id).await? {
         return Err(ApiError::Conflict(format!(
@@ -523,6 +574,27 @@ pub async fn create_and_start_workspace(
     let workspace = Workspace::find_by_id(&deployment.db().pool, workspace.id)
         .await?
         .ok_or(db::models::workspace::WorkspaceError::WorkspaceNotFound)?;
+    if let (Some((parent, parent_issue_id, hop_count)), Some(child)) = (&parent, &linked_issue) {
+        let subscription = crate::background_subtasks::subscription(
+            child,
+            &workspace,
+            parent,
+            *parent_issue_id,
+            *hop_count,
+        );
+        if !subscription.register(&deployment.db().pool).await? {
+            let _ = Workspace::fail_creation(
+                &deployment.db().pool,
+                workspace.id,
+                "Subtask limit reached or nested delegation refused",
+            )
+            .await;
+            return Err(ApiError::Conflict(
+                "Subtask limit reached: five pending per parent, twenty starts per hour globally, and no nested delegation"
+                    .into(),
+            ));
+        }
+    }
     let accepted_workspace = workspace.clone();
     let background_deployment = deployment.clone();
     tokio::spawn(async move {
