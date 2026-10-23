@@ -30,6 +30,10 @@ pub struct LinkedIssueInfo {
 
 #[derive(Debug, Serialize, Deserialize, TS)]
 pub struct CreateAndStartWorkspaceRequest {
+    /// Register this child issue/workspace for automatic parent continuation.
+    #[serde(default)]
+    #[ts(optional)]
+    pub parent_session_id: Option<Uuid>,
     pub name: Option<String>,
     pub repos: Vec<WorkspaceRepoInput>,
     pub linked_issue: Option<LinkedIssueInfo>,

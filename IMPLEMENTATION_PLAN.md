@@ -1,33 +1,21 @@
-# Implementation plan — vk/37ef-fix-tables
+# Implementation plan — vk/5de6-background-jobs
 
-See `SPEC.md` for the problem, root cause and requirements R1–R6.
+1. Confirm the reported background-job behavior and trace the affected executor
+   from launch policy through delegation and parent completion. Use workspace
+   `PRIOR_KNOWLEDGE.md` to distinguish pollers from agent subtasks.
+2. Run the workspace SpecKit commands in their required order, using the
+   per-task feature directory pointer. Resolve the scope of parent resumption
+   during clarification before committing to a lifecycle design.
+3. Implement the smallest supported tracked-child path and any required
+   executor enforcement/instructions. Preserve foreground work and pollers.
+4. Add regression coverage at the changed lifecycle boundary, including failure
+   and repeated completion if a continuation mechanism changes.
+5. Install locked dependencies, format as required by AGENTS.md, and run checks
+   appropriate to the resulting changes.
+6. Run independent Codex review; address significant findings and reverify.
+7. Update and commit reusable project knowledge with this task identifier.
+8. Open and merge the task PR against the confirmed base branch.
 
-## Steps
-
-1. **Detect the divider from the match, not the paragraph text**
-   (`packages/ui/src/lib/table-transformer.ts`, `replace`).
-   - Test `match[0]` against a loosened divider regex
-     `^\|(?:\s*:?-+:?\s*\|)+\s*$`. `match[0]` is the full line in both the
-     import path and the typing-shortcut path, unlike
-     `parentNode.getTextContent()`, which Lexical 0.36 empties first.
-   - When the previous sibling is a table with exactly one row, mark that
-     row's cells `TableCellHeaderStates.ROW`. Always remove the divider
-     paragraph.
-2. **Preserve empty cells and escaped pipes** (`mapToTableCells`).
-   - Split `match[1]` on unescaped pipes (`/(?<!\\)\|/`), trim each cell,
-     keep empties, and turn `\|` back into `|` before parsing the cell
-     content.
-3. **Rectangular grid.** When appending a row to an existing table, pad it
-   with empty cells up to the first row's cell count. Never truncate.
-4. **Export.** Escape `|` in cell text as `\|` so an exported cell with a
-   pipe re-imports as one cell. Empty cells already export as `|  |`.
-5. **Tests** — `packages/web-core/src/shared/lib/tableTransformer.test.ts`:
-   - the screenshot table (empty top-left header cell, bold headers);
-   - divider variants (`|---|`, `| :---: |`, `|  ---  |`, trailing space);
-   - empty leading/middle/trailing cells;
-   - short body row padded;
-   - escaped pipe kept in its cell;
-   - header row marked;
-   - import → export → import gives the same structure.
-6. **Verify**: web-core vitest, `pnpm run check`, `pnpm run lint`,
-   `pnpm run format`.
+The user confirmed both behaviors. Concrete implementation and dependency
+ordering are recorded in the workspace SpecKit feature directory
+`homelab/specs/vk/5de6-background-jobs/`.

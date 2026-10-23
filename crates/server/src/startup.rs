@@ -201,6 +201,7 @@ pub async fn initialize_deployment(
     // Turns interrupted by the previous process are settled now; issue
     // comments waiting for them may treat them as turn boundaries.
     crate::issue_comment_delivery::dispatcher(&deployment).mark_startup_reconciled();
+    crate::background_subtasks::spawn(&deployment);
     deployment
         .container()
         .backfill_before_head_commits()

@@ -33,8 +33,9 @@ use workspace_utils::{
 
 use self::{
     client::{
-        AUTO_APPROVE_CALLBACK_ID, ClaudeAgentClient, DENY_BACKGROUND_BASH_CALLBACK_ID,
-        DENY_SCHEDULE_WAKEUP_CALLBACK_ID, STOP_GIT_CHECK_CALLBACK_ID,
+        AUTO_APPROVE_CALLBACK_ID, ClaudeAgentClient, DENY_BACKGROUND_AGENT_CALLBACK_ID,
+        DENY_BACKGROUND_BASH_CALLBACK_ID, DENY_SCHEDULE_WAKEUP_CALLBACK_ID,
+        STOP_GIT_CHECK_CALLBACK_ID,
     },
     protocol::ProtocolPeer,
     types::{ControlRequestType, ControlResponseType, PermissionMode},
@@ -670,6 +671,10 @@ impl ClaudeCode {
                         "hookCallbackIds": [DENY_BACKGROUND_BASH_CALLBACK_ID],
                     },
                     {
+                        "matcher": "^(Agent|Task)$",
+                        "hookCallbackIds": [DENY_BACKGROUND_AGENT_CALLBACK_ID],
+                    },
+                    {
                         "matcher": "^(ExitPlanMode|AskUserQuestion)$",
                         "hookCallbackIds": ["tool_approval"],
                     },
@@ -690,6 +695,10 @@ impl ClaudeCode {
                     {
                         "matcher": BACKGROUND_BASH_MATCHER,
                         "hookCallbackIds": [DENY_BACKGROUND_BASH_CALLBACK_ID],
+                    },
+                    {
+                        "matcher": "^(Agent|Task)$",
+                        "hookCallbackIds": [DENY_BACKGROUND_AGENT_CALLBACK_ID],
                     },
                     {
                         "matcher": catch_all_matcher_excluding(&[
@@ -715,6 +724,10 @@ impl ClaudeCode {
                     {
                         "matcher": BACKGROUND_BASH_MATCHER,
                         "hookCallbackIds": [DENY_BACKGROUND_BASH_CALLBACK_ID],
+                    },
+                    {
+                        "matcher": "^(Agent|Task)$",
+                        "hookCallbackIds": [DENY_BACKGROUND_AGENT_CALLBACK_ID],
                     },
                     {
                         "matcher": "^AskUserQuestion$",
@@ -3972,6 +3985,11 @@ mod tests {
         ];
         for (label, claude) in modes {
             let hooks = claude.get_hooks(false).expect("hooks present");
+            assert_eq!(
+                matchers_for_callback(&hooks, DENY_BACKGROUND_AGENT_CALLBACK_ID),
+                vec!["^(Agent|Task)$".to_string()],
+                "{label} must route background agents"
+            );
             let deny_matchers = matchers_for_callback(&hooks, DENY_BACKGROUND_BASH_CALLBACK_ID);
             assert_eq!(
                 deny_matchers,

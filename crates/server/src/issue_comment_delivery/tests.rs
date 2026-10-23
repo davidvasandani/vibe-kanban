@@ -1468,3 +1468,217 @@ async fn turns_interrupted_by_a_restart_become_boundaries_after_startup() {
     fx.dispatcher.sweep().await.unwrap();
     assert_eq!(fx.starts().len(), 1);
 }
+
+#[tokio::test]
+async fn subtask_result_targets_origin_and_is_idempotent_after_restart() {
+    let f = Fixture::new().await;
+    let (workspace, parent) = f.linked_workspace().await;
+    let other = f.add_session(workspace).await;
+    f.waiting(parent).await;
+    f.waiting(other).await;
+    let id = Uuid::new_v4();
+    let result = f
+        .dispatcher
+        .subtask_result(
+            f.issue_id,
+            parent,
+            id,
+            "Child turn completed; inspect result".into(),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.state, IssueCommentDeliveryState::Delivered);
+    assert_eq!(result.session_id, Some(parent));
+    assert!(!result.allow_stopped_target);
+    let restarted = IssueCommentDispatcher::new(f.pool.clone(), f.backend.clone());
+    restarted.recover().await.unwrap();
+    restarted
+        .subtask_result(
+            f.issue_id,
+            parent,
+            id,
+            "Child turn completed; inspect result".into(),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(f.backend.state().starts.len(), 1);
+    assert_eq!(f.backend.state().starts[0].0, parent);
+}
+
+#[tokio::test]
+async fn subtask_result_never_revives_a_stopped_parent_even_with_exact_target() {
+    for status in [
+        ExecutionProcessStatus::Killed,
+        ExecutionProcessStatus::Failed,
+        ExecutionProcessStatus::Interrupted,
+        ExecutionProcessStatus::Indeterminate,
+    ] {
+        let f = Fixture::new().await;
+        let (_, parent) = f.linked_workspace().await;
+        insert_turn(&f.pool, parent, "Stopped parent", status, Some(600)).await;
+        let id = Uuid::new_v4();
+        let result = f
+            .dispatcher
+            .subtask_result(f.issue_id, parent, id, "Child failed".into(), 1)
+            .await
+            .unwrap();
+        assert_eq!(result.state, IssueCommentDeliveryState::NoTarget);
+        assert_eq!(result.reason, Some(IssueCommentDeliveryReason::TurnStopped));
+        f.dispatcher
+            .subtask_result(f.issue_id, parent, id, "Child failed".into(), 1)
+            .await
+            .unwrap();
+        assert!(f.backend.state().starts.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn subtask_result_waits_for_running_parent_and_respects_later_stop() {
+    let f = Fixture::new().await;
+    let (_, parent) = f.linked_workspace().await;
+    let turn = insert_turn(
+        &f.pool,
+        parent,
+        "Working",
+        ExecutionProcessStatus::Running,
+        None,
+    )
+    .await;
+    let result = f
+        .dispatcher
+        .subtask_result(f.issue_id, parent, Uuid::new_v4(), "Child result".into(), 1)
+        .await
+        .unwrap();
+    assert_eq!(result.state, IssueCommentDeliveryState::Pending);
+    assert!(f.backend.state().starts.is_empty());
+    ExecutionProcess::update_completion(&f.pool, turn, ExecutionProcessStatus::Killed, Some(1))
+        .await
+        .unwrap();
+    f.finalize(parent).await;
+    let saved = IssueCommentDelivery::find_by_id(&f.pool, result.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.reason, Some(IssueCommentDeliveryReason::TurnStopped));
+    assert!(f.backend.state().starts.is_empty());
+}
+
+#[tokio::test]
+async fn subtask_results_coalesce_at_the_parent_boundary() {
+    let f = Fixture::new().await;
+    let (_, parent) = f.linked_workspace().await;
+    let turn = insert_turn(
+        &f.pool,
+        parent,
+        "Working",
+        ExecutionProcessStatus::Running,
+        None,
+    )
+    .await;
+    let first = Uuid::new_v4();
+    let second = Uuid::new_v4();
+    for (id, result) in [(first, "First child"), (second, "Second child")] {
+        let saved = f
+            .dispatcher
+            .subtask_result(f.issue_id, parent, id, result.into(), 1)
+            .await
+            .unwrap();
+        assert_eq!(saved.state, IssueCommentDeliveryState::Pending);
+    }
+    assert!(f.backend.state().starts.is_empty());
+    ExecutionProcess::update_completion(&f.pool, turn, ExecutionProcessStatus::Completed, Some(0))
+        .await
+        .unwrap();
+    f.finalize(parent).await;
+    assert_eq!(f.backend.state().starts.len(), 1);
+    let prompt = f.backend.state().starts[0].1.clone();
+    assert!(prompt.contains("First child") && prompt.contains("Second child"));
+    f.dispatcher
+        .subtask_result(f.issue_id, parent, first, "First child".into(), 1)
+        .await
+        .unwrap();
+    assert_eq!(f.backend.state().starts.len(), 1);
+}
+
+#[tokio::test]
+async fn subtask_results_do_not_resume_archived_or_terminal_parents() {
+    for archived in [true, false] {
+        let f = Fixture::new().await;
+        let (workspace, parent) = f.linked_workspace().await;
+        f.waiting(parent).await;
+        if archived {
+            sqlx::query("UPDATE workspaces SET archived = 1 WHERE id = ?")
+                .bind(workspace)
+                .execute(&f.pool)
+                .await
+                .unwrap();
+        } else {
+            f.backend.state().issue_active = false;
+        }
+        let saved = f
+            .dispatcher
+            .subtask_result(f.issue_id, parent, Uuid::new_v4(), "Child result".into(), 1)
+            .await
+            .unwrap();
+        assert_eq!(saved.state, IssueCommentDeliveryState::NoTarget);
+        assert!(f.backend.state().starts.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn subtask_continuations_preserve_and_bound_ancestry() {
+    let f = Fixture::new().await;
+    let (_, parent) = f.linked_workspace().await;
+    f.waiting(parent).await;
+    assert_eq!(f.dispatcher.next_subtask_hop(parent).await.unwrap(), 1);
+    let first = f
+        .dispatcher
+        .subtask_result(
+            f.issue_id,
+            parent,
+            Uuid::new_v4(),
+            "First generation".into(),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(f.dispatcher.next_subtask_hop(parent).await.unwrap(), 2);
+    ExecutionProcess::update_completion(
+        &f.pool,
+        first.execution_process_id.unwrap(),
+        ExecutionProcessStatus::Completed,
+        Some(0),
+    )
+    .await
+    .unwrap();
+    f.finalize(parent).await;
+    let second = f
+        .dispatcher
+        .subtask_result(
+            f.issue_id,
+            parent,
+            Uuid::new_v4(),
+            "Second generation".into(),
+            2,
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.state, IssueCommentDeliveryState::Delivered);
+    assert_eq!(second.hop_count, 2);
+    assert!(f.dispatcher.next_subtask_hop(parent).await.is_err());
+    let over = f
+        .dispatcher
+        .subtask_result(
+            f.issue_id,
+            parent,
+            Uuid::new_v4(),
+            "Invalid generation".into(),
+            3,
+        )
+        .await
+        .unwrap();
+    assert_eq!(over.state, IssueCommentDeliveryState::Blocked);
+    assert_eq!(f.backend.state().starts.len(), 2);
+}

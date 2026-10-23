@@ -847,6 +847,80 @@ impl<B: DeliveryBackend> IssueCommentDispatcher<B> {
         Ok(())
     }
 
+    /// Capture ancestry when accepting a child, rather than when it finishes:
+    /// siblings spawned by one turn share a hop even if they finish apart.
+    pub async fn next_subtask_hop(&self, parent_session: Uuid) -> Result<i64, DeliveryError> {
+        next_hop_count(true, self.origin_hop(parent_session).await?).map_err(|_| {
+            DeliveryError::BadRequest(
+                "Background subtask continuation limit reached; continue in the foreground".into(),
+            )
+        })
+    }
+
+    /// Internal completion delivery pins one session without granting the
+    /// user-only permission to revive a stopped turn. Replays never re-resolve
+    /// terminal deliveries: an automatic notification is not a manual retry.
+    pub async fn subtask_result(
+        &self,
+        issue_id: Uuid,
+        session_id: Uuid,
+        comment_id: Uuid,
+        message: String,
+        hop_count: i64,
+    ) -> Result<IssueCommentDelivery, DeliveryError> {
+        let (comment, _, _) = self
+            .create_comment(CreateIssueCommentWithIntent {
+                issue_id,
+                message,
+                intent: IssueCommentIntent::Note,
+                parent_id: None,
+                target_session_id: None,
+                comment_id: Some(comment_id),
+                origin_session_id: None,
+                origin_workspace_id: None,
+            })
+            .await?;
+        if let Some(existing) =
+            IssueCommentDelivery::find_by_comment_id(&self.pool, comment_id).await?
+        {
+            return Ok(existing);
+        }
+        let mut resolution = self
+            .resolve(issue_id, Some(session_id), None, false)
+            .await?;
+        if resolution.state == IssueCommentDeliveryState::Failed {
+            return Err(DeliveryError::BadRequest(resolution.error.unwrap_or_else(
+                || "Could not resolve the parent session; notification retained for retry".into(),
+            )));
+        }
+        resolution.allow_stopped_target = false;
+        resolution.hop_count = hop_count;
+        if !(1..=services::services::issue_comment_delivery::MAX_AGENT_HOPS).contains(&hop_count) {
+            resolution.state = IssueCommentDeliveryState::Blocked;
+            resolution.reason = Some(IssueCommentDeliveryReason::LoopGuard);
+        }
+        let (row, created) = IssueCommentDelivery::insert_if_absent(
+            &self.pool,
+            &NewIssueCommentDelivery {
+                comment_id,
+                issue_id,
+                source: IssueCommentDeliverySource::Mcp,
+                origin_session_id: None,
+                comment_author_id: comment.author_id,
+                comment_created_at: comment.created_at,
+            },
+            &resolution,
+            Utc::now(),
+        )
+        .await?;
+        if created {
+            self.dispatch_if_pending(&resolution).await?;
+        }
+        Ok(IssueCommentDelivery::find_by_id(&self.pool, row.id)
+            .await?
+            .ok_or(sqlx::Error::RowNotFound)?)
+    }
+
     /// MCP create: save the comment (idempotently, by `comment_id`) and, for
     /// a reply, deliver it through [`Self::request`].
     pub async fn create_comment(

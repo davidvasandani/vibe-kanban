@@ -22,6 +22,15 @@ struct McpWorkspaceRepoInput {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct StartWorkspaceRequest {
+    #[serde(default)]
+    #[schemars(
+        description = "Start this child issue as a tracked background subtask and automatically resume the calling parent session with its outcome. Create the issue with parent_issue_id first. Defaults to false."
+    )]
+    resume_parent: bool,
+    #[schemars(
+        description = "Parent session for resume_parent; optional when the calling workspace has exactly one session. Required if ambiguous."
+    )]
+    parent_session_id: Option<Uuid>,
     #[schemars(description = "Name for the workspace")]
     name: String,
     #[schemars(
@@ -101,10 +110,14 @@ fn build_workspace_prompt_from_issue(issue: &api_types::Issue) -> Option<String>
 
 #[tool_router(router = task_attempts_tools_router, vis = "pub")]
 impl McpServer {
-    #[tool(description = "Create a new workspace and start its first session.")]
+    #[tool(
+        description = "Create a new workspace and start its first session. For background agent work, first create a child issue, then pass resume_parent: true; Vibe Kanban tracks the child and durably delivers its turn outcome to the parent. Retry with the same child issue to recover the accepted workspace."
+    )]
     async fn start_workspace(
         &self,
         Parameters(StartWorkspaceRequest {
+            resume_parent,
+            parent_session_id,
             name,
             prompt,
             executor,
@@ -204,7 +217,60 @@ impl McpServer {
             }
         };
 
+        let parent_session_id = if resume_parent {
+            let scoped_workspace = self.scoped_workspace_id();
+            let explicit = parent_session_id.or(self.orchestrator_session_id());
+            let session_id = match (explicit, scoped_workspace) {
+                (Some(id), _) => id,
+                (None, Some(workspace)) => {
+                    let url = self.url(&format!("/api/sessions?workspace_id={workspace}"));
+                    let sessions: Vec<db::models::session::Session> =
+                        match self.send_json(self.client.get(&url)).await {
+                            Ok(sessions) => sessions,
+                            Err(e) => return Ok(Self::tool_error(e)),
+                        };
+                    if sessions.len() != 1 {
+                        return Self::err(
+                            "Specify parent_session_id: this workspace does not have exactly one session",
+                            None::<&str>,
+                        );
+                    }
+                    sessions[0].id
+                }
+                _ => {
+                    return Self::err(
+                        "resume_parent requires parent_session_id or workspace context",
+                        None::<&str>,
+                    );
+                }
+            };
+            if let Some(workspace) = scoped_workspace {
+                let url = self.url(&format!("/api/sessions?workspace_id={workspace}"));
+                let sessions: Vec<db::models::session::Session> =
+                    match self.send_json(self.client.get(&url)).await {
+                        Ok(sessions) => sessions,
+                        Err(e) => return Ok(Self::tool_error(e)),
+                    };
+                if !sessions.iter().any(|s| s.id == session_id) {
+                    return Self::err(
+                        "Parent session must belong to the calling workspace",
+                        None::<&str>,
+                    );
+                }
+            }
+            Some(session_id)
+        } else {
+            if parent_session_id.is_some() {
+                return Self::err(
+                    "parent_session_id requires resume_parent: true",
+                    None::<&str>,
+                );
+            }
+            None
+        };
+
         let create_and_start_payload = CreateAndStartWorkspaceRequest {
+            parent_session_id,
             name: Some(name.clone()),
             repos: workspace_repos,
             linked_issue,
@@ -236,7 +302,8 @@ impl McpServer {
         };
 
         // Link workspace to remote issue if issue_id is provided
-        if let Some(issue_id) = issue_id
+        if !resume_parent
+            && let Some(issue_id) = issue_id
             && let Err(e) = self
                 .link_workspace_to_issue(create_and_start_response.workspace.id, issue_id)
                 .await
