@@ -221,7 +221,10 @@ is insufficient when the vendor's real path runs through a **parameter**
 (`run_in_background`) plus an undeniable tool (`Read` on the output file); and a
 vendor identifier must be read from the artifact that actually executes — the
 Claude npm package is a stub whose `sdk-tools.d.ts` lists schema titles, not wire
-tool names. Option B remains deferred: a vk poller runs a command, not a turn.
+tool names. Timed wakeups remain deferred: a vk poller runs a command, not a turn.
+Tracked child completion now resumes the exact parent through durable delivery;
+see [tracked-background-subtasks.md](tracked-background-subtasks.md). This does
+not add arbitrary scheduled agent turns.
 
 ## Output cleanup must not block terminal evidence indefinitely
 
@@ -264,6 +267,8 @@ the stored `base_url` + password. Codex (stdio JSON-RPC; turn end currently
 `cancel`) need their transports kept alive across turns.
 
 ## Contributed by
+
+- vk/5de6-background-jobs
 
 - vk/1a64-coding-agent-pro
 - vk/826e-coding-agent-war
