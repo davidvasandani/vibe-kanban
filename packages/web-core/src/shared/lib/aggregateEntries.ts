@@ -1,3 +1,4 @@
+import type { JsonValue } from 'shared/types';
 import type {
   PatchTypeWithKey,
   DisplayEntry,
@@ -41,8 +42,25 @@ function getFileEditPath(entry: PatchTypeWithKey): string | null {
 }
 
 /**
+ * Returns the tool name for a generic (e.g. MCP) tool entry that may be grouped
+ * with consecutive calls of the same tool, or null otherwise. Entries awaiting
+ * approval are excluded so their approval card stays visible.
+ */
+function getGroupableToolName(entry: PatchTypeWithKey): string | null {
+  if (entry.type !== 'NORMALIZED_ENTRY') return null;
+
+  const entryType = entry.content.entry_type;
+  if (entryType.type !== 'tool_use') return null;
+  if (entryType.action_type.action !== 'tool') return null;
+  if (entryType.status.status === 'pending_approval') return null;
+
+  return entryType.tool_name;
+}
+
+/**
  * Determines if a patch entry can be aggregated and returns its aggregation type.
- * Handles file_read, search, web_fetch, and command_run (categorized by command type).
+ * Handles file_read, search, web_fetch, command_run (categorized by command type)
+ * and generic tool calls.
  */
 function getAggregationType(
   entry: PatchTypeWithKey
@@ -56,6 +74,7 @@ function getAggregationType(
   if (action_type.action === 'file_read') return 'file_read';
   if (action_type.action === 'search') return 'search';
   if (action_type.action === 'web_fetch') return 'web_fetch';
+  if (getGroupableToolName(entry) !== null) return 'tool';
 
   if (action_type.action === 'command_run') {
     const category = action_type.category;
@@ -189,6 +208,8 @@ export function aggregateConsecutiveEntries(
   // State for tool aggregation (file_read, search, web_fetch, command_run_*)
   let currentToolGroup: PatchTypeWithKey[] = [];
   let currentAggregationType: ToolAggregationType | null = null;
+  // Tool name shared by the current 'tool' group
+  let currentToolName: string | null = null;
 
   // State for diff aggregation (file_edit by path)
   let currentDiffGroup: PatchTypeWithKey[] = [];
@@ -206,6 +227,7 @@ export function aggregateConsecutiveEntries(
       const aggregatedGroup: AggregatedPatchGroup = {
         type: 'AGGREGATED_GROUP',
         aggregationType: currentAggregationType!,
+        toolName: currentToolName ?? undefined,
         entries: [...currentToolGroup],
         patchKey: `agg:${firstEntry.patchKey}`,
         executionProcessId: firstEntry.executionProcessId,
@@ -215,6 +237,7 @@ export function aggregateConsecutiveEntries(
 
     currentToolGroup = [];
     currentAggregationType = null;
+    currentToolName = null;
   };
 
   const flushDiffGroup = () => {
@@ -254,6 +277,7 @@ export function aggregateConsecutiveEntries(
 
     const aggregationType = getAggregationType(entry);
     const fileEditPath = getFileEditPath(entry);
+    const toolName = getGroupableToolName(entry);
 
     // Handle file_edit entries
     if (fileEditPath !== null) {
@@ -282,14 +306,19 @@ export function aggregateConsecutiveEntries(
       if (currentAggregationType === null) {
         // Start a new tool group
         currentAggregationType = aggregationType;
+        currentToolName = toolName;
         currentToolGroup.push(entry);
-      } else if (aggregationType === currentAggregationType) {
-        // Same type - add to current group
+      } else if (
+        aggregationType === currentAggregationType &&
+        toolName === currentToolName
+      ) {
+        // Same type (and same tool name for generic tools) - add to current group
         currentToolGroup.push(entry);
       } else {
-        // Different aggregatable type - flush current group and start new one
+        // Different aggregatable type or tool - flush current group and start new one
         flushToolGroup();
         currentAggregationType = aggregationType;
+        currentToolName = toolName;
         currentToolGroup.push(entry);
       }
     }
@@ -307,4 +336,40 @@ export function aggregateConsecutiveEntries(
   flushDiffGroup();
 
   return result;
+}
+
+const ARGS_PREVIEW_MAX_LENGTH = 120;
+
+function formatPreviewValue(value: JsonValue): string {
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return `[${value.length}]`;
+  if (typeof value === 'object') return '{…}';
+  return String(value).replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Formats a tool call's arguments as a one-line preview
+ * (e.g. `site_id: 42, query: open doors`), truncated to `maxLength`.
+ * Returns an empty string when there is nothing to show.
+ */
+export function formatToolArgsPreview(
+  args: JsonValue | null | undefined,
+  maxLength: number = ARGS_PREVIEW_MAX_LENGTH
+): string {
+  if (args === null || args === undefined) return '';
+
+  let preview: string;
+  if (Array.isArray(args)) {
+    preview = args.map(formatPreviewValue).join(', ');
+  } else if (typeof args === 'object') {
+    preview = Object.entries(args)
+      .map(([key, value]) => `${key}: ${formatPreviewValue(value ?? null)}`)
+      .join(', ');
+  } else {
+    preview = formatPreviewValue(args);
+  }
+
+  return preview.length > maxLength
+    ? `${preview.slice(0, maxLength - 1)}…`
+    : preview;
 }

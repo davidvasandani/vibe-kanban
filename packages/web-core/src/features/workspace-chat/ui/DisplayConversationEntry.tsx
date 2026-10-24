@@ -71,6 +71,7 @@ import { ConversationTimestamp } from './ConversationTimestamp';
 import { IssueCommentEntry } from './IssueCommentEntry';
 import { useIssueCommentsInConversation } from '../model/contexts/IssueCommentsContext';
 import { standaloneCommentId } from '@/shared/lib/issueCommentDelivery';
+import { formatToolArgsPreview } from '@/shared/lib/aggregateEntries';
 
 type Props = {
   displayEntry: DisplayEntry;
@@ -1181,7 +1182,8 @@ function ErrorMessageEntry({
 }
 
 /**
- * Aggregated group entry for consecutive file_read, search, or web_fetch entries
+ * Aggregated group entry for consecutive file_read, search, web_fetch,
+ * command_run, or same-name generic tool entries
  */
 function AggregatedGroupEntry({ group }: { group: AggregatedPatchGroup }) {
   const { viewToolContentInPanel } = useLogsPanelActions();
@@ -1229,6 +1231,9 @@ function AggregatedGroupEntry({ group }: { group: AggregatedPatchGroup }) {
         summary = action_type.command;
         command = action_type.command;
         content = action_type.result?.output ?? '';
+      } else if (action_type.action === 'tool') {
+        summary = formatToolArgsPreview(action_type.arguments) || tool_name;
+        content = getToolOutput(entryType, patchEntry.content.content);
       }
 
       return {
@@ -1281,6 +1286,12 @@ function AggregatedGroupEntry({ group }: { group: AggregatedPatchGroup }) {
         return { label: 'Edit', icon: PencilSimpleIcon, unit: 'command' };
       case 'command_run_fetch':
         return { label: 'Fetch', icon: GlobeIcon, unit: 'command' };
+      case 'tool':
+        return {
+          label: group.toolName ?? 'Tool',
+          icon: ListMagnifyingGlassIcon,
+          unit: 'call',
+        };
     }
   };
   const { label, icon, unit } = getDisplayProps();

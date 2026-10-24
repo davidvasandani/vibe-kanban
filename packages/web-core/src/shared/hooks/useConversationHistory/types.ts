@@ -22,7 +22,8 @@ export type ToolAggregationType =
   | 'command_run_read'
   | 'command_run_search'
   | 'command_run_edit'
-  | 'command_run_fetch';
+  | 'command_run_fetch'
+  | 'tool';
 
 /**
  * A group of consecutive entries of the same aggregatable type (e.g., file_read, search, web_fetch).
@@ -32,6 +33,8 @@ export type AggregatedPatchGroup = {
   type: 'AGGREGATED_GROUP';
   /** The aggregation category (e.g., 'file_read', 'search', 'web_fetch') */
   aggregationType: ToolAggregationType;
+  /** Shared tool name for 'tool' groups (e.g. 'mcp:server:tool') */
+  toolName?: string;
   /** The individual entries in this group */
   entries: PatchTypeWithKey[];
   /** Unique key for the group */
