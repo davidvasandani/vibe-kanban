@@ -18,6 +18,8 @@ contributed to it.
 
 ## Pages
 
+- [durable-session-wakeups.md](durable-session-wakeups.md) — Timed and condition-based session continuation, restart admission, cancellation, receipt safety and bounded chaining (`vk/5ae4-pollers-add-a-ti`).
+
 - [tracked-background-subtasks.md](tracked-background-subtasks.md) — Durable child workspaces, exact parent continuation, launch-failure boundaries, replay identity and delegation limits (`vk/5de6-background-jobs`).
 
 - [browser-verification-handoff.md](browser-verification-handoff.md) — Hosted verification limits, origin-only local handoff, session continuity, sanitized diagnostics and provider test-key coverage (`vk/aa2f-fix-cloudflare-v`).

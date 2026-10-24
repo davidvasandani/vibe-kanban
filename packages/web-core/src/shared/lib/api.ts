@@ -1,3 +1,4 @@
+import type { WakeupSummary } from 'shared/types';
 // Import all necessary types from shared types
 
 import {
@@ -2319,5 +2320,25 @@ export const searchApi = {
       options
     );
     return handleApiResponse<SearchResult[]>(response);
+  },
+};
+
+export const workspaceWakeupsApi = {
+  list: async (
+    workspaceId: string,
+    signal?: AbortSignal
+  ): Promise<WakeupSummary[]> => {
+    const response = await makeRequest(
+      `/api/workspaces/${workspaceId}/execution/wakeups`,
+      { signal }
+    );
+    return handleApiResponse<WakeupSummary[]>(response);
+  },
+  cancel: async (workspaceId: string, wakeupId: string): Promise<boolean> => {
+    const response = await makeRequest(
+      `/api/workspaces/${workspaceId}/execution/wakeups/${wakeupId}/cancel`,
+      { method: 'POST' }
+    );
+    return handleApiResponse<boolean>(response);
   },
 };

@@ -16,10 +16,7 @@ use db::models::{
 use deployment::Deployment;
 use executors::actions::{
     ExecutorAction, ExecutorActionType,
-    script::{
-        PollerSpec, ScriptContext, ScriptRequest, ScriptRequestLanguage, compile_poller_script,
-        validate_interval,
-    },
+    script::{PollerSpec, ScriptContext, ScriptRequest, ScriptRequestLanguage, validate_interval},
 };
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -86,6 +83,9 @@ pub enum StartPollerError {
 
 #[derive(Debug, Serialize, Deserialize, TS)]
 pub struct StartPollerRequest {
+    /// Session that receives on_stop_prompt. Required when that prompt is set.
+    pub session_id: Option<Uuid>,
+    pub on_stop_prompt: Option<String>,
     /// Command to run on each tick.
     pub command: String,
     /// Seconds between ticks.
@@ -166,6 +166,11 @@ pub fn router() -> Router<DeploymentImpl> {
         .route("/dev-server/start", post(start_dev_server))
         .route("/background-helpers", get(list_background_helpers))
         .route("/background-helpers/start", post(start_background_helper))
+        .route(
+            "/wakeups",
+            get(crate::wakeups::list).post(crate::wakeups::schedule),
+        )
+        .route("/wakeups/{id}/cancel", post(crate::wakeups::cancel))
         .route("/pollers", get(list_pollers))
         .route("/pollers/start", post(start_poller))
         .route(
@@ -831,7 +836,7 @@ pub async fn start_poller(
         }
     };
 
-    let session = match prepare_helper_start(
+    let mut session = match prepare_helper_start(
         &deployment,
         &workspace,
         request.working_dir.as_deref(),
@@ -848,9 +853,60 @@ pub async fn start_poller(
         }
     };
 
+    let mut wakeup = None;
+    if let Some(prompt) = request.on_stop_prompt {
+        crate::wakeups::validate_prompt(&prompt)?;
+        if spec.stop_command.is_none() {
+            return Err(ApiError::BadRequest(
+                "on_stop_prompt requires stop_command".into(),
+            ));
+        }
+        let target = request
+            .session_id
+            .ok_or_else(|| ApiError::BadRequest("on_stop_prompt requires session_id".into()))?;
+        session =
+            crate::wakeups::validate_session(&deployment.db().pool, &workspace, target).await?;
+        let current = Workspace::find_by_id(&deployment.db().pool, workspace.id)
+            .await?
+            .ok_or_else(|| ApiError::BadRequest("Workspace disappeared".into()))?;
+        let root = current
+            .container_ref
+            .ok_or_else(|| ApiError::BadRequest("Workspace directory unavailable".into()))?;
+        let id = uuid::Uuid::new_v4();
+        // A fresh unpredictable directory prevents pre-planted receipt symlinks.
+        let directory = std::path::Path::new(&root).join(format!(".vk-wakeup-{id}"));
+        tokio::fs::create_dir(&directory).await.map_err(|e| {
+            ApiError::BadRequest(format!(
+                "Could not create completion receipt directory: {e}"
+            ))
+        })?;
+        let now = Utc::now();
+        let row = db::models::wakeup::Wakeup {
+            id,
+            workspace_id: workspace.id,
+            session_id: target,
+            fire_at: now + chrono::Duration::seconds(db::models::wakeup::MAX_DELAY_SECS),
+            prompt,
+            poller_id: None,
+            receipt_path: Some(directory.join("completed").to_string_lossy().into_owned()),
+            trigger_context: None,
+            created_at: now,
+        };
+        if !row.insert(&deployment.db().pool).await? {
+            let _ = tokio::fs::remove_dir(&directory).await;
+            return Err(ApiError::BadRequest(
+                "Wake-up limit reached: eight pending or 32 total per session".into(),
+            ));
+        }
+        wakeup = Some(row);
+    }
+    let script = executors::actions::script::compile_poller_script_with_receipt(
+        &spec,
+        wakeup.as_ref().and_then(|w| w.receipt_path.as_deref()),
+    );
     let executor_action = ExecutorAction::new(
         ExecutorActionType::ScriptRequest(ScriptRequest {
-            script: compile_poller_script(&spec),
+            script,
             language: ScriptRequestLanguage::Bash,
             context: ScriptContext::BackgroundHelper,
             working_dir: request.working_dir,
@@ -867,7 +923,28 @@ pub async fn start_poller(
             &executor_action,
             &ExecutionProcessRunReason::BackgroundHelper,
         )
-        .await?;
+        .await;
+    let execution_process = match execution_process {
+        Ok(process) => process,
+        Err(error) => {
+            if let Some(row) = &wakeup {
+                db::models::wakeup::Wakeup::cancel(
+                    &deployment.db().pool,
+                    row.id,
+                    "Poller failed to start",
+                )
+                .await?;
+            }
+            return Err(error.into());
+        }
+    };
+    if let Some(row) = wakeup {
+        sqlx::query("UPDATE wakeups SET poller_id = ? WHERE id = ?")
+            .bind(execution_process.id)
+            .bind(row.id)
+            .execute(&deployment.db().pool)
+            .await?;
+    }
 
     deployment
         .track_if_analytics_allowed(
@@ -1220,7 +1297,7 @@ mod tests {
 
     async fn start_helper(pool: &sqlx::SqlitePool, session: &Session, poller: Option<PollerSpec>) {
         let script = match &poller {
-            Some(spec) => compile_poller_script(spec),
+            Some(spec) => executors::actions::script::compile_poller_script(spec),
             None => "npm run watch".to_string(),
         };
         ExecutionProcess::create(

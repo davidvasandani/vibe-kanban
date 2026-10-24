@@ -6,6 +6,9 @@
 //! (unique per comment), resolved to exactly one session, and dispatched as a
 //! normal follow-up turn at the session's turn boundary:
 //!
+//! Local wake-ups share this ledger and admission path. Their content comes from
+//! `wakeups`, their issue ID is nil, and they never create a remote comment.
+//!
 //! - **Waiting** session (last turn completed): resumed immediately.
 //! - **Running** session (or a queued follow-up, or a script still running):
 //!   the row stays `pending` until `ContainerService::finalize_task` announces
@@ -17,7 +20,7 @@
 //! conditional update before starting anything, and checks for an execution
 //! already carrying the comment's marker (positive evidence of an earlier
 //! start whose response was lost) so retries and restarts never duplicate a
-//! turn. A 15 s sweep covers missed events, scheduled retries and restarts.
+//! turn. A 5 s sweep covers missed events, scheduled retries and restarts.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -49,9 +52,9 @@ use services::services::{
     container::ContainerService,
     error_remediation::is_active_status_name,
     issue_comment_delivery::{
-        AgentState, DeliveredComment, SessionCandidate, TargetDecision, compose_delivery_prompt,
-        default_reply_session, derive_agent_state, next_hop_count, retry_delay,
-        stored_marker_needle,
+        AgentState, DELIVERY_MARKER_PREFIX, DeliveredComment, SessionCandidate, TargetDecision,
+        compose_delivery_prompt, default_reply_session, derive_agent_state, next_hop_count,
+        retry_delay, stored_marker_needle,
     },
     remote_client::RemoteClientError,
 };
@@ -63,7 +66,7 @@ use uuid::Uuid;
 use crate::{DeploymentImpl, routes::sessions::CreateFollowUpAttempt};
 
 /// How often pending deliveries are re-examined (missed events, retries).
-const SWEEP_INTERVAL: Duration = Duration::from_secs(15);
+const SWEEP_INTERVAL: Duration = Duration::from_secs(5);
 // A new turn may start only at a confirmed turn boundary: the session's
 // latest turn is the one `finalize_task` recorded in `session_turn_boundaries`
 // (written once the exit monitor has decided not to start a queued
@@ -1003,6 +1006,18 @@ impl<B: DeliveryBackend> IssueCommentDispatcher<B> {
                 .into_iter()
                 .filter(|row| row.next_attempt_at.is_none_or(|at| at <= now))
                 .collect();
+        let mut eligible = Vec::new();
+        for row in due {
+            if let Some(wakeup) =
+                db::models::wakeup::Wakeup::find(&self.pool, row.comment_id).await?
+                && wakeup.receipt_path.is_some()
+                && wakeup.trigger_context.is_none()
+            {
+                continue;
+            }
+            eligible.push(row);
+        }
+        let due = eligible;
         let Some(issue_id) = due.first().map(|row| row.issue_id) else {
             return Ok(());
         };
@@ -1264,6 +1279,23 @@ impl<B: DeliveryBackend> IssueCommentDispatcher<B> {
                 }
                 EarlierAttempt::Uncertain(_) | EarlierAttempt::None => {}
             }
+            if let Some(wakeup) =
+                db::models::wakeup::Wakeup::find(&self.pool, row.comment_id).await?
+            {
+                ready.push((
+                    row,
+                    IssueComment {
+                        id: wakeup.id,
+                        issue_id: Uuid::nil(),
+                        author_id: None,
+                        parent_id: None,
+                        message: wakeup.message(now),
+                        created_at: wakeup.created_at,
+                        updated_at: now,
+                    },
+                ));
+                continue;
+            }
             match self.backend.get_comment(row.comment_id).await {
                 Ok(comment) => ready.push((row, comment)),
                 Err(error) if is_status(&error, 404) => {
@@ -1305,71 +1337,97 @@ impl<B: DeliveryBackend> IssueCommentDispatcher<B> {
         let rows: Vec<&IssueCommentDelivery> = ready.iter().map(|(row, _)| row).collect();
         let issue_id = ready[0].0.issue_id;
 
-        // The target may have changed while the comment waited: the issue
-        // closed, or the workspace was unlinked, relinked or archived.
-        let (issue, link) = match (
-            self.backend.issue_info(issue_id).await,
-            self.backend.workspace_link(session.workspace_id).await,
-        ) {
-            (Ok(issue), Ok(link)) => (issue, link),
-            (Err(error), _) | (_, Err(error)) => {
-                for row in &rows {
-                    self.retry_or_fail(
-                        row,
-                        IssueCommentDeliveryReason::RemoteUnavailable,
-                        &format!(
-                            "could not re-check issue {issue_id} and workspace {}: {error}",
-                            session.workspace_id
-                        ),
+        let local_wakeup = issue_id.is_nil();
+        let prompt = if local_wakeup {
+            ready
+                .iter()
+                .map(|(_, comment)| {
+                    // Evidence is searched in serialized executor JSON. A literal
+                    // backslash-n can resemble an escaped line boundary there,
+                    // so escape reserved markers as well as quoting each line.
+                    let content = comment.message.replace(
+                        &format!("<!-- {DELIVERY_MARKER_PREFIX}"),
+                        &format!("&lt;!-- {DELIVERY_MARKER_PREFIX}"),
+                    );
+                    format!(
+                        "{}\n<!-- {} -->",
+                        content
+                            .lines()
+                            .map(|line| format!("> {line}"))
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                        services::services::issue_comment_delivery::delivery_marker(comment.id)
                     )
-                    .await?;
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        } else {
+            // The target may have changed while the comment waited: the issue
+            // closed, or the workspace was unlinked, relinked or archived.
+            let (issue, link) = match (
+                self.backend.issue_info(issue_id).await,
+                self.backend.workspace_link(session.workspace_id).await,
+            ) {
+                (Ok(issue), Ok(link)) => (issue, link),
+                (Err(error), _) | (_, Err(error)) => {
+                    for row in &rows {
+                        self.retry_or_fail(
+                            row,
+                            IssueCommentDeliveryReason::RemoteUnavailable,
+                            &format!(
+                                "could not re-check issue {issue_id} and workspace {}: {error}",
+                                session.workspace_id
+                            ),
+                        )
+                        .await?;
+                    }
+                    return Ok(());
                 }
-                return Ok(());
-            }
-        };
-        if !issue.active {
-            return self
-                .finish_all(
-                    &rows,
-                    IssueCommentDeliveryState::NoTarget,
-                    IssueCommentDeliveryReason::IssueTerminal,
-                )
-                .await;
-        }
-        match link {
-            Some(link) if link.issue_id == Some(issue_id) && link.archived => {
+            };
+            if !issue.active {
                 return self
                     .finish_all(
                         &rows,
                         IssueCommentDeliveryState::NoTarget,
-                        IssueCommentDeliveryReason::WorkspaceArchived,
+                        IssueCommentDeliveryReason::IssueTerminal,
                     )
                     .await;
             }
-            Some(link) if link.issue_id == Some(issue_id) => {}
-            _ => {
-                return self
-                    .finish_all(
-                        &rows,
-                        IssueCommentDeliveryState::NoTarget,
-                        IssueCommentDeliveryReason::TargetNotLinked,
-                    )
-                    .await;
+            match link {
+                Some(link) if link.issue_id == Some(issue_id) && link.archived => {
+                    return self
+                        .finish_all(
+                            &rows,
+                            IssueCommentDeliveryState::NoTarget,
+                            IssueCommentDeliveryReason::WorkspaceArchived,
+                        )
+                        .await;
+                }
+                Some(link) if link.issue_id == Some(issue_id) => {}
+                _ => {
+                    return self
+                        .finish_all(
+                            &rows,
+                            IssueCommentDeliveryState::NoTarget,
+                            IssueCommentDeliveryReason::TargetNotLinked,
+                        )
+                        .await;
+                }
             }
-        }
 
-        let names = self.backend.member_names(issue.project_id).await;
-        let delivered: Vec<DeliveredComment> = ready
-            .iter()
-            .map(|(_, comment)| DeliveredComment {
-                comment_id: comment.id,
-                author_name: comment.author_id.and_then(|id| names.get(&id).cloned()),
-                created_at: comment.created_at,
-                message: comment.message.clone(),
-            })
-            .collect();
-        let label = format!("{} (\"{}\")", issue.simple_id, issue.title);
-        let prompt = compose_delivery_prompt(&label, &delivered);
+            let names = self.backend.member_names(issue.project_id).await;
+            let delivered: Vec<DeliveredComment> = ready
+                .iter()
+                .map(|(_, comment)| DeliveredComment {
+                    comment_id: comment.id,
+                    author_name: comment.author_id.and_then(|id| names.get(&id).cloned()),
+                    created_at: comment.created_at,
+                    message: comment.message.clone(),
+                })
+                .collect();
+            let label = format!("{} (\"{}\")", issue.simple_id, issue.title);
+            compose_delivery_prompt(&label, &delivered)
+        };
 
         // The snapshot is durable before the turn can start, so recovery
         // after a crash records exactly what the agent received.
@@ -1525,6 +1583,7 @@ impl<B: DeliveryBackend> IssueCommentDispatcher<B> {
 
     /// Periodic sweep: dispatch every session with due pending deliveries.
     pub async fn sweep(&self) -> Result<(), sqlx::Error> {
+        crate::wakeups::reconcile(&self.pool).await?;
         for session_id in
             IssueCommentDelivery::sessions_with_due_pending(&self.pool, Utc::now()).await?
         {

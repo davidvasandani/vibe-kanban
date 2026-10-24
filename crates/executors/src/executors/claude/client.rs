@@ -27,11 +27,8 @@ pub const STOP_GIT_CHECK_CALLBACK_ID: &str = "STOP_GIT_CHECK_CALLBACK_ID";
 /// PreToolUse callback id used to deny `ScheduleWakeup` calls (VAS-283).
 pub const DENY_SCHEDULE_WAKEUP_CALLBACK_ID: &str = "DENY_SCHEDULE_WAKEUP_CALLBACK_ID";
 /// Reason surfaced to the agent when it tries to schedule a wake-up under a VK
-/// execution. VK has no supervising loop and reaps the turn's process at turn
-/// end (see `wiki/agent-process-lifecycle.md`), so a harness wake-up timer
-/// never fires and any work parked on it is silently dropped. The message tells
-/// the agent to continue inline instead of ending its turn.
-pub const SCHEDULE_WAKEUP_DENY_REASON: &str = "Scheduled wake-ups are not supported for Vibe Kanban executions: this turn's process is terminated when the turn ends, so the wake-up would never fire and any work you defer to it would be silently dropped. Do the work now in this turn instead of parking it on a wake-up, or leave a follow-up message to continue after the turn completes.";
+/// execution. The CLI timer dies with its turn; VK's durable MCP timer does not.
+pub const SCHEDULE_WAKEUP_DENY_REASON: &str = "This CLI's ScheduleWakeup timer cannot survive the Vibe Kanban turn ending. Use the Vibe Kanban schedule_wakeup MCP tool with fire_at (timezone-aware RFC 3339) or delay_secs and on_fire_prompt. It persists the timer and resumes this same session after the current turn ends. Inspect or cancel it with list_wakeups/cancel_wakeup or in the Processes drawer. End the turn after scheduling when no independent work remains.";
 
 /// PreToolUse hook response that denies a `ScheduleWakeup` call with an
 /// actionable reason (VAS-283). Extracted so it can be unit-tested directly.
@@ -64,7 +61,7 @@ pub const DENY_BACKGROUND_BASH_CALLBACK_ID: &str = "DENY_BACKGROUND_BASH_CALLBAC
 /// (`spawn_poller`, which runs the command in its own surviving process group)
 /// and — mirroring [`SCHEDULE_WAKEUP_DENY_REASON`] — tells the agent to keep
 /// working rather than park its turn.
-pub const BACKGROUND_BASH_DENY_REASON: &str = "Background processes are not supported inside a Vibe Kanban turn: this turn's process group is terminated when the turn ends, so anything started with run_in_background is reaped with it and any output you meant to poll is silently lost. Run the command in the foreground instead. If it genuinely needs to outlive this turn, use the `spawn_poller` MCP tool, which runs it in its own process group that survives the turn and is visible in the workspace UI. Supply stop_command (exit zero to stop), a positive timeout_secs, or both. Either way, keep working in this turn instead of waiting on a background process.";
+pub const BACKGROUND_BASH_DENY_REASON: &str = "Background processes are not supported inside a Vibe Kanban turn: this turn's process group is terminated when the turn ends, so anything started with run_in_background is reaped with it and any output you meant to poll is silently lost. Run the command in the foreground instead. If it genuinely needs to outlive this turn, use the `spawn_poller` MCP tool, which runs it in its own process group that survives the turn and is visible in the workspace UI. Supply stop_command (exit zero to stop), a positive timeout_secs, or both. To resume this session later, use schedule_wakeup with fire_at or delay_secs and on_fire_prompt. For a condition, supply on_stop_prompt to spawn_poller. Wake-ups survive turn end and restarts, queue behind active turns, and are visible and cancellable in the workspace UI. End the turn after scheduling when no independent work remains.";
 
 /// True only when a `PreToolUse` hook input explicitly asks for a background
 /// `Bash` spawn.
@@ -100,7 +97,7 @@ pub fn background_bash_deny_response() -> serde_json::Value {
 /// Mirrors [`BACKGROUND_BASH_DENY_REASON`]: it names `spawn_poller` and states
 /// what that replacement requires, because a denial that removes a capability
 /// without offering the replacement converts a hang into a stall.
-pub const UNBOUNDED_WAIT_DENY_REASON: &str = "Unbounded waiting is not supported inside a Vibe Kanban turn: this command loops until a condition becomes true, and if that condition never becomes true the turn blocks indefinitely instead of failing (one such loop held a turn for about an hour). Either bound the wait yourself — wrap it in `timeout`, cap the iterations with a counter, or use a `for` loop — or, if the thing you are waiting for may take longer than this turn, use the `spawn_poller` MCP tool, which runs the command in its own process group that survives the turn and is visible in the workspace UI. It requires stop_command (exit zero to stop), a positive timeout_secs, or both. Either way, keep working in this turn instead of blocking on the wait.";
+pub const UNBOUNDED_WAIT_DENY_REASON: &str = "Unbounded waiting is not supported inside a Vibe Kanban turn: this command loops until a condition becomes true, and if that condition never becomes true the turn blocks indefinitely instead of failing (one such loop held a turn for about an hour). Either bound the wait yourself — wrap it in `timeout`, cap the iterations with a counter, or use a `for` loop — or, if the thing you are waiting for may take longer than this turn, use the `spawn_poller` MCP tool, which runs the command in its own process group that survives the turn and is visible in the workspace UI. It requires stop_command (exit zero to stop), a positive timeout_secs, or both. To resume this session later, use schedule_wakeup with fire_at or delay_secs and on_fire_prompt, or supply on_stop_prompt to spawn_poller for a condition. End the turn after scheduling when no independent work remains.";
 
 /// Shell keywords that begin a loop with no inherent iteration bound.
 const UNBOUNDED_LOOP_KEYWORDS: &[&str] = &["while", "until"];

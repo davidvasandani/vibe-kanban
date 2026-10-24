@@ -1,9 +1,10 @@
+import { WakeupRow } from './WakeupRow';
 import { useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import { StopIcon } from '@phosphor-icons/react';
 import { Button } from '@vibe/ui/components/Button';
 import { ExecutionProcessStatus } from 'shared/types';
-import type { ExecutionProcess } from 'shared/types';
+import type { ExecutionProcess, WakeupSummary } from 'shared/types';
 import { executionProcessesApi } from '@/shared/lib/api';
 import {
   selectPollers,
@@ -114,6 +115,8 @@ function PollerRow({ poller }: { poller: WorkspacePoller }) {
 
 interface PollersSectionContainerProps {
   executionProcesses: ExecutionProcess[];
+  wakeups?: WakeupSummary[];
+  wakeupsError?: Error | null;
 }
 
 /**
@@ -124,13 +127,15 @@ interface PollersSectionContainerProps {
  */
 export function PollersSectionContainer({
   executionProcesses,
+  wakeups = [],
+  wakeupsError,
 }: PollersSectionContainerProps) {
   const pollers = useMemo(
     () => selectPollers(executionProcesses),
     [executionProcesses]
   );
 
-  if (pollers.length === 0) {
+  if (pollers.length === 0 && wakeups.length === 0 && !wakeupsError) {
     return (
       <p className="px-3 py-2 text-xs text-low">
         No pollers. An agent can start one with the <code>spawn_poller</code>{' '}
@@ -140,7 +145,15 @@ export function PollersSectionContainer({
   }
 
   return (
-    <ul className="divide-y" data-testid="pollers-list">
+    <ul className="w-full divide-y" data-testid="pollers-list">
+      {wakeupsError && (
+        <li role="alert" className="px-3 py-2 text-error">
+          Unable to load wake-ups: {wakeupsError.message}
+        </li>
+      )}
+      {wakeups.map((summary) => (
+        <WakeupRow key={summary.wakeup.id} summary={summary} />
+      ))}
       {pollers.map((poller) => (
         <PollerRow key={poller.id} poller={poller} />
       ))}

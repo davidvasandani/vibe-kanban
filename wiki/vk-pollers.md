@@ -232,12 +232,15 @@ Two reusable testing rules:
 - A mandatory response-write failure is a protocol-loop failure, not a warning
   that can be swallowed while the execution appears successful.
 
-## Not this: a wake-up scheduler
+## Session wake-ups
 
-A vk poller runs a **command**, not a turn; it never resumes the agent. Persisting
-`(session_id, fire_at, prompt)` and re-invoking via `--resume` +
-`QueuedMessageService` is VAS-283 "option B", deliberately deferred alongside
-VAS-132. Don't reopen it incidentally — see [[agent-process-lifecycle]].
+Command pollers can request a follow-up with `on_stop_prompt`, delivered only
+when `stop_command` succeeds. For time-based work use `schedule_wakeup` with
+`fire_at` or `delay_secs` and `on_fire_prompt`. Both use persisted delivery
+admission, wait behind active turns, and expose cancellation in the drawer.
+See [durable-session-wakeups.md](durable-session-wakeups.md) for restart,
+receipt, cancellation and bounded-chaining rules. Native CLI ScheduleWakeup
+remains disabled; the MCP tool is the supported continuation path.
 
 ## Workspace sidebar grouping uses bulk workspace state
 
@@ -560,3 +563,5 @@ the first had stopped seeing.
 - vk/bd71-require-all-poll
 
 - vk/603d-prevent-stuck-jo
+
+- vk/5ae4-pollers-add-a-ti

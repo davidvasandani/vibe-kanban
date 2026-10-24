@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import type { ExecutionProcess } from 'shared/types';
+import type { ExecutionProcess, WakeupSummary } from 'shared/types';
 import {
   derivePollersHeaderStatus,
   selectPollers,
@@ -7,6 +7,8 @@ import {
 
 interface PollersHeaderProps {
   executionProcesses: ExecutionProcess[];
+  wakeups?: WakeupSummary[];
+  wakeupsError?: Error | null;
 }
 
 /**
@@ -16,24 +18,48 @@ interface PollersHeaderProps {
  * stays current while the body is unmounted. It takes the already-streamed
  * execution processes as a prop and issues no request of its own.
  */
-export function PollersHeader({ executionProcesses }: PollersHeaderProps) {
+export function PollersHeader({
+  executionProcesses,
+  wakeups = [],
+  wakeupsError,
+}: PollersHeaderProps) {
   const status = useMemo(
     () => derivePollersHeaderStatus(selectPollers(executionProcesses)),
     [executionProcesses]
   );
 
-  if (!status) return null;
+  const pending = wakeups.filter(
+    ({ delivery }) => delivery.state === 'pending'
+  ).length;
+  const wakeupStatus = pending
+    ? `${pending} pending wake-up${pending === 1 ? '' : 's'}`
+    : '';
+  const accessibleText = [
+    status?.accessibleText,
+    wakeupStatus,
+    wakeupsError && 'Wake-ups unavailable',
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  const visibleText = [
+    status?.visibleText,
+    wakeupStatus,
+    wakeupsError && 'Wake-ups unavailable',
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  if (!accessibleText) return null;
 
   return (
     <span
       className={`min-w-0 max-w-28 truncate text-sm ${
-        status.hasFailure ? 'text-destructive' : 'text-low'
+        status?.hasFailure || wakeupsError ? 'text-destructive' : 'text-low'
       }`}
-      title={status.accessibleText}
-      aria-label={status.accessibleText}
+      title={accessibleText}
+      aria-label={accessibleText}
       data-testid="pollers-header-summary"
     >
-      {status.visibleText}
+      {visibleText}
     </span>
   );
 }
