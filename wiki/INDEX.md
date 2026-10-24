@@ -18,6 +18,8 @@ contributed to it.
 
 ## Pages
 
+- [conversation-entry-aggregation.md](conversation-entry-aggregation.md) — How chat entries collapse into thinking/diff/tool groups, same-name MCP tool runs, never grouping pending approvals, and why to extend `AGGREGATED_GROUP` rather than add a group type (`vk/d068-collapse-matchin`).
+
 - [durable-session-wakeups.md](durable-session-wakeups.md) — Timed and condition-based session continuation, restart admission, cancellation, receipt safety and bounded chaining (`vk/5ae4-pollers-add-a-ti`).
 
 - [tracked-background-subtasks.md](tracked-background-subtasks.md) — Durable child workspaces, exact parent continuation, launch-failure boundaries, replay identity and delegation limits (`vk/5de6-background-jobs`).
