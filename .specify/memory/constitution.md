@@ -1408,3 +1408,14 @@ and depth, actionable replacement for unsupported CLI background work, and
 exact parent targeting without implicit consent to revive stopped work.
 Completion is an observed turn outcome, not proof of task success. Preserve
 command poller behavior and reuse the existing durable delivery dispatcher.
+
+## Review: vk/d068-collapse-matchin
+
+Applied `/speckit.constitution`; no new principle is needed (version stays
+0.55.0). III (generalise existing behaviour rather than duplicate it) governs
+collapsing repeated same-name tool calls: extend the existing
+`aggregateConsecutiveEntries` / `ChatAggregatedToolEntries` path instead of
+adding a parallel grouping. II requires unit tests for the grouping rules;
+IV applies because `web-core` changes reach both frontends. The homelab
+constitution named by the command template was not changed, because this
+project manages only the Vibe Kanban repository.
