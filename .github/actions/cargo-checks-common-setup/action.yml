@@ -33,13 +33,13 @@ runs:
 
     - name: Install Rust toolchain
       if: ${{ inputs.components == '' }}
-      uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       with:
         toolchain: ${{ inputs.toolchain }}
 
     - name: Install Rust toolchain with components
       if: ${{ inputs.components != '' }}
-      uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       with:
         toolchain: ${{ inputs.toolchain }}
         components: ${{ inputs.components }}
