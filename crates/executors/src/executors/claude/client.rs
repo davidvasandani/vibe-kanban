@@ -27,11 +27,8 @@ pub const STOP_GIT_CHECK_CALLBACK_ID: &str = "STOP_GIT_CHECK_CALLBACK_ID";
 /// PreToolUse callback id used to deny `ScheduleWakeup` calls (VAS-283).
 pub const DENY_SCHEDULE_WAKEUP_CALLBACK_ID: &str = "DENY_SCHEDULE_WAKEUP_CALLBACK_ID";
 /// Reason surfaced to the agent when it tries to schedule a wake-up under a VK
-/// execution. VK has no supervising loop and reaps the turn's process at turn
-/// end (see `wiki/agent-process-lifecycle.md`), so a harness wake-up timer
-/// never fires and any work parked on it is silently dropped. The message tells
-/// the agent to continue inline instead of ending its turn.
-pub const SCHEDULE_WAKEUP_DENY_REASON: &str = "Scheduled wake-ups are not supported for Vibe Kanban executions: this turn's process is terminated when the turn ends, so the wake-up would never fire and any work you defer to it would be silently dropped. Do the work now in this turn instead of parking it on a wake-up, or leave a follow-up message to continue after the turn completes.";
+/// execution. The CLI timer dies with its turn; VK's durable MCP timer does not.
+pub const SCHEDULE_WAKEUP_DENY_REASON: &str = "This CLI's ScheduleWakeup timer cannot survive the Vibe Kanban turn ending. Use the Vibe Kanban schedule_wakeup MCP tool with fire_at (timezone-aware RFC 3339) or delay_secs and on_fire_prompt. It persists the timer and resumes this same session after the current turn ends. Inspect or cancel it with list_wakeups/cancel_wakeup or in the Processes drawer. End the turn after scheduling when no independent work remains.";
 
 /// PreToolUse hook response that denies a `ScheduleWakeup` call with an
 /// actionable reason (VAS-283). Extracted so it can be unit-tested directly.

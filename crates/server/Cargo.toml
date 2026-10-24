@@ -8,6 +8,7 @@ default-run = "server"
 uninlined-format-args = "allow"
 
 [dependencies]
+libc = "0.2"
 api-types = { path = "../api-types" }
 cluster-protocol = { path = "../cluster-protocol" }
 deployment = { path = "../deployment" }

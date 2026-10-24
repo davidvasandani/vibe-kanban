@@ -1112,9 +1112,19 @@ script: string,
  */
 working_dir: string | null, };
 
+export type Wakeup = { id: string, workspace_id: string, session_id: string, fire_at: string, prompt: string, poller_id: string | null, trigger_context: string | null, created_at: string, };
+
+export type WakeupSummary = { wakeup: Wakeup, delivery: IssueCommentDelivery, };
+
+export type ScheduleWakeupRequest = { session_id: string, fire_at: string | null, delay_secs: number | null, on_fire_prompt: string, };
+
 export type StartPollerError = { "type": "missing_stop_rule" } | { "type": "empty_stop_command" } | { "type": "invalid_timeout" } | { "type": "empty_command" } | { "type": "invalid_interval" } | { "type": "invalid_working_dir" } | { "type": "too_many_helpers" };
 
 export type StartPollerRequest = { 
+/**
+ * Session that receives on_stop_prompt. Required when that prompt is set.
+ */
+session_id: string | null, on_stop_prompt: string | null, 
 /**
  * Command to run on each tick.
  */

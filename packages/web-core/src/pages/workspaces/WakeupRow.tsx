@@ -66,9 +66,11 @@ export function WakeupRow({ summary }: { summary: WakeupSummary }) {
       <p className="text-low">{delivery.state}</p>
       {wakeup.poller_id ? (
         <p className="text-low">
-          {pending
-            ? 'Waiting for stop command to succeed'
-            : 'Triggered by poller stop command'}
+          {wakeup.trigger_context
+            ? 'Stop command succeeded'
+            : pending
+              ? 'Waiting for successful completion receipt'
+              : 'Ended before completion was delivered'}
         </p>
       ) : (
         <p className="text-low">

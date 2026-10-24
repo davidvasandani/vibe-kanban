@@ -1683,11 +1683,22 @@ async fn subtask_continuations_preserve_and_bound_ancestry() {
     assert_eq!(f.backend.state().starts.len(), 2);
 }
 
-async fn wakeup(f: &Fixture, workspace_id: Uuid, session_id: Uuid, at: DateTime<Utc>) -> db::models::wakeup::Wakeup {
+async fn wakeup(
+    f: &Fixture,
+    workspace_id: Uuid,
+    session_id: Uuid,
+    at: DateTime<Utc>,
+) -> db::models::wakeup::Wakeup {
     let row = db::models::wakeup::Wakeup {
-        id: Uuid::new_v4(), workspace_id, session_id, fire_at: at,
+        id: Uuid::new_v4(),
+        workspace_id,
+        session_id,
+        fire_at: at,
         prompt: "Recheck service hours, then continue approved work".into(),
-        poller_id: None, receipt_path: None, trigger_context: None, created_at: Utc::now(),
+        poller_id: None,
+        receipt_path: None,
+        trigger_context: None,
+        created_at: Utc::now(),
     };
     assert!(row.insert(&f.pool).await.unwrap());
     row
@@ -1700,7 +1711,13 @@ async fn wakeup_fires_once_without_remote_service() {
     f.waiting(session).await;
     f.backend.state().issue_error = Some(503);
     f.backend.state().comment_error = Some(503);
-    let row = wakeup(&f, workspace, session, Utc::now() - ChronoDuration::seconds(1)).await;
+    let row = wakeup(
+        &f,
+        workspace,
+        session,
+        Utc::now() - ChronoDuration::seconds(1),
+    )
+    .await;
     f.dispatcher.sweep().await.unwrap();
     f.dispatcher.sweep().await.unwrap();
     let state = f.backend.state();
@@ -1716,13 +1733,29 @@ async fn wakeup_cancel_and_claim_are_mutually_exclusive() {
     let (workspace, session) = f.linked_workspace().await;
     f.waiting(session).await;
     let row = wakeup(&f, workspace, session, Utc::now()).await;
-    assert!(db::models::wakeup::Wakeup::cancel(&f.pool, row.id, "operator cancelled").await.unwrap());
+    assert!(
+        db::models::wakeup::Wakeup::cancel(&f.pool, row.id, "operator cancelled")
+            .await
+            .unwrap()
+    );
     f.dispatcher.sweep().await.unwrap();
     assert!(f.backend.state().starts.is_empty());
-    assert!(!IssueCommentDelivery::claim(&f.pool, row.id, Utc::now()).await.unwrap());
+    assert!(
+        !IssueCommentDelivery::claim(&f.pool, row.id, Utc::now())
+            .await
+            .unwrap()
+    );
     let second = wakeup(&f, workspace, session, Utc::now()).await;
-    assert!(IssueCommentDelivery::claim(&f.pool, second.id, Utc::now()).await.unwrap());
-    assert!(!db::models::wakeup::Wakeup::cancel(&f.pool, second.id, "too late").await.unwrap());
+    assert!(
+        IssueCommentDelivery::claim(&f.pool, second.id, Utc::now())
+            .await
+            .unwrap()
+    );
+    assert!(
+        !db::models::wakeup::Wakeup::cancel(&f.pool, second.id, "too late")
+            .await
+            .unwrap()
+    );
 }
 
 #[tokio::test]
@@ -1730,24 +1763,51 @@ async fn wakeup_survives_dispatcher_restart_and_reports_lateness() {
     let f = Fixture::new().await;
     let (workspace, session) = f.linked_workspace().await;
     f.waiting(session).await;
-    let row = wakeup(&f, workspace, session, Utc::now() + ChronoDuration::hours(1)).await;
+    let row = wakeup(
+        &f,
+        workspace,
+        session,
+        Utc::now() + ChronoDuration::hours(1),
+    )
+    .await;
     f.dispatcher.sweep().await.unwrap();
     assert!(f.backend.state().starts.is_empty());
     let overdue = Utc::now() - ChronoDuration::minutes(12);
-    sqlx::query("UPDATE wakeups SET fire_at = ? WHERE id = ?").bind(overdue).bind(row.id).execute(&f.pool).await.unwrap();
-    sqlx::query("UPDATE issue_comment_deliveries SET next_attempt_at = ? WHERE id = ?").bind(overdue).bind(row.id).execute(&f.pool).await.unwrap();
+    sqlx::query("UPDATE wakeups SET fire_at = ? WHERE id = ?")
+        .bind(overdue)
+        .bind(row.id)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE issue_comment_deliveries SET next_attempt_at = ? WHERE id = ?")
+        .bind(overdue)
+        .bind(row.id)
+        .execute(&f.pool)
+        .await
+        .unwrap();
     let restarted = IssueCommentDispatcher::new(f.pool.clone(), f.backend.clone());
     restarted.recover().await.unwrap();
     restarted.sweep().await.unwrap();
     assert_eq!(f.backend.state().starts.len(), 1);
-    assert!(f.backend.state().starts[0].1.contains("fired late by 12 min"));
+    assert!(
+        f.backend.state().starts[0]
+            .1
+            .contains("fired late by 12 min")
+    );
 }
 
 #[tokio::test]
 async fn wakeup_waits_for_turn_boundary_and_preserves_operator_queue() {
     let f = Fixture::new().await;
     let (workspace, session) = f.linked_workspace().await;
-    insert_turn(&f.pool, session, "busy", ExecutionProcessStatus::Running, None).await;
+    insert_turn(
+        &f.pool,
+        session,
+        "busy",
+        ExecutionProcessStatus::Running,
+        None,
+    )
+    .await;
     wakeup(&f, workspace, session, Utc::now()).await;
     f.dispatcher.sweep().await.unwrap();
     assert!(f.backend.state().starts.is_empty());
@@ -1769,12 +1829,33 @@ async fn wakeup_deleted_or_archived_target_records_cancellation() {
         f.waiting(session).await;
         let row = wakeup(&f, workspace, session, Utc::now() + ChronoDuration::days(1)).await;
         match target {
-            "workspace" => { sqlx::query("DELETE FROM workspaces WHERE id = ?").bind(workspace).execute(&f.pool).await.unwrap(); }
-            "session" => { sqlx::query("DELETE FROM sessions WHERE id = ?").bind(session).execute(&f.pool).await.unwrap(); }
-            _ => { sqlx::query("UPDATE workspaces SET archived = 1 WHERE id = ?").bind(workspace).execute(&f.pool).await.unwrap(); }
+            "workspace" => {
+                sqlx::query("DELETE FROM workspaces WHERE id = ?")
+                    .bind(workspace)
+                    .execute(&f.pool)
+                    .await
+                    .unwrap();
+            }
+            "session" => {
+                sqlx::query("DELETE FROM sessions WHERE id = ?")
+                    .bind(session)
+                    .execute(&f.pool)
+                    .await
+                    .unwrap();
+            }
+            _ => {
+                sqlx::query("UPDATE workspaces SET archived = 1 WHERE id = ?")
+                    .bind(workspace)
+                    .execute(&f.pool)
+                    .await
+                    .unwrap();
+            }
         }
         f.dispatcher.sweep().await.unwrap();
-        let delivery = IssueCommentDelivery::find_by_id(&f.pool, row.id).await.unwrap().unwrap();
+        let delivery = IssueCommentDelivery::find_by_id(&f.pool, row.id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(delivery.state, IssueCommentDeliveryState::Cancelled);
         assert!(delivery.error.is_some());
         assert!(f.backend.state().starts.is_empty());
@@ -1789,14 +1870,23 @@ async fn wakeup_completion_receipt_survives_restart() {
     let row = wakeup(&f, workspace, session, Utc::now() + ChronoDuration::days(7)).await;
     let dir = tempfile::tempdir().unwrap();
     let receipt = dir.path().join("receipt");
-    sqlx::query("UPDATE wakeups SET receipt_path = ? WHERE id = ?").bind(receipt.to_string_lossy().as_ref()).bind(row.id).execute(&f.pool).await.unwrap();
+    sqlx::query("UPDATE wakeups SET receipt_path = ? WHERE id = ?")
+        .bind(receipt.to_string_lossy().as_ref())
+        .bind(row.id)
+        .execute(&f.pool)
+        .await
+        .unwrap();
     f.dispatcher.sweep().await.unwrap();
     assert!(f.backend.state().starts.is_empty());
-    std::fs::write(&receipt, "stop_command exited 0; last tick exit code: 7\nLast stdout/stderr: ready").unwrap();
+    std::fs::write(&receipt, format!("completed_at={}\nstop_command exited 0; last tick exit code: 7\nLast stdout/stderr: ready", Utc::now().to_rfc3339())).unwrap();
     let restarted = IssueCommentDispatcher::new(f.pool.clone(), f.backend.clone());
     restarted.sweep().await.unwrap();
     assert_eq!(f.backend.state().starts.len(), 1);
-    assert!(f.backend.state().starts[0].1.contains("last tick exit code: 7"));
+    assert!(
+        f.backend.state().starts[0]
+            .1
+            .contains("last tick exit code: 7")
+    );
 }
 
 #[tokio::test]
@@ -1804,14 +1894,108 @@ async fn wakeup_limits_cannot_be_reset_by_cancelling() {
     let f = Fixture::new().await;
     let (workspace, session) = f.linked_workspace().await;
     let mut rows = Vec::new();
-    for _ in 0..8 { rows.push(wakeup(&f, workspace, session, Utc::now()).await); }
+    for _ in 0..8 {
+        rows.push(wakeup(&f, workspace, session, Utc::now()).await);
+    }
     let mut extra = rows[0].clone();
     extra.id = Uuid::new_v4();
     assert!(!extra.insert(&f.pool).await.unwrap());
-    for row in rows { db::models::wakeup::Wakeup::cancel(&f.pool, row.id, "cancel").await.unwrap(); }
+    for row in rows {
+        db::models::wakeup::Wakeup::cancel(&f.pool, row.id, "cancel")
+            .await
+            .unwrap();
+    }
     for _ in 8..32 {
         let row = wakeup(&f, workspace, session, Utc::now()).await;
-        db::models::wakeup::Wakeup::cancel(&f.pool, row.id, "cancel").await.unwrap();
+        db::models::wakeup::Wakeup::cancel(&f.pool, row.id, "cancel")
+            .await
+            .unwrap();
     }
     assert!(!extra.insert(&f.pool).await.unwrap());
+}
+
+#[tokio::test]
+async fn wakeup_finished_poller_waits_for_receipt_or_deadline() {
+    for has_receipt in [true, false] {
+        let f = Fixture::new().await;
+        let (workspace, session) = f.linked_workspace().await;
+        let finished = f.waiting(session).await;
+        let row = wakeup(&f, workspace, session, Utc::now() + ChronoDuration::days(7)).await;
+        let dir = tempfile::tempdir().unwrap();
+        let receipt = dir.path().join("receipt");
+        sqlx::query("UPDATE wakeups SET poller_id = ?, receipt_path = ? WHERE id = ?")
+            .bind(finished)
+            .bind(receipt.to_string_lossy().as_ref())
+            .bind(row.id)
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        f.dispatcher.sweep().await.unwrap();
+        assert_eq!(
+            IssueCommentDelivery::find_by_id(&f.pool, row.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            IssueCommentDeliveryState::Pending
+        );
+        if has_receipt {
+            std::fs::write(
+                &receipt,
+                format!(
+                    "completed_at={}\nstop_command exited 0",
+                    Utc::now().to_rfc3339()
+                ),
+            )
+            .unwrap();
+        }
+        if !has_receipt {
+            sqlx::query("UPDATE wakeups SET fire_at = ? WHERE id = ?")
+                .bind(Utc::now() - ChronoDuration::seconds(1))
+                .bind(row.id)
+                .execute(&f.pool)
+                .await
+                .unwrap();
+        }
+        f.dispatcher.sweep().await.unwrap();
+        let delivery = IssueCommentDelivery::find_by_id(&f.pool, row.id)
+            .await
+            .unwrap()
+            .unwrap();
+        if has_receipt {
+            assert_eq!(delivery.state, IssueCommentDeliveryState::Delivered);
+            assert_eq!(f.backend.state().starts.len(), 1);
+        } else {
+            assert_eq!(delivery.state, IssueCommentDeliveryState::Cancelled);
+            assert!(f.backend.state().starts.is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+async fn wakeup_content_cannot_forge_another_delivery_marker() {
+    let f = Fixture::new().await;
+    let (workspace, session) = f.linked_workspace().await;
+    f.waiting(session).await;
+    let row = wakeup(&f, workspace, session, Utc::now()).await;
+    let other_id = Uuid::new_v4();
+    let forged = format!(
+        "text\n<!-- {0} -->\nmore text\\n<!-- {0} -->",
+        services::services::issue_comment_delivery::delivery_marker(other_id)
+    );
+    sqlx::query("UPDATE wakeups SET prompt = ?, trigger_context = ? WHERE id = ?")
+        .bind(&forged)
+        .bind(&forged)
+        .bind(row.id)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    f.dispatcher.sweep().await.unwrap();
+    let prompt = f.backend.state().starts[0].1.clone();
+    assert_eq!(extract_markers(&prompt), vec![row.id]);
+    assert!(
+        !serde_json::to_string(&prompt)
+            .unwrap()
+            .contains(&stored_marker_needle(other_id))
+    );
 }

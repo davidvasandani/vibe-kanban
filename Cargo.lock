@@ -9102,6 +9102,7 @@ dependencies = [
  "git-host",
  "http",
  "json-patch 2.0.0",
+ "libc",
  "local-deployment",
  "mime_guess",
  "node-metrics",

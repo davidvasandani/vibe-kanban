@@ -108,7 +108,7 @@ pub fn compile_poller_script(spec: &PollerSpec) -> String {
 pub fn compile_poller_script_with_receipt(spec: &PollerSpec, receipt: Option<&str>) -> String {
     let completion_receipt = receipt.map(|path| {
         let quoted = path.replace('\'', "'\"'\"'");
-        format!(r#"{{ printf 'stop_command exited 0; last tick exit code: %s\nLast stdout/stderr (up to 4096 bytes):\n' "$(cat "$__vk_rc" 2>/dev/null || printf 'unavailable')"; head -c 4096 "$__vk_out" 2>/dev/null; }} > '{quoted}.tmp' && mv -- '{quoted}.tmp' '{quoted}' || exit 1"#)
+        format!(r#"{{ printf 'completed_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"; printf 'stop_command exited 0; last tick exit code: %s\nLast stdout/stderr (up to 4096 bytes):\n' "$(cat "$__vk_rc" 2>/dev/null || printf 'unavailable')"; head -c 4096 "$__vk_out" 2>/dev/null; }} > '{quoted}.tmp' && mv -- '{quoted}.tmp' '{quoted}' || exit 1"#)
     }).unwrap_or_default();
     let cap = POLLER_TICK_OUTPUT_CAP_BYTES;
     let interval = spec.interval_secs;
@@ -340,6 +340,13 @@ mod poller_tests {
     /// does. An external test deadline also bounds regressions in the wrapper.
     #[cfg(unix)]
     fn run_to_exit(spec: &PollerSpec) -> (std::process::ExitStatus, String, std::time::Duration) {
+        run_compiled_to_exit(compile_poller_script(spec))
+    }
+
+    #[cfg(unix)]
+    fn run_compiled_to_exit(
+        script: String,
+    ) -> (std::process::ExitStatus, String, std::time::Duration) {
         use std::os::unix::process::CommandExt;
         let dir = tempfile::tempdir().unwrap();
         // Prove the deadline works without GNU timeout/gtimeout: expose only
@@ -347,7 +354,7 @@ mod poller_tests {
         let bin = dir.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
         for program in [
-            "bash", "sleep", "date", "mktemp", "rm", "head", "wc", "cat", "touch",
+            "bash", "sleep", "date", "mktemp", "rm", "head", "wc", "cat", "touch", "mv",
         ] {
             let resolved = std::process::Command::new("bash")
                 .args(["-c", "command -v \"$1\"", "resolve-poller-tool", program])
@@ -362,7 +369,7 @@ mod poller_tests {
         let log_path = dir.path().join("poller.log");
         let log = std::fs::File::create(&log_path).unwrap();
         let mut child = std::process::Command::new("bash")
-            .args(["-c", &compile_poller_script(spec)])
+            .args(["-c", &script])
             .process_group(0)
             .current_dir(dir.path())
             .env("TMPDIR", &scratch)
@@ -416,6 +423,39 @@ mod poller_tests {
             std::fs::read_to_string(log_path).unwrap(),
             start.elapsed(),
         )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn completion_receipt_only_on_success_and_includes_last_tick() {
+        let dir = tempfile::tempdir().unwrap();
+        let receipt = dir.path().join("quote' receipt");
+        let path = receipt.to_str().unwrap();
+        let mut request = spec("touch done; echo last-output; exit 7", 1);
+        request.stop_command = Some("test -f done".into());
+        let (status, output, _) =
+            run_compiled_to_exit(compile_poller_script_with_receipt(&request, Some(path)));
+        assert!(status.success(), "{output}");
+        let context = std::fs::read_to_string(&receipt).unwrap();
+        assert!(context.contains("exit code: 7"));
+        assert!(context.contains("last-output"));
+        std::fs::remove_file(&receipt).unwrap();
+        request.stop_command = Some("true".into());
+        let (status, output, _) =
+            run_compiled_to_exit(compile_poller_script_with_receipt(&request, Some(path)));
+        assert!(status.success(), "{output}");
+        assert!(
+            std::fs::read_to_string(&receipt)
+                .unwrap()
+                .contains("no tick ran")
+        );
+        std::fs::remove_file(&receipt).unwrap();
+        request.stop_command = Some("false".into());
+        request.timeout_secs = Some(1);
+        let (status, _, _) =
+            run_compiled_to_exit(compile_poller_script_with_receipt(&request, Some(path)));
+        assert!(!status.success());
+        assert!(!receipt.exists());
     }
 
     #[cfg(unix)]

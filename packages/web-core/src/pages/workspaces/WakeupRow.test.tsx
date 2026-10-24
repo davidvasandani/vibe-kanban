@@ -77,7 +77,9 @@ describe('wake-up rows', () => {
   });
   it('distinguishes completion conditions from clock timers', () => {
     render(summary('pending', 'poller'));
-    expect(host.textContent).toContain('Waiting for stop command to succeed');
+    expect(host.textContent).toContain(
+      'Waiting for successful completion receipt'
+    );
     expect(host.querySelector('time')).toBeNull();
   });
   it('shows cancellation reasons and removes the Cancel action', () => {
