@@ -1,3 +1,4 @@
+import { useWorkspaceWakeups } from './useWorkspaceWakeups';
 import { memo, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { IssueSectionContainer } from './IssueSectionContainer';
@@ -79,6 +80,9 @@ export const RightSidebar = memo(function RightSidebar({
   deployUpdateAvailable = false,
   onDeployRefresh,
 }: RightSidebarProps) {
+  const { data: wakeups, error: wakeupsError } = useWorkspaceWakeups(
+    selectedWorkspace?.id
+  );
   const { t } = useTranslation(['tasks', 'common']);
   const { appVersion, deploymentTimestamp } = useUserSystem();
   const diffs = useDiffs();
@@ -270,9 +274,19 @@ export const RightSidebar = memo(function RightSidebar({
         visible: !!selectedWorkspace,
         expanded: pollersExpanded,
         fillAvailableSpace: true,
-        headerExtra: <PollersHeader executionProcesses={executionProcesses} />,
+        headerExtra: (
+          <PollersHeader
+            executionProcesses={executionProcesses}
+            wakeups={wakeups}
+            wakeupsError={wakeupsError}
+          />
+        ),
         content: (
-          <PollersSectionContainer executionProcesses={executionProcesses} />
+          <PollersSectionContainer
+            executionProcesses={executionProcesses}
+            wakeups={wakeups}
+            wakeupsError={wakeupsError}
+          />
         ),
         actions: [],
       },
@@ -391,6 +405,8 @@ export const RightSidebar = memo(function RightSidebar({
     notesExpanded,
     pollersExpanded,
     executionProcesses,
+    wakeups,
+    wakeupsError,
     isTerminalVisible,
     isTerminalExpanded,
     hasUpperContent,

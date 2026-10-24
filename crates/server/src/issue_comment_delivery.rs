@@ -63,7 +63,7 @@ use uuid::Uuid;
 use crate::{DeploymentImpl, routes::sessions::CreateFollowUpAttempt};
 
 /// How often pending deliveries are re-examined (missed events, retries).
-const SWEEP_INTERVAL: Duration = Duration::from_secs(15);
+const SWEEP_INTERVAL: Duration = Duration::from_secs(5);
 // A new turn may start only at a confirmed turn boundary: the session's
 // latest turn is the one `finalize_task` recorded in `session_turn_boundaries`
 // (written once the exit monitor has decided not to start a queued
@@ -1003,6 +1003,15 @@ impl<B: DeliveryBackend> IssueCommentDispatcher<B> {
                 .into_iter()
                 .filter(|row| row.next_attempt_at.is_none_or(|at| at <= now))
                 .collect();
+        let mut eligible = Vec::new();
+        for row in due {
+            if let Some(wakeup) = db::models::wakeup::Wakeup::find(&self.pool, row.comment_id).await?
+                && wakeup.receipt_path.is_some() && wakeup.trigger_context.is_none() {
+                continue;
+            }
+            eligible.push(row);
+        }
+        let due = eligible;
         let Some(issue_id) = due.first().map(|row| row.issue_id) else {
             return Ok(());
         };
@@ -1264,6 +1273,13 @@ impl<B: DeliveryBackend> IssueCommentDispatcher<B> {
                 }
                 EarlierAttempt::Uncertain(_) | EarlierAttempt::None => {}
             }
+            if let Some(wakeup) = db::models::wakeup::Wakeup::find(&self.pool, row.comment_id).await? {
+                ready.push((row, IssueComment {
+                    id: wakeup.id, issue_id: Uuid::nil(), author_id: None, parent_id: None,
+                    message: wakeup.message(now), created_at: wakeup.created_at, updated_at: now,
+                }));
+                continue;
+            }
             match self.backend.get_comment(row.comment_id).await {
                 Ok(comment) => ready.push((row, comment)),
                 Err(error) if is_status(&error, 404) => {
@@ -1305,6 +1321,12 @@ impl<B: DeliveryBackend> IssueCommentDispatcher<B> {
         let rows: Vec<&IssueCommentDelivery> = ready.iter().map(|(row, _)| row).collect();
         let issue_id = ready[0].0.issue_id;
 
+        let local_wakeup = issue_id.is_nil();
+        let prompt = if local_wakeup {
+            ready.iter().map(|(_, comment)| format!("{}\n<!-- {} -->", comment.message,
+                services::services::issue_comment_delivery::delivery_marker(comment.id)))
+                .collect::<Vec<_>>().join("\n\n")
+        } else {
         // The target may have changed while the comment waited: the issue
         // closed, or the workspace was unlinked, relinked or archived.
         let (issue, link) = match (
@@ -1369,7 +1391,9 @@ impl<B: DeliveryBackend> IssueCommentDispatcher<B> {
             })
             .collect();
         let label = format!("{} (\"{}\")", issue.simple_id, issue.title);
-        let prompt = compose_delivery_prompt(&label, &delivered);
+        compose_delivery_prompt(&label, &delivered)
+
+        };
 
         // The snapshot is durable before the turn can start, so recovery
         // after a crash records exactly what the agent received.
@@ -1525,6 +1549,7 @@ impl<B: DeliveryBackend> IssueCommentDispatcher<B> {
 
     /// Periodic sweep: dispatch every session with due pending deliveries.
     pub async fn sweep(&self) -> Result<(), sqlx::Error> {
+        crate::wakeups::reconcile(&self.pool).await?;
         for session_id in
             IssueCommentDelivery::sessions_with_due_pending(&self.pool, Utc::now()).await?
         {

@@ -588,6 +588,15 @@ tools: `list_pollers`, `stop_poller`. Every poller must supply `stop_command` \
 (a completion predicate: exit zero stops) or a positive `timeout_secs` (total \
 lifetime including hung commands), or both. Manual stopping alone is insufficient.
 
+To resume this same session later, use `schedule_wakeup` with exactly one of \
+`fire_at` (timezone-aware RFC 3339) or `delay_secs`, plus `on_fire_prompt`. \
+The timer survives the end of this turn and server restarts. It queues behind \
+an active turn. Use `list_wakeups` and `cancel_wakeup` to inspect or cancel it. \
+For a poller condition, supply `on_stop_prompt` to `spawn_poller`; it resumes \
+the session only when `stop_command` exits zero. Timers and condition wake-ups \
+share limits of 8 pending and 32 lifetime per session; timers allow at most 7 days. \
+End the turn after scheduling when no independent work remains.
+
 Do not try to work around this with `nohup`, `setsid`, `&`, `disown`, or a \
 detached subshell: those are reaped with the turn just the same. Prefer running \
 the command in the foreground when you only need its result now, and reach for \

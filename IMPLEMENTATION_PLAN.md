@@ -1,21 +1,16 @@
-# Implementation plan — vk/5de6-background-jobs
+# Implementation plan — durable wake-ups
 
-1. Confirm the reported background-job behavior and trace the affected executor
-   from launch policy through delegation and parent completion. Use workspace
-   `PRIOR_KNOWLEDGE.md` to distinguish pollers from agent subtasks.
-2. Run the workspace SpecKit commands in their required order, using the
-   per-task feature directory pointer. Resolve the scope of parent resumption
-   during clarification before committing to a lifecycle design.
-3. Implement the smallest supported tracked-child path and any required
-   executor enforcement/instructions. Preserve foreground work and pollers.
-4. Add regression coverage at the changed lifecycle boundary, including failure
-   and repeated completion if a continuation mechanism changes.
-5. Install locked dependencies, format as required by AGENTS.md, and run checks
-   appropriate to the resulting changes.
-6. Run independent Codex review; address significant findings and reverify.
-7. Update and commit reusable project knowledge with this task identifier.
-8. Open and merge the task PR against the confirmed base branch.
-
-The user confirmed both behaviors. Concrete implementation and dependency
-ordering are recorded in the workspace SpecKit feature directory
-`homelab/specs/vk/5de6-background-jobs/`.
+1. Complete SpecKit constitution/spec/clarification/design/tasks/analysis stages
+   using the workspace command feature pointer. Preserve service scope.
+2. Inspect durable continuation delivery and settled-session admission. Define a
+   persisted wake-up record with deadline, target, prompt, state and trigger data.
+3. Add scheduling validation, cancellation and restart reconciliation; enforce
+   seven-day, eight-pending and bounded automatic-continuation limits atomically.
+4. Integrate timer and successful interval-completion delivery with existing
+   follow-up execution, preserving queued operator work and warm session gates.
+5. Expose schedule/list/cancel through MCP/API and show countdown, deadline,
+   prompt and cancellation in the existing drawer.
+6. Generate shared types, add lifecycle/API/UI regression coverage, install
+   dependencies, format and run relevant checks.
+7. Run independent Codex review, fix confirmed findings and reverify. Record and
+   commit reusable project knowledge. Open and merge the task PR.

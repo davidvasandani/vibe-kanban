@@ -100,6 +100,16 @@ pub fn validate_interval(interval_secs: u32) -> bool {
 /// so a `cd`, an `exit` or a stray assignment in the agent's command cannot
 /// leak into the loop that drives it.
 pub fn compile_poller_script(spec: &PollerSpec) -> String {
+    compile_poller_script_with_receipt(spec, None)
+}
+
+/// An optional private receipt path is supplied by VK, never by tool input.
+/// The successful predicate publishes bounded last-tick output before exiting.
+pub fn compile_poller_script_with_receipt(spec: &PollerSpec, receipt: Option<&str>) -> String {
+    let completion_receipt = receipt.map(|path| {
+        let quoted = path.replace('\'', "'\"'\"'");
+        format!(r#"{{ printf 'stop_command exited 0; last tick exit code: %s\nLast stdout/stderr (up to 4096 bytes):\n' "$(cat "$__vk_rc" 2>/dev/null || printf 'unavailable')"; head -c 4096 "$__vk_out" 2>/dev/null; }} > '{quoted}.tmp' && mv -- '{quoted}.tmp' '{quoted}' || exit 1"#)
+    }).unwrap_or_default();
     let cap = POLLER_TICK_OUTPUT_CAP_BYTES;
     let interval = spec.interval_secs;
     let max_ticks = MAX_POLLER_TICKS;
@@ -186,9 +196,12 @@ __vk_poller_should_stop() {{
 {stop_command}
 }}
 
+: > "$__vk_out"
+printf 'unavailable (no tick ran)' > "$__vk_rc"
 __vk_tick=0
 while [ "$__vk_tick" -lt "$__vk_max_ticks" ]; do
     if ( __vk_poller_should_stop ) >/dev/null 2>&1; then
+        {completion_receipt}
         printf '=== vk-poller stopped: stop_command succeeded ===\n'
         exit 0
     fi

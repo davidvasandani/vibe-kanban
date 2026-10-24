@@ -14,3 +14,5 @@ pub mod startup;
 pub type DeploymentImpl = local_deployment::LocalDeployment;
 pub mod mcp_gateway;
 pub mod mcp_oauth;
+
+pub mod wakeups;
