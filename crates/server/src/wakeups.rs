@@ -25,6 +25,7 @@ pub struct ScheduleWakeupRequest {
     pub on_fire_prompt: String,
 }
 
+#[allow(clippy::result_large_err)] // Keep the shared API error at validation boundaries.
 pub fn deadline(
     request: &ScheduleWakeupRequest,
     now: DateTime<Utc>,
@@ -47,6 +48,7 @@ pub fn deadline(
     Ok(at)
 }
 
+#[allow(clippy::result_large_err)] // Keep the shared API error at validation boundaries.
 pub fn validate_prompt(prompt: &str) -> Result<(), ApiError> {
     if prompt.trim().is_empty() || prompt.len() > 16_384 {
         return Err(ApiError::BadRequest(
