@@ -1,6 +1,6 @@
 # Terminal-status side effects on the remote issue-update path
 
-**Contributing tasks:** `2f63-auto-archive-wor`, `f464-vk-workspace-mgm`, `vk/88c5-marking-an-issue`
+**Contributing tasks:** `2f63-auto-archive-wor`, `f464-vk-workspace-mgm`, `vk/88c5-marking-an-issue`, `VAS-892`
 
 How the remote/cloud server reacts to an issue changing status — specifically the
 "archive an issue's workspaces when it reaches a terminal status" behaviour — and
@@ -63,8 +63,9 @@ active while its linked remote row is archived.
 This is deliberately **level-triggered**, not tied to the status-change event. The
 same comparison runs after Electric updates, fallback snapshots, reconnects, and
 provider remounts, so temporary disconnection does not lose the side effect. It
-uses the existing `workspacesApi.update(id, { archived: true })` path rather than a
-second local mutation mechanism. The reconciliation helper:
+uses `workspacesApi.archiveAutomatically(id)` and the dedicated local
+`POST /api/workspaces/{id}/archive/automatic` endpoint. Explicit user archive
+continues to use the manual update path. The reconciliation helper:
 
 - selects unique `local_workspace_id` values from archived remote rows that still
   appear in the local active set;
@@ -94,8 +95,8 @@ add workspace hydration to the issue panel's loading gate.
 
 Do not archive from the optimistically updated issue status: a rejected status
 mutation must leave local workspaces active. Persisted remote workspace archive
-flags are the reconciliation authority. The hook still relies on a subsequent
-snapshot to retry failed local writes. This is UI-mounted reconciliation; it does
+flags are the reconciliation authority. The hook retries every 30 seconds while mounted as well as on subsequent
+snapshots. This is UI-mounted reconciliation; it does
 not provide backend convergence when neither relevant provider is mounted.
 
 `LinkedIssueContext.test.tsx` exercises the rendered provider with the real archive
@@ -112,3 +113,26 @@ the standard 72h — see `crates/db` cleanup queries.
   reconciliation is intentionally archive-only.
 - The local SQLite `Task` path (`crates/db`) has no equivalent hook; this
   behaviour is remote-only.
+
+## Local automatic archive admission (VAS-892)
+
+Remote archived=true is intent, not permission to tear down local resources.
+The automatic endpoint reads current remote intent, then uses one SQLite UPDATE
+to check local blockers and mark the workspace archived. Pinned workspaces,
+running coding-agent executions in any session, running pollers, and wake-ups
+with pending/dispatching delivery records block admission. Due-but-undelivered
+wake-ups still block. Poller detection follows the ScriptRequest typ.poller
+object predicate; plain background helpers and dev servers do not block.
+Dropped history is not evidence that an agent or poller stopped.
+
+Only a successful transition runs cleanup (preview revocation, helper stops,
+archive scripts). A refusal returns blocked and leaves remote archived=true
+pending. Do not restore remote archived=false just to reconcile refusal: remote
+reactivation can reopen a Done issue. Mounted reconciliation retries after
+blockers clear; there is no new headless worker. Explicit user archive keeps its
+existing unconditional behavior. Remote-read and database failures fail closed.
+
+Keep the guard and the archived write atomic; separate eligibility reads followed
+by the manual archive path allow activity to arrive between check and teardown.
+The remote read and local write are still separate stores, not a distributed
+transaction. New activity retains its existing local reactivation behavior.
