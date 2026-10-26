@@ -51,6 +51,36 @@ pub async fn get_workspace_placement(
     Ok(ResponseJson(ApiResponse::success(placement)))
 }
 
+/// Remote reconciliation is separate from explicit user archive. Re-read the
+/// remote flag so a delayed UI snapshot cannot archive reactivated work.
+pub async fn archive_workspace_automatically(
+    Extension(workspace): Extension<Workspace>,
+    State(deployment): State<DeploymentImpl>,
+) -> Result<ResponseJson<ApiResponse<&'static str>>, ApiError> {
+    let current = Workspace::find_by_id(&deployment.db().pool, workspace.id)
+        .await?
+        .ok_or(WorkspaceError::WorkspaceNotFound)?;
+    if current.archived {
+        return Ok(ResponseJson(ApiResponse::success("already_archived")));
+    }
+    let remote = deployment
+        .remote_client()?
+        .get_workspace_by_local_id(workspace.id)
+        .await?;
+    if !remote.archived {
+        return Ok(ResponseJson(ApiResponse::success("not_requested")));
+    }
+    let archived = deployment
+        .container()
+        .archive_workspace_automatically(workspace.id)
+        .await?;
+    Ok(ResponseJson(ApiResponse::success(if archived {
+        "archived"
+    } else {
+        "blocked"
+    })))
+}
+
 pub async fn update_workspace(
     Extension(workspace): Extension<Workspace>,
     State(deployment): State<DeploymentImpl>,

@@ -797,6 +797,43 @@ impl Workspace {
             .map(|(workspace_id, _)| workspace_id)
     }
 
+    /// Admit remote-driven archival using current local state in the same write
+    /// that changes the flag. A false result must never trigger archive cleanup.
+    pub async fn try_archive_automatically(
+        pool: &SqlitePool,
+        workspace_id: Uuid,
+    ) -> Result<bool, sqlx::Error> {
+        Ok(sqlx::query(
+            r#"
+            UPDATE workspaces SET archived = TRUE, updated_at = datetime('now', 'subsec')
+            WHERE id = $1 AND archived = FALSE AND pinned = FALSE
+              AND NOT EXISTS (
+                SELECT 1 FROM execution_processes ep
+                JOIN sessions s ON s.id = ep.session_id
+                WHERE s.workspace_id = workspaces.id AND ep.status = 'running'
+                  AND (ep.run_reason = 'codingagent' OR (
+                    ep.run_reason = 'backgroundhelper'
+                    AND CASE WHEN json_valid(ep.executor_action) THEN
+                      json_extract(ep.executor_action, '$.typ.type') = 'ScriptRequest'
+                      AND json_type(ep.executor_action, '$.typ.poller') = 'object'
+                    ELSE FALSE END
+                  ))
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM wakeups w
+                JOIN issue_comment_deliveries d ON d.comment_id = w.id
+                WHERE w.workspace_id = workspaces.id
+                  AND d.state IN ('pending', 'dispatching')
+              )
+            "#,
+        )
+        .bind(workspace_id)
+        .execute(pool)
+        .await?
+        .rows_affected()
+            == 1)
+    }
+
     pub async fn set_archived(
         pool: &SqlitePool,
         workspace_id: Uuid,
@@ -1231,6 +1268,209 @@ mod tests {
             .unwrap();
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
         pool
+    }
+
+    #[tokio::test]
+    async fn automatic_archive_preserves_each_blocker_and_allows_plain_helpers() {
+        use crate::models::{
+            execution_process::ExecutionProcess,
+            session::{CreateSession, Session},
+            wakeup::Wakeup,
+        };
+
+        let pool = test_pool().await;
+        for scenario in [
+            "idle",
+            "pinned",
+            "agent",
+            "dropped-agent",
+            "poller",
+            "dropped-poller",
+            "helper",
+            "devserver",
+            "finished-poller",
+            "malformed-helper",
+            "pending",
+            "dispatching",
+            "delivered",
+            "cancelled",
+            "failed",
+        ] {
+            let id = Uuid::new_v4();
+            Workspace::create(
+                &pool,
+                &CreateWorkspace {
+                    branch: scenario.into(),
+                    name: None,
+                },
+                id,
+            )
+            .await
+            .unwrap();
+            // The relevant execution is in the older session; a latest-session
+            // check would miss it.
+            let session_id = Uuid::new_v4();
+            for sid in [session_id, Uuid::new_v4()] {
+                Session::create(
+                    &pool,
+                    &CreateSession {
+                        executor: None,
+                        name: None,
+                    },
+                    sid,
+                    id,
+                )
+                .await
+                .unwrap();
+            }
+            if scenario == "pinned" {
+                Workspace::update(&pool, id, None, Some(true), None)
+                    .await
+                    .unwrap();
+            }
+            let poller = scenario.contains("poller");
+            let agent = scenario.contains("agent");
+            if poller || agent || ["helper", "devserver", "malformed-helper"].contains(&scenario) {
+                let action = if scenario == "malformed-helper" {
+                    "invalid json"
+                } else if poller {
+                    r#"{"typ":{"type":"ScriptRequest","poller":{}}}"#
+                } else {
+                    r#"{"typ":{"type":"ScriptRequest","poller":null}}"#
+                };
+                sqlx::query("INSERT INTO execution_processes (id, session_id, run_reason, executor_action, status, dropped) VALUES (?, ?, ?, ?, ?, ?)")
+                    .bind(Uuid::new_v4()).bind(session_id)
+                    .bind(if agent { "codingagent" } else if scenario == "devserver" { "devserver" } else { "backgroundhelper" })
+                    .bind(action).bind(if scenario == "finished-poller" { "completed" } else { "running" })
+                    .bind(scenario.starts_with("dropped"))
+                    .execute(&pool).await.unwrap();
+                // Keep the automatic guard aligned with the established poller
+                // query, including its malformed JSON and dropped-row behavior.
+                assert_eq!(
+                    ExecutionProcess::find_workspaces_with_running_pollers(&pool, false)
+                        .await
+                        .unwrap()
+                        .contains(&id),
+                    poller && scenario != "finished-poller"
+                );
+            }
+            if ["pending", "dispatching", "delivered", "cancelled", "failed"].contains(&scenario) {
+                let wakeup = Wakeup {
+                    id: Uuid::new_v4(),
+                    workspace_id: id,
+                    session_id,
+                    fire_at: Utc::now() - chrono::Duration::seconds(60),
+                    prompt: "continue".into(),
+                    poller_id: None,
+                    receipt_path: None,
+                    trigger_context: None,
+                    created_at: Utc::now(),
+                };
+                assert!(wakeup.insert(&pool).await.unwrap());
+                sqlx::query("UPDATE issue_comment_deliveries SET state = ? WHERE comment_id = ?")
+                    .bind(scenario)
+                    .bind(wakeup.id)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+            let blocked = [
+                "pinned",
+                "agent",
+                "dropped-agent",
+                "poller",
+                "dropped-poller",
+                "pending",
+                "dispatching",
+            ]
+            .contains(&scenario);
+            assert_eq!(
+                Workspace::try_archive_automatically(&pool, id)
+                    .await
+                    .unwrap(),
+                !blocked,
+                "{scenario}"
+            );
+            assert_eq!(
+                Workspace::find_by_id(&pool, id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .archived,
+                !blocked,
+                "{scenario}"
+            );
+            if blocked {
+                // Deferred requests become eligible after every blocker clears.
+                Workspace::update(&pool, id, None, Some(false), None)
+                    .await
+                    .unwrap();
+                sqlx::query(
+                    "UPDATE execution_processes SET status = 'completed' WHERE session_id = ?",
+                )
+                .bind(session_id)
+                .execute(&pool)
+                .await
+                .unwrap();
+                sqlx::query("UPDATE issue_comment_deliveries SET state = 'cancelled' WHERE workspace_id = ?")
+                    .bind(id).execute(&pool).await.unwrap();
+                assert!(
+                    Workspace::try_archive_automatically(&pool, id)
+                        .await
+                        .unwrap(),
+                    "{scenario}"
+                );
+            }
+            assert!(
+                !Workspace::try_archive_automatically(&pool, id)
+                    .await
+                    .unwrap(),
+                "already archived: {scenario}"
+            );
+        }
+        assert!(
+            !Workspace::try_archive_automatically(&pool, Uuid::new_v4())
+                .await
+                .unwrap()
+        );
+        pool.close().await;
+        assert!(
+            Workspace::try_archive_automatically(&pool, Uuid::new_v4())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn manual_archive_still_overrides_pinning() {
+        let pool = test_pool().await;
+        let id = Uuid::new_v4();
+        Workspace::create(
+            &pool,
+            &CreateWorkspace {
+                branch: "manual".into(),
+                name: None,
+            },
+            id,
+        )
+        .await
+        .unwrap();
+        Workspace::update(&pool, id, None, Some(true), None)
+            .await
+            .unwrap();
+        assert!(
+            !Workspace::try_archive_automatically(&pool, id)
+                .await
+                .unwrap()
+        );
+        Workspace::set_archived(&pool, id, true).await.unwrap();
+        assert!(
+            Workspace::find_by_id(&pool, id)
+                .await
+                .unwrap()
+                .unwrap()
+                .archived
+        );
     }
 
     #[tokio::test]

@@ -1518,6 +1518,24 @@ pub trait ContainerService {
         let pool = &self.db().pool;
 
         Workspace::set_archived(pool, workspace_id, true).await?;
+        self.cleanup_archived_workspace(workspace_id).await
+    }
+
+    /// Remote archive intent cannot tear down pinned or ongoing local work.
+    async fn archive_workspace_automatically(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<bool, ContainerError> {
+        if !Workspace::try_archive_automatically(&self.db().pool, workspace_id).await? {
+            return Ok(false);
+        }
+        self.cleanup_archived_workspace(workspace_id).await?;
+        Ok(true)
+    }
+
+    /// Cleanup only after the caller has committed archive admission.
+    async fn cleanup_archived_workspace(&self, workspace_id: Uuid) -> Result<(), ContainerError> {
+        let pool = &self.db().pool;
 
         // Revoke external preview capabilities before stopping their helper
         // processes, so archive fails closed even while process teardown is in

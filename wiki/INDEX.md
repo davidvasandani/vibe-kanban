@@ -18,6 +18,8 @@ contributed to it.
 
 ## Pages
 
+- [issue-workspace-lifecycle.md](issue-workspace-lifecycle.md) — Local automatic archive admission, retrying protected workspaces, and why remote unarchive can reopen Done (`VAS-892`).
+
 - [conversation-entry-aggregation.md](conversation-entry-aggregation.md) — How chat entries collapse into thinking/diff/tool groups, same-name MCP tool runs, never grouping pending approvals, and why to extend `AGGREGATED_GROUP` rather than add a group type (`vk/d068-collapse-matchin`).
 
 - [durable-session-wakeups.md](durable-session-wakeups.md) — Timed and condition-based session continuation, restart admission, cancellation, receipt safety and bounded chaining (`vk/5ae4-pollers-add-a-ti`).
@@ -59,7 +61,6 @@ contributed to it.
   session id; unconfirmed worker launches are uncertain), resolve-before-
   insert, pre-launch snapshots, loop guards, and conversation-row placement
   (`vk/e252-deliver-issue-co`).
-- [issue-workspace-lifecycle.md](issue-workspace-lifecycle.md) — Comment-driven activation, transactional Done reopening, queue handoff ordering and local/remote sync boundaries.
 
 - [issue-workspace-advisory.md](issue-workspace-advisory.md) — Exact issue matching, sibling-scoped evidence, dismissible creation warnings, collapsed active counts and host-safe navigation.
 

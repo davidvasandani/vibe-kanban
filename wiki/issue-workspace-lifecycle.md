@@ -32,6 +32,16 @@ databases for transitions, rollback and concurrency; services
 `remote_sync::lifecycle_tests` checks local persistence and actual HTTP unarchive
 requests, including an already-active local workspace needing remote reconciliation.
 
+## Automatic archive is separate from manual archive
+
+See `docs/knowledge-base/issue-status-side-effects.md` for the local automatic
+admission rule. Never use the manual workspace update endpoint for remote
+archive reconciliation. A blocked local archive retains remote intent for a
+later retry; remote unarchive can reopen Done, so it is not a harmless repair.
+Pending wake-up status comes from its delivery ledger, not its deadline alone.
+
 ## Contributed by
 
 - `vk/e464-issue-and-worksp`
+
+- `VAS-892` (`vk/1e1c-don-t-auto-archi`)

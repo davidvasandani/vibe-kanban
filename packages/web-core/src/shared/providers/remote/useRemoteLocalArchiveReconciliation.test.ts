@@ -169,7 +169,7 @@ describe('reconcileRemoteLocalArchiveState', () => {
 
   it('deduplicates repeated snapshots while a local archive is in flight', async () => {
     let resolveUpdate: () => void = () => {};
-    const updateWorkspace = vi.fn(
+    const archiveAutomatically = vi.fn(
       () =>
         new Promise<void>((resolve) => {
           resolveUpdate = resolve;
@@ -181,19 +181,17 @@ describe('reconcileRemoteLocalArchiveState', () => {
       remoteWorkspaces,
       localWorkspaces,
       inFlightLocalWorkspaceIds,
-      updateWorkspace,
+      archiveAutomatically,
     });
     reconcileRemoteLocalArchiveState({
       remoteWorkspaces,
       localWorkspaces,
       inFlightLocalWorkspaceIds,
-      updateWorkspace,
+      archiveAutomatically,
     });
 
-    expect(updateWorkspace).toHaveBeenCalledTimes(1);
-    expect(updateWorkspace).toHaveBeenCalledWith('local-1', {
-      archived: true,
-    });
+    expect(archiveAutomatically).toHaveBeenCalledTimes(1);
+    expect(archiveAutomatically).toHaveBeenCalledWith('local-1');
 
     resolveUpdate();
     await flushPromises();
@@ -202,14 +200,14 @@ describe('reconcileRemoteLocalArchiveState', () => {
       remoteWorkspaces,
       localWorkspaces,
       inFlightLocalWorkspaceIds,
-      updateWorkspace,
+      archiveAutomatically,
     });
 
-    expect(updateWorkspace).toHaveBeenCalledTimes(2);
+    expect(archiveAutomatically).toHaveBeenCalledTimes(2);
   });
 
   it('isolates failures so other eligible workspaces still archive', async () => {
-    const updateWorkspace = vi
+    const archiveAutomatically = vi
       .fn()
       .mockRejectedValueOnce(new Error('archive failed'))
       .mockResolvedValueOnce(undefined);
@@ -230,17 +228,13 @@ describe('reconcileRemoteLocalArchiveState', () => {
       ],
       localWorkspaces: [localWorkspace('local-1'), localWorkspace('local-2')],
       inFlightLocalWorkspaceIds: new Set(),
-      updateWorkspace,
+      archiveAutomatically,
       onError,
     });
 
-    expect(updateWorkspace).toHaveBeenCalledTimes(2);
-    expect(updateWorkspace).toHaveBeenNthCalledWith(1, 'local-1', {
-      archived: true,
-    });
-    expect(updateWorkspace).toHaveBeenNthCalledWith(2, 'local-2', {
-      archived: true,
-    });
+    expect(archiveAutomatically).toHaveBeenCalledTimes(2);
+    expect(archiveAutomatically).toHaveBeenNthCalledWith(1, 'local-1');
+    expect(archiveAutomatically).toHaveBeenNthCalledWith(2, 'local-2');
 
     await flushPromises();
 
@@ -249,34 +243,34 @@ describe('reconcileRemoteLocalArchiveState', () => {
   });
 
   it('does nothing when reconciliation is disabled', () => {
-    const updateWorkspace = vi.fn().mockResolvedValue(undefined);
+    const archiveAutomatically = vi.fn().mockResolvedValue(undefined);
 
     reconcileRemoteLocalArchiveState({
       remoteWorkspaces,
       localWorkspaces,
       inFlightLocalWorkspaceIds: new Set(),
-      updateWorkspace,
+      archiveAutomatically,
       enabled: false,
     });
 
-    expect(updateWorkspace).not.toHaveBeenCalled();
+    expect(archiveAutomatically).not.toHaveBeenCalled();
   });
 
   it('does nothing when local workspace context is missing', () => {
-    const updateWorkspace = vi.fn().mockResolvedValue(undefined);
+    const archiveAutomatically = vi.fn().mockResolvedValue(undefined);
 
     reconcileRemoteLocalArchiveState({
       remoteWorkspaces,
       localWorkspaces: [],
       inFlightLocalWorkspaceIds: new Set(),
-      updateWorkspace,
+      archiveAutomatically,
     });
 
-    expect(updateWorkspace).not.toHaveBeenCalled();
+    expect(archiveAutomatically).not.toHaveBeenCalled();
   });
 
   it('retries a failed archive after the previous request settles', async () => {
-    const updateWorkspace = vi
+    const archiveAutomatically = vi
       .fn()
       .mockRejectedValueOnce(new Error('archive failed'))
       .mockResolvedValueOnce(undefined);
@@ -286,7 +280,7 @@ describe('reconcileRemoteLocalArchiveState', () => {
       remoteWorkspaces,
       localWorkspaces,
       inFlightLocalWorkspaceIds,
-      updateWorkspace,
+      archiveAutomatically,
       onError: vi.fn(),
     });
     await flushPromises();
@@ -295,13 +289,11 @@ describe('reconcileRemoteLocalArchiveState', () => {
       remoteWorkspaces,
       localWorkspaces,
       inFlightLocalWorkspaceIds,
-      updateWorkspace,
+      archiveAutomatically,
       onError: vi.fn(),
     });
 
-    expect(updateWorkspace).toHaveBeenCalledTimes(2);
-    expect(updateWorkspace).toHaveBeenNthCalledWith(2, 'local-1', {
-      archived: true,
-    });
+    expect(archiveAutomatically).toHaveBeenCalledTimes(2);
+    expect(archiveAutomatically).toHaveBeenNthCalledWith(2, 'local-1');
   });
 });

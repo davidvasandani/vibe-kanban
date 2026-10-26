@@ -1,52 +1,21 @@
-# Collapse matching tool-call messages
+# Guard remote-driven workspace auto-archive
 
-Task: vk/d068-collapse-matchin
+Task: vk/1e1c-don-t-auto-archi
 
-## Problem
-When an agent calls the same generic or MCP tool over and over in a row (for
-example `mcp:sgsc-mcp:solink` eight times in a row), the conversation shows one
-identical row per call, each with its own timestamp. On mobile this fills the
-whole screen with repeated rows and hides the useful content around them.
+## Problem and scope
+Remote issue completion (workflow signals and manual Done/Cancelled) archives remote workspace records without access to local activity. The UI currently applies that flag through the manual local update endpoint, stopping helpers, revoking previews, and causing scheduled wake-ups to be cancelled.
 
-The conversation view already collapses runs of file reads, searches, web
-fetches, categorized shell commands and same-file edits
-(`packages/web-core/src/shared/lib/aggregateEntries.ts`). Generic `tool`
-actions, which include every MCP tool, are never collapsed.
+## Design
+Add a dedicated server-enforced automatic archive endpoint and route the remote/local reconciliation hook through it. All clients use the same local database decision. Keep the existing manual update/archive endpoint behavior unchanged. A UI tab still initiates reconciliation; this change does not introduce a remote subscription or periodic server worker.
 
-## Outcome
-Two or more back-to-back `tool_use` entries whose `action_type.action` is
-`tool` and whose `tool_name` matches are shown as one collapsible row:
+The server reads current local state and atomically marks the workspace archived only if it is unpinned, has no running coding-agent execution in any session, no running poller, and no wake-up whose delivery is pending or dispatching. The poller predicate matches ExecutionProcess::find_workspaces_with_running_pollers, including dropped history and valid ScriptRequest poller objects. Ordinary helpers and dev servers do not block. Due-but-undelivered wake-ups still block; delivered/cancelled/failed wake-ups do not.
 
-`<tool icon> mcp:sgsc-mcp:solink · 8 calls`
+A refused request leaves local resources intact and retains remote archived=true as pending archive intent. Return an explicit blocked outcome; the UI keeps displaying the local workspace as active and retries every 30 seconds while mounted. No remote unarchive is sent because it can reopen Done issues. Remount/reconnect also retries. The endpoint checks the current remote flag before applying a stale browser signal. Missing remote linkage or unavailable remote service never causes local archive. With no relevant UI mounted, existing reconciliation remains dormant; enforcement is server-side for every requesting client.
 
-- The row uses the same accordion component as other groups
-  (`ChatAggregatedToolEntries`). Its status dot shows the worst status in the
-  group, and its expanded state persists under the group key.
-- When expanded, each call shows a one-line preview of its arguments
-  (`key: value, …`, truncated). If there are no arguments, the row shows the
-  tool name. Clicking a call opens its output in the logs panel, the same way a
-  single tool row does.
-- The group has one timestamp, chosen by the same rule as existing groups
-  (the latest valid entry time).
+After a successful guarded local transition, use the existing archive cleanup for helpers, preview leases and archive scripts without a second unconditional archived write. Already archived workspaces are idempotent. Database errors fail closed. Serialize eligibility and local archived mutation in one database statement/transaction; no network call while holding the write transaction.
 
-## Rules
-- Group only consecutive entries. Any other entry (assistant message, a
-  different tool name, a different action, a user message) ends the run.
-- A run of one stays a normal single row.
-- Entries in `pending_approval` are never grouped. They keep the inline
-  approval card, and they end any open run.
-- Other aggregation behaviour (reads/searches/fetch/commands/diffs/thinking)
-  is unchanged.
-- The group key is `agg:<first entry patchKey>`, matching the existing
-  `AGGREGATED_GROUP` convention, so it stays stable while entries stream in.
+## Acceptance and verification
+Tests cover pinned, running agent (including another session), running poller (including dropped history), pending and dispatching wake-up, completed/cancelled wake-up, plain helper, dev server, idle, already archived, missing workspace, and fail-closed database errors. Verify refusal never reaches cleanup, manual archival remains unconditional, stale remote=false is ignored, and remote read failures are surfaced. Frontend tests prove reconciliation uses the automatic endpoint and deduplicates in-flight requests. Run required install/format, focused Rust and frontend tests, applicable checks, independent Codex review, update knowledge, and create/merge PRs through Vibe Kanban after CI passes.
 
-## Out of scope
-- Grouping across different tools, or across tools that differ only in their
-  arguments, beyond the shared `tool_name`.
-- Backend/normalization changes. This is a frontend-only change.
-
-## Acceptance
-- Unit tests in `aggregateEntries.test.ts` cover: grouping same-name runs,
-  splitting on a different name, single-entry passthrough, pending-approval
-  exclusion, and interaction with existing aggregation types.
-- `pnpm run check`, `pnpm run lint`, and the web-core Vitest suite pass.
+## Boundaries
+No remote schema change, pinned-state replication, generalized helper blocking, or changes to explicit user archive. This guards archive admission at the database transition; future agent starts keep their existing reactivation behavior.
