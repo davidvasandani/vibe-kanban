@@ -481,6 +481,14 @@ export const sessionsApi = {
 
 // Workspace APIs
 export const workspacesApi = {
+  archiveAutomatically: async (workspaceId: string): Promise<string> => {
+    const response = await makeRequest(
+      `/api/workspaces/${encodeURIComponent(workspaceId)}/archive/automatic`,
+      { method: 'POST' }
+    );
+    return handleApiResponse<string>(response);
+  },
+
   createAndStart: async (
     data: CreateAndStartWorkspaceRequest
   ): Promise<CreateAndStartWorkspaceResponse> => {

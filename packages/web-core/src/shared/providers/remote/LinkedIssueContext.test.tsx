@@ -19,7 +19,9 @@ vi.mock('@/shared/integrations/electric/hooks', () => ({ useShape: vi.fn() }));
 vi.mock('@/shared/hooks/auth/useAuth', () => ({
   useAuth: () => ({ isSignedIn: state.signedIn }),
 }));
-vi.mock('@/shared/lib/api', () => ({ workspacesApi: { update: vi.fn() } }));
+vi.mock('@/shared/lib/api', () => ({
+  workspacesApi: { archiveAutomatically: vi.fn(), update: vi.fn() },
+}));
 
 const state = vi.hoisted(() => ({ signedIn: true }));
 const remote = (id: string, issueId = 'issue-1', archived = true): Workspace =>
@@ -51,7 +53,7 @@ describe('workspace drawer archive reconciliation', () => {
     statusId = 'in-progress';
     localContext = context();
     state.signedIn = true;
-    vi.mocked(workspacesApi.update)
+    vi.mocked(workspacesApi.archiveAutomatically)
       .mockReset()
       .mockResolvedValue({} as never);
     vi.mocked(useShape)
@@ -97,33 +99,29 @@ describe('workspace drawer archive reconciliation', () => {
     await render();
     statusId = 'done';
     await render();
-    expect(workspacesApi.update).not.toHaveBeenCalled();
+    expect(workspacesApi.archiveAutomatically).not.toHaveBeenCalled();
 
     // Failed optimistic mutation rolls back without a local archive.
     statusId = 'in-progress';
     await render();
-    expect(workspacesApi.update).not.toHaveBeenCalled();
+    expect(workspacesApi.archiveAutomatically).not.toHaveBeenCalled();
 
     statusId = 'done';
     rows = [remote('local-1')];
     await render();
-    expect(workspacesApi.update).toHaveBeenCalledTimes(1);
-    expect(workspacesApi.update).toHaveBeenCalledWith('local-1', {
-      archived: true,
-    });
+    expect(workspacesApi.archiveAutomatically).toHaveBeenCalledTimes(1);
+    expect(workspacesApi.archiveAutomatically).toHaveBeenCalledWith('local-1');
 
     // The local workspace stream moves the workspace to View Archive.
     localContext = context([], ['local-1']);
     await render();
-    expect(workspacesApi.update).toHaveBeenCalledTimes(1);
+    expect(workspacesApi.archiveAutomatically).toHaveBeenCalledTimes(1);
   });
 
   it('reconciles an already archived snapshot on mount without ProjectProvider', async () => {
     rows = [remote('local-1')];
     await render();
-    expect(workspacesApi.update).toHaveBeenCalledWith('local-1', {
-      archived: true,
-    });
+    expect(workspacesApi.archiveAutomatically).toHaveBeenCalledWith('local-1');
   });
 
   it('archives all linked active workspaces but excludes unrelated and archived ones', async () => {
@@ -136,15 +134,15 @@ describe('workspace drawer archive reconciliation', () => {
       remote('other-host'),
     ];
     await render();
-    expect(vi.mocked(workspacesApi.update).mock.calls).toEqual([
-      ['local-1', { archived: true }],
-      ['local-2', { archived: true }],
+    expect(vi.mocked(workspacesApi.archiveAutomatically).mock.calls).toEqual([
+      ['local-1'],
+      ['local-2'],
     ]);
   });
 
   it('deduplicates in-flight writes across snapshots', async () => {
     let finish!: () => void;
-    vi.mocked(workspacesApi.update).mockImplementation(
+    vi.mocked(workspacesApi.archiveAutomatically).mockImplementation(
       () =>
         new Promise((resolve) => {
           finish = () => resolve({} as never);
@@ -154,18 +152,20 @@ describe('workspace drawer archive reconciliation', () => {
     await render();
     rows = [...rows];
     await render();
-    expect(workspacesApi.update).toHaveBeenCalledTimes(1);
+    expect(workspacesApi.archiveAutomatically).toHaveBeenCalledTimes(1);
     await act(async () => finish());
   });
 
   it('retries a failed archive on a later remote snapshot', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
-    vi.mocked(workspacesApi.update).mockRejectedValueOnce(new Error('offline'));
+    vi.mocked(workspacesApi.archiveAutomatically).mockRejectedValueOnce(
+      new Error('offline')
+    );
     rows = [remote('local-1')];
     await render();
     rows = [...rows];
     await render();
-    expect(workspacesApi.update).toHaveBeenCalledTimes(2);
+    expect(workspacesApi.archiveAutomatically).toHaveBeenCalledTimes(2);
   });
 
   it.each([
@@ -181,7 +181,7 @@ describe('workspace drawer archive reconciliation', () => {
       scenario === 'missing-issue' ? null : 'issue-1',
       scenario === 'missing-project' ? null : 'project-1'
     );
-    expect(workspacesApi.update).not.toHaveBeenCalled();
+    expect(workspacesApi.archiveAutomatically).not.toHaveBeenCalled();
     expect(useShape).toHaveBeenCalledWith(
       PROJECT_WORKSPACES_SHAPE,
       expect.anything(),
@@ -189,10 +189,34 @@ describe('workspace drawer archive reconciliation', () => {
     );
   });
 
+  it('retries a blocked archive on the timer and stops after unmount', async () => {
+    vi.useFakeTimers();
+    try {
+      rows = [remote('local-1')];
+      vi.mocked(workspacesApi.archiveAutomatically).mockResolvedValue(
+        'blocked'
+      );
+      await render();
+      expect(workspacesApi.archiveAutomatically).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(30_000);
+      });
+      expect(workspacesApi.archiveAutomatically).toHaveBeenCalledTimes(2);
+      expect(workspacesApi.update).not.toHaveBeenCalled();
+      await act(async () => {
+        root.render(null);
+      });
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(workspacesApi.archiveAutomatically).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('never unarchives on issue reopening', async () => {
     localContext = context([], ['local-1']);
     rows = [remote('local-1', 'issue-1', false)];
     await render();
-    expect(workspacesApi.update).not.toHaveBeenCalled();
+    expect(workspacesApi.archiveAutomatically).not.toHaveBeenCalled();
   });
 });

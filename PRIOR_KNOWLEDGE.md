@@ -1,31 +1,11 @@
-# Prior knowledge — vk/d068-collapse-matchin
+# Prior knowledge — vk/1e1c-don-t-auto-archi
 
-Searched `vibe-kanban/wiki` (read-only) for conversation rendering, aggregation,
-collapsing, tool summaries, and the conversation timeline. The knowledge base
-is not empty, but no page covers conversation-entry aggregation. The relevant
-pages are:
+Searched homelab/knowledge-base, homelab/docs/knowledge, homelab/docs/knowledge-base, vibe-kanban/wiki and vibe-kanban/docs/knowledge-base for archive, terminal issue, poller and wake-up.
 
-- **issue-comment-delivery.md › Frontend › Conversation rows.** The thinking
-  collapse in `aggregateEntries.ts` depends on turn boundaries
-  (`user_message`). Do not insert synthetic user messages. New grouping must
-  respect those boundaries, which the consecutive-only rule does.
-  Context values that change every streamed frame cause every entry to
-  re-render, so group keys must stay stable while entries stream in
-  (`agg:<first patchKey>`).
-- **frontend-linting.md.** ESLint directive comments are banned. Tests are
-  type-linted through `tsconfig.eslint.json`. Run `pnpm run lint`, which also
-  runs the unused-i18n-key check, so any new i18n key must be used.
-- **markdown-tables.md.** Not directly relevant. It is the main conversation
-  markdown renderer.
+- vibe-kanban/docs/knowledge-base/issue-status-side-effects.md: remote terminal status and archive writes share a transaction; ProjectProvider and LinkedIssueProvider both use level-triggered archive reconciliation. Keep optional WorkspaceContext behavior and do not archive from optimistic status. Existing reconciliation requires a mounted UI.
+- vibe-kanban/wiki/issue-workspace-lifecycle.md: remote archived-to-active updates can reopen Done issues. Therefore refusal must retain remote archived=true and retry rather than blindly unarchive remotely. Local accepted activity already reactivates workspaces.
+- vibe-kanban/wiki/durable-session-wakeups.md: metadata lives in wakeups; lifecycle is in issue_comment_deliveries. Pending and dispatching must be protected, including past-due timers and condition receipts. Explicit archive currently cancels pending delivery.
+- vibe-kanban/wiki/vk-pollers.md: pollers are BackgroundHelper ScriptRequests with poller metadata, not a distinct run reason. History dropping does not stop them. Do not protect every helper.
+- homelab/docs/knowledge-base/remote-browser-preview-leases.md: archiving revokes leases as well as stopping helpers, so eligibility must precede cleanup.
 
-Code facts gathered for this task (not yet in the wiki):
-- `aggregateConsecutiveEntries` (`packages/web-core/src/shared/lib/aggregateEntries.ts`)
-  groups runs of file_read/search/web_fetch/command_run_{read,search,edit,fetch}
-  into `AGGREGATED_GROUP`, same-file edits into `AGGREGATED_DIFF_GROUP`, and
-  thinking in previous turns into `AGGREGATED_THINKING_GROUP`.
-- MCP tools are normalized as `action: 'tool'` with
-  `tool_name = "mcp:<server>:<tool>"` (claude.rs, codex, cursor), and they
-  render one `ChatToolSummary` row per call. That is why the screenshot shows
-  repeated rows.
-- `ChatAggregatedToolEntries` (packages/ui) renders the accordion. It takes
-  `label`, `unit` (auto-pluralized), and `icon`.
+Decision: guarded automatic endpoint; atomic local eligibility transition; no remote rollback, no new server subscription. Retry pending requests periodically while reconciliation is mounted. Manual archive is unchanged.

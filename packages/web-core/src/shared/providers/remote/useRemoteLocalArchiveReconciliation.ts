@@ -20,10 +20,7 @@ type ReconcileArchiveArgs = {
   remoteWorkspaces: RemoteWorkspaceArchiveLink[];
   localWorkspaces: LocalWorkspaceArchiveState[];
   inFlightLocalWorkspaceIds: Set<string>;
-  updateWorkspace: (
-    localWorkspaceId: string,
-    data: { archived: true }
-  ) => Promise<unknown>;
+  archiveAutomatically: (localWorkspaceId: string) => Promise<unknown>;
   enabled?: boolean;
   onError?: (localWorkspaceId: string, error: unknown) => void;
 };
@@ -86,7 +83,7 @@ export function reconcileRemoteLocalArchiveState({
   remoteWorkspaces,
   localWorkspaces,
   inFlightLocalWorkspaceIds,
-  updateWorkspace,
+  archiveAutomatically,
   enabled = true,
   onError = (localWorkspaceId, error) => {
     console.warn(
@@ -110,7 +107,7 @@ export function reconcileRemoteLocalArchiveState({
     }
 
     inFlightLocalWorkspaceIds.add(localWorkspaceId);
-    updateWorkspace(localWorkspaceId, { archived: true })
+    archiveAutomatically(localWorkspaceId)
       .catch((error: unknown) => {
         onError(localWorkspaceId, error);
       })
@@ -132,12 +129,19 @@ export function useRemoteLocalArchiveReconciliation({
   const inFlightLocalWorkspaceIdsRef = useRef(new Set<string>());
 
   useEffect(() => {
-    reconcileRemoteLocalArchiveState({
-      remoteWorkspaces,
-      localWorkspaces,
-      inFlightLocalWorkspaceIds: inFlightLocalWorkspaceIdsRef.current,
-      updateWorkspace: workspacesApi.update,
-      enabled,
-    });
+    const reconcile = () =>
+      reconcileRemoteLocalArchiveState({
+        remoteWorkspaces,
+        localWorkspaces,
+        inFlightLocalWorkspaceIds: inFlightLocalWorkspaceIdsRef.current,
+        archiveAutomatically: workspacesApi.archiveAutomatically,
+        enabled,
+      });
+    reconcile();
+    if (!enabled) return;
+    // A blocked request remains remote intent; retry even without a new shape
+    // snapshot when the local agent/poller/wake-up finishes.
+    const timer = setInterval(reconcile, 30_000);
+    return () => clearInterval(timer);
   }, [enabled, localWorkspaces, remoteWorkspaces]);
 }

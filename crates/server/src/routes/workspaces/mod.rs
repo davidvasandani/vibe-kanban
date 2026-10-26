@@ -31,6 +31,10 @@ pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
                 .put(core::update_workspace)
                 .delete(core::delete_workspace),
         )
+        .route(
+            "/archive/automatic",
+            post(core::archive_workspace_automatically),
+        )
         .route("/messages/first", get(core::get_first_user_message))
         .route("/placement", get(core::get_workspace_placement))
         .route(
