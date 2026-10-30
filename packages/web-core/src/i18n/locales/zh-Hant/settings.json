@@ -693,7 +693,7 @@
         },
         "localPipelineArtifacts": {
           "label": "不將流水線產物納入 git",
-          "helper": "specs/vk/ 下的流水線規格、計畫和筆記會保留在工作區中，但會被 git 忽略，因此不會被提交，也不會出現在 PR 中。下次設定工作區時生效。此儲存庫已追蹤的檔案仍會被追蹤。"
+          "helper": "specs/vk/ 下（以及 SpecKit 的 specs/ 和 .specify/ 資料夾中）的流水線規格、計畫和筆記會保留在工作區中，但會被 git 忽略，因此不會被提交，也不會出現在 PR 中。下次設定工作區時生效。此儲存庫已追蹤的檔案仍會被追蹤。"
         },
         "devServer": {
           "label": "開發伺服器腳本",

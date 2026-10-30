@@ -693,7 +693,7 @@
         },
         "localPipelineArtifacts": {
           "label": "Garder les artefacts du pipeline hors de git",
-          "helper": "Les spécifications, plans et notes du pipeline sous specs/vk/ restent dans l'espace de travail mais sont ignorés par git : ils ne sont jamais commités ni affichés dans les PR. S'applique à la prochaine préparation d'un espace de travail. Les fichiers déjà suivis par ce dépôt restent suivis."
+          "helper": "Les spécifications, plans et notes du pipeline sous specs/vk/ (et les dossiers specs/ et .specify/ de SpecKit) restent dans l'espace de travail mais sont ignorés par git : ils ne sont jamais commités ni affichés dans les PR. S'applique à la prochaine préparation d'un espace de travail. Les fichiers déjà suivis par ce dépôt restent suivis."
         },
         "devServer": {
           "label": "Script du serveur de développement",

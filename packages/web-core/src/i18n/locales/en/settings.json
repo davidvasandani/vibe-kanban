@@ -714,7 +714,7 @@
         },
         "localPipelineArtifacts": {
           "label": "Keep pipeline artifacts out of git",
-          "helper": "Pipeline specs, plans and notes under specs/vk/ stay in the workspace but are git-ignored, so they are never committed or shown in PRs. Applies when a workspace is next set up. Files this repository already tracks stay tracked."
+          "helper": "Pipeline specs, plans and notes under specs/vk/ (and SpecKit's specs/ and .specify/ folders) stay in the workspace but are git-ignored, so they are never committed or shown in PRs. Applies when a workspace is next set up. Files this repository already tracks stay tracked."
         },
         "devServer": {
           "label": "Dev Server Script",

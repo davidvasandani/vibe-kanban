@@ -3992,10 +3992,12 @@ impl LocalContainerService {
                 continue;
             }
             let enabled = repo.local_pipeline_artifacts;
+            let branch = workspace.branch.clone();
             let result = tokio::task::spawn_blocking(move || {
                 services::services::pipelines::git_exclude::sync_artifact_exclude(
                     &worktree_path,
                     enabled,
+                    &branch,
                 )
             })
             .await;

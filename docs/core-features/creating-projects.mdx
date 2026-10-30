@@ -51,7 +51,7 @@ Make sure these files are gitignored or they could get committed!
 
 ### Keep pipeline artifacts out of git
 
-Task pipelines write their specs, plans and notes to a per-task folder, `specs/vk/<task-id>/`, so each task adds its own files instead of rewriting a shared one. By default those files are committed with the task's changes. Enable this option for repositories that should not carry them, such as infrastructure repositories: Vibe Kanban adds `/specs/vk/` to the repository's `.git/info/exclude`, so the files stay in the workspace but are never committed or shown in pull requests.
+Task pipelines write their specs, plans and notes to a per-task folder, `specs/vk/<task-id>/`, so each task adds its own files instead of rewriting a shared one. By default those files are committed with the task's changes. Enable this option for repositories that should not carry them, such as infrastructure repositories: Vibe Kanban adds a managed block to the repository's `.git/info/exclude` ignoring `specs/vk/`, SpecKit's `specs/<branch-prefix>/` feature folders and its `.specify/` scaffold (at any depth, so a repository working directory is covered). The files stay in the workspace but are never committed or shown in pull requests. With SpecKit, this also means each workspace starts from the default constitution unless the repository already commits one.
 
 The setting takes effect the next time a workspace for the repository is set up, and turning it off removes the exclude entry. Excludes never untrack files the repository already committed.
 

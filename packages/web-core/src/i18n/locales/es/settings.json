@@ -693,7 +693,7 @@
         },
         "localPipelineArtifacts": {
           "label": "Mantener los artefactos del pipeline fuera de git",
-          "helper": "Las especificaciones, planes y notas del pipeline en specs/vk/ permanecen en el espacio de trabajo, pero git los ignora, así que nunca se confirman ni aparecen en los PR. Se aplica la próxima vez que se prepare un espacio de trabajo. Los archivos que este repositorio ya rastrea siguen rastreados."
+          "helper": "Las especificaciones, planes y notas del pipeline en specs/vk/ (y las carpetas specs/ y .specify/ de SpecKit) permanecen en el espacio de trabajo, pero git los ignora, así que nunca se confirman ni aparecen en los PR. Se aplica la próxima vez que se prepare un espacio de trabajo. Los archivos que este repositorio ya rastrea siguen rastreados."
         },
         "devServer": {
           "label": "Script del Servidor de Desarrollo",
