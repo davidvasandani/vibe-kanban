@@ -3992,12 +3992,19 @@ impl LocalContainerService {
                 continue;
             }
             let enabled = repo.local_pipeline_artifacts;
-            let branch = workspace.branch.clone();
+            // SpecKit prefers the persisted feature key over a renamed branch.
+            let feature_keys: Vec<String> = workspace
+                .speckit_feature_key
+                .iter()
+                .chain(std::iter::once(&workspace.branch))
+                .cloned()
+                .collect();
             let result = tokio::task::spawn_blocking(move || {
+                let keys: Vec<&str> = feature_keys.iter().map(String::as_str).collect();
                 services::services::pipelines::git_exclude::sync_artifact_exclude(
                     &worktree_path,
                     enabled,
-                    &branch,
+                    &keys,
                 )
             })
             .await;
