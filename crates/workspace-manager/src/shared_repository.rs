@@ -874,6 +874,7 @@ mod tests {
             archive_script: None,
             copy_files: None,
             parallel_setup_script: false,
+            local_pipeline_artifacts: false,
             dev_server_script: None,
             default_target_branch: None,
             default_working_dir: None,

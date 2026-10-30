@@ -691,6 +691,10 @@
           "helper": "要从原始仓库目录复制到工作树的文件的逗号分隔列表。对 .env 等环境文件很有用。确保这些文件被 gitignore！",
           "placeholder": "文件路径或 glob 模式（例如：.env、config/*.json）"
         },
+        "localPipelineArtifacts": {
+          "label": "不将流水线产物纳入 git",
+          "helper": "specs/vk/ 下的流水线规格、计划和笔记会保留在工作区中，但会被 git 忽略，因此不会被提交，也不会出现在 PR 中。下次设置工作区时生效。此仓库已跟踪的文件仍会被跟踪。"
+        },
         "devServer": {
           "label": "开发服务器脚本",
           "helper": "为此仓库启动开发服务器。脚本从仓库的工作树目录执行。"

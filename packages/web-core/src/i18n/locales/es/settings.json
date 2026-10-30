@@ -691,6 +691,10 @@
           "helper": "Lista separada por comas de archivos para copiar del directorio del repositorio original al worktree. Útil para archivos de entorno como .env. ¡Asegúrate de que estén en gitignore!",
           "placeholder": "Rutas de archivos o patrones glob (ej., .env, config/*.json)"
         },
+        "localPipelineArtifacts": {
+          "label": "Mantener los artefactos del pipeline fuera de git",
+          "helper": "Las especificaciones, planes y notas del pipeline en specs/vk/ permanecen en el espacio de trabajo, pero git los ignora, así que nunca se confirman ni aparecen en los PR. Se aplica la próxima vez que se prepare un espacio de trabajo. Los archivos que este repositorio ya rastrea siguen rastreados."
+        },
         "devServer": {
           "label": "Script del Servidor de Desarrollo",
           "helper": "Inicia un servidor de desarrollo para este repositorio. Los scripts se ejecutan desde el directorio worktree del repositorio."

@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "INSERT INTO repos (id, path, name, display_name)\n               VALUES ($1, $2, $3, $4)\n               ON CONFLICT(path) DO UPDATE SET updated_at = updated_at\n               RETURNING id as \"id!: Uuid\",\n                         path,\n                         name,\n                         display_name,\n                         setup_script,\n                         cleanup_script,\n                         archive_script,\n                         copy_files,\n                         parallel_setup_script as \"parallel_setup_script!: bool\",\n                         dev_server_script,\n                         default_target_branch,\n                         default_working_dir,\n                         created_at as \"created_at!: DateTime<Utc>\",\n                         updated_at as \"updated_at!: DateTime<Utc>\"",
+  "query": "SELECT id as \"id!: Uuid\",\n                      path,\n                      name,\n                      display_name,\n                      setup_script,\n                      cleanup_script,\n                      archive_script,\n                      copy_files,\n                      parallel_setup_script as \"parallel_setup_script!: bool\",\n                      dev_server_script,\n                      default_target_branch,\n                      default_working_dir,\n                      local_pipeline_artifacts as \"local_pipeline_artifacts!: bool\",\n                      created_at as \"created_at!: DateTime<Utc>\",\n                      updated_at as \"updated_at!: DateTime<Utc>\"\n               FROM repos\n               ORDER BY display_name ASC",
   "describe": {
     "columns": [
       {
@@ -64,18 +64,23 @@
         "type_info": "Text"
       },
       {
-        "name": "created_at!: DateTime<Utc>",
+        "name": "local_pipeline_artifacts!: bool",
         "ordinal": 12,
+        "type_info": "Integer"
+      },
+      {
+        "name": "created_at!: DateTime<Utc>",
+        "ordinal": 13,
         "type_info": "Text"
       },
       {
         "name": "updated_at!: DateTime<Utc>",
-        "ordinal": 13,
+        "ordinal": 14,
         "type_info": "Text"
       }
     ],
     "parameters": {
-      "Right": 4
+      "Right": 0
     },
     "nullable": [
       true,
@@ -91,8 +96,9 @@
       true,
       true,
       false,
+      false,
       false
     ]
   },
-  "hash": "2b253f92ac5daa4864e7335fde1b82625f504fd73d19b21992497219a9c3170a"
+  "hash": "91865484a4c8b31227f3e0074ef5f7923d8afa8bdde32ce2b198820252826cfa"
 }

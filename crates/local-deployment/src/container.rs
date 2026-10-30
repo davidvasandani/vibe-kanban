@@ -3977,6 +3977,45 @@ impl LocalContainerService {
         Ok(())
     }
 
+    /// Apply each repo's `local_pipeline_artifacts` setting to its worktree's
+    /// git excludes (adding or removing the managed block). Best-effort: a
+    /// failure only logs, so a misbehaving exclude file never blocks setup.
+    async fn sync_pipeline_artifact_excludes(
+        &self,
+        workspace_dir: &Path,
+        workspace: &Workspace,
+    ) -> Result<(), ContainerError> {
+        let repos = WorkspaceRepo::find_repos_for_workspace(&self.db.pool, workspace.id).await?;
+        for repo in repos {
+            let worktree_path = workspace_dir.join(&repo.name);
+            if !worktree_path.exists() {
+                continue;
+            }
+            let enabled = repo.local_pipeline_artifacts;
+            let result = tokio::task::spawn_blocking(move || {
+                services::services::pipelines::git_exclude::sync_artifact_exclude(
+                    &worktree_path,
+                    enabled,
+                )
+            })
+            .await;
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => tracing::warn!(
+                    "Failed to sync pipeline artifact excludes for repo '{}': {}",
+                    repo.name,
+                    e
+                ),
+                Err(e) => tracing::warn!(
+                    "Pipeline artifact exclude task failed for repo '{}': {}",
+                    repo.name,
+                    e
+                ),
+            }
+        }
+        Ok(())
+    }
+
     /// Copy project files and workspace attachments to the workspace.
     /// Skips files that already exist (fast no-op if all exist).
     async fn copy_files_and_images(
@@ -4002,6 +4041,9 @@ impl LocalContainerService {
                     });
             }
         }
+
+        self.sync_pipeline_artifact_excludes(workspace_dir, workspace)
+            .await?;
 
         let agent_working_dir = Session::find_latest_by_workspace_id(&self.db.pool, workspace.id)
             .await?
