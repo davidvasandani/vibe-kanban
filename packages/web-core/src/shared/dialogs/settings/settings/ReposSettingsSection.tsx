@@ -51,6 +51,7 @@ interface RepoScriptsFormState {
   cleanup_script: string;
   archive_script: string;
   copy_files: string;
+  local_pipeline_artifacts: boolean;
   dev_server_script: string;
 }
 
@@ -64,6 +65,7 @@ function repoToFormState(repo: Repo): RepoScriptsFormState {
     cleanup_script: repo.cleanup_script ?? '',
     archive_script: repo.archive_script ?? '',
     copy_files: repo.copy_files ?? '',
+    local_pipeline_artifacts: repo.local_pipeline_artifacts,
     dev_server_script: repo.dev_server_script ?? '',
   };
 }
@@ -352,6 +354,7 @@ export function ReposSettingsSection({
         cleanup_script: draft.cleanup_script.trim() || null,
         archive_script: draft.archive_script.trim() || null,
         copy_files: draft.copy_files.trim() || null,
+        local_pipeline_artifacts: draft.local_pipeline_artifacts,
         parallel_setup_script: draft.parallel_setup_script,
         dev_server_script: draft.dev_server_script.trim() || null,
       };
@@ -703,6 +706,18 @@ export function ReposSettingsSection({
                 rows={3}
               />
             </SettingsField>
+
+            <SettingsCheckbox
+              id="local-pipeline-artifacts"
+              label={t('settings.repos.scripts.localPipelineArtifacts.label')}
+              description={t(
+                'settings.repos.scripts.localPipelineArtifacts.helper'
+              )}
+              checked={draft.local_pipeline_artifacts}
+              onChange={(checked) =>
+                updateDraft({ local_pipeline_artifacts: checked })
+              }
+            />
           </SettingsCard>
 
           <SettingsSaveBar
