@@ -16,7 +16,7 @@ use uuid::Uuid;
 use super::{McpServer, ToolError};
 
 const WORKSPACE_ID_HELP: &str = "Workspace ID. Optional inside that workspace's orchestrator \
-     context; otherwise required (it is the workspace directory name, or find it with \
+     context; otherwise required (the agent's VK_WORKSPACE_ID environment variable, or find it with \
      list_workspaces).";
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]

@@ -489,7 +489,8 @@ registered no tools.
 
 Agents connected to the Vibe Kanban MCP server can call `restart_session`.
 Inside a scoped session, the session and workspace identifiers are optional.
-Elsewhere, pass `workspace_id`: it is the workspace directory name. The session
+Elsewhere, pass `workspace_id`: agents find it in their `VK_WORKSPACE_ID`
+environment variable, or with `list_workspaces`. The session
 defaults to the workspace's only session. When there are several, the error
 lists them, and the caller passes one as `session_id`. `refresh_mcp_tools`
 works the same way. The

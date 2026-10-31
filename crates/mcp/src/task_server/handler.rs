@@ -19,7 +19,8 @@ pub(crate) const RECOVERY_LADDER: &str = "If a Vibe Kanban tool call fails, read
      your report. Climb this ladder only for a transport or tool-discovery failure (no \
      vk_reported: a connection error or timeout, a non-JSON or proxy response, an unknown tool, \
      or the harness saying a Vibe Kanban MCP server failed to connect): (1) retry the call; (2) \
-     call 'refresh_mcp_tools' with workspace_id (the workspace directory name) and, if the \
+     call 'refresh_mcp_tools' with workspace_id (your VK_WORKSPACE_ID environment variable; \
+     optional in an orchestrator-scoped context) and, if the \
      workspace has several sessions, session_id from 'list_sessions' (an 'unsupported' result, \
      as for Claude Code, counts as done); (3) call 'restart_workspace' with workspace_id, which \
      keeps the worktree, Git state, sessions and conversations; (4) only then fall back (for \
