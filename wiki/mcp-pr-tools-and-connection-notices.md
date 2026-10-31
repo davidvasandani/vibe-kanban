@@ -81,6 +81,51 @@ Rules that made the aggregation trustworthy, each found in review:
   is marked merged directly, `get_open` drops the row, and the monitor never
   runs its post-merge handling (workspace archival).
 
+## Side PRs, admin merges and the honest ladder (`vk/7561-investigate-vibe`)
+
+- **Side PRs are never recorded.** `PullRequest::find_by_workspace_and_repo_id`
+  returns the newest row first, and the PR monitor archives a workspace once
+  no recorded PR is open. Recording a `create_pr head=…` PR would therefore
+  retarget every default `pr` and could archive the workspace when the side
+  PR merges. So the server skips the row and the remote sync for a side head,
+  and the MCP result says `tracked: false`.
+  - An explicit `head` equal to the workspace branch is refused, which keeps
+    `tracked` truthful.
+  - Validation happens before `resolve_remote_for_branch`: the name must be
+    valid per git2, must not start with `<remote>/`, must not be the base,
+    and must exist as a local branch.
+- **A clean worktree is required only for the checked-out branch.**
+  `push_to_remote` used to refuse any push from a dirty worktree, which
+  blocked a side branch's committed head (Codex review).
+- **`force` already sent `blocked` to GitHub**, but it also skips the
+  failing, pending and `unknown` gates.
+  - `MergeGate::Admin` relaxes only `blocked`. REST `PUT …/merge` has no
+    admin flag: a token holder who may bypass protection simply gets it, as
+    with `gh pr merge --admin`.
+  - The allowlist is the deployment env `VK_ADMIN_MERGE_ALLOW`, never
+    Settings, because agents can `PUT /api/config`.
+  - Accept `<slug>[bot]` authors.
+  - Audit with `tracing` target `audit`, both before and after the merge.
+  - `blocked` can also hide a required check run that a PAT cannot see.
+    Document that trust instead of pretending otherwise.
+- **The ladder only covers what refresh and restart can fix.**
+  - MCP used to drop `error_data`, so an explained auth error looked like a
+    transport failure. `ToolError` now carries `reported`, from the envelope,
+    and `kind`, from `error_data.type`. These surface as `vk_reported` and
+    `error_kind`, and the ladder tells agents to skip refresh and restart
+    for reported errors.
+  - A workspace agent reaches the shared HTTP MCP in Global mode with no
+    context, so ids never default from context. `default_session_id` falls
+    back to the workspace's *only* session.
+  - Name `VK_WORKSPACE_ID` as the workspace id. On local deployments the
+    directory name is `<prefix>-<title>`, which is not a UUID (Codex review).
+  - Don't name tools in the ladder that one router lacks:
+    `list_workspaces` is absent in orchestrator mode.
+- **Live check visibility (terraform-infrastructure #1826):**
+  `commit_statuses: ok` (every `atlantis/*` context), `actions_jobs: ok`,
+  `check_runs: forbidden`. Fine-grained PATs cannot get the Checks
+  permission at all, because it is GitHub-App-only.
+
 ## Which repository a PR reference means
 
 - Resolve a URL, whether explicit or the recorded `pr_url`, against **all**
@@ -106,3 +151,4 @@ opaque 500, so agents act on them instead of reaching for `gh`.
 ## Contributed by
 
 - `vk/53bc-agents-fall-back`
+- `vk/7561-investigate-vibe`
