@@ -81,7 +81,9 @@ fn parse_entry(entry: &str) -> Option<(String, Vec<String>)> {
         .split(',')
         .map(|author| author.trim().to_ascii_lowercase())
         .collect();
-    if authors.iter().any(|author| !valid(author)) {
+    // GitHub App authors log in as `<slug>[bot]`, e.g. `dependabot[bot]`.
+    let valid_author = |author: &str| valid(author.strip_suffix("[bot]").unwrap_or(author));
+    if authors.iter().any(|author| !valid_author(author)) {
         return None;
     }
     Some((repo.to_ascii_lowercase(), authors))
@@ -131,6 +133,19 @@ mod tests {
         assert!(wrong_repo.contains("not in"), "{wrong_repo}");
         assert!(policy.allows(None, Some("davidvasandani")).is_err());
         assert!(policy.allows(Some("acme/x"), None).is_err());
+    }
+
+    #[test]
+    fn github_app_authors_are_accepted() {
+        let policy = AdminMergePolicy::parse("acme/x:alice,renovate[bot]");
+        assert!(policy.allows(Some("acme/x"), Some("renovate[bot]")).is_ok());
+        assert!(policy.allows(Some("acme/x"), Some("alice")).is_ok());
+        assert!(policy.allows(Some("acme/x"), Some("renovate")).is_err());
+        // Brackets anywhere else are still malformed.
+        assert_eq!(
+            AdminMergePolicy::parse("acme/x:[bot] acme/y:re[bot]novate"),
+            AdminMergePolicy::default()
+        );
     }
 
     #[test]
