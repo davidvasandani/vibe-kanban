@@ -176,20 +176,43 @@ inventory so configured-but-absent servers end in `not_registered` instead of
 ### The recovery ladder (in the server instructions)
 
 `RECOVERY_LADDER` (`src/task_server/handler.rs`) is appended to the
-instructions in every mode. Before an agent abandons a VK tool for an
-out-of-band fallback, it must:
+instructions in every mode.
 
-1. retry the call;
-2. call `refresh_mcp_tools` (an `unsupported` result counts as done);
-3. call `restart_workspace`;
-4. only then fall back, and say so in the final report, naming the rung
-   reached.
+First the agent reads the error. When it carries `"vk_reported": true`, the
+backend answered and explained the failure (authentication, an org token that
+is configured but unavailable, a merge refusal, GitHub's own message). No rung
+can fix that, so the agent acts on the message and quotes it. The ladder is
+only for transport and tool-discovery failures:
 
-It also says that a harness "failed to connect" notice for a *differently
-named* entry is not evidence that this server is down. That is exactly how
-`vk/91d8` ended up on `gh`. Keep the rungs pointing at tools that both
-routers register. `recovery_ladder_is_given_in_order_in_every_mode` pins
-this.
+1. Retry the call.
+2. Call `refresh_mcp_tools` with `workspace_id`, plus `session_id` when the
+   workspace has several sessions. An `unsupported` result counts as done.
+3. Call `restart_workspace` with `workspace_id`.
+4. Only then fall back, and say so in the final report, naming the rung
+   reached or the reported error.
+
+Rungs 2 and 3 are VK calls too. When the server itself is unreachable (for
+example a Cloudflare 5xx page), go from 1 straight to 4.
+
+Three facts shape this (`vk/7561-investigate-vibe`):
+
+- A workspace agent usually reaches the shared HTTP server in Global mode
+  with no context, so no id defaults from context.
+- `default_session_id` falls back to the workspace's *only* session. It never
+  guesses between several.
+- `ToolError.reported` and `kind` come from the response envelope. Only
+  envelope-decoded errors are `reported`; transport and proxy failures are
+  not.
+
+The text also says:
+
+- a harness "failed to connect" notice for a *differently named* entry is not
+  evidence that this server is down (`vk/91d8`);
+- scripts get an owner-routed token from
+  `GH_REPO=<owner>/<repo> gh auth token`.
+
+Keep the rungs pointing at tools that both routers register.
+`recovery_ladder_is_given_in_order_in_every_mode` pins this.
 
 ### Shadowed project `.mcp.json` entries
 

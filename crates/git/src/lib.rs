@@ -1302,6 +1302,17 @@ impl GitService {
         }
     }
 
+    /// Whether `branch_name` is a local branch (`refs/heads/<name>`); unlike
+    /// [`Self::check_branch_exists`], a remote-tracking branch does not count.
+    pub fn local_branch_exists(
+        &self,
+        repo_path: &Path,
+        branch_name: &str,
+    ) -> Result<bool, GitServiceError> {
+        let repo = self.open_repo(repo_path)?;
+        Ok(repo.find_branch(branch_name, BranchType::Local).is_ok())
+    }
+
     pub fn rename_local_branch(
         &self,
         worktree_path: &Path,

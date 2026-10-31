@@ -8,8 +8,11 @@ use axum::{
     routing::{get, put},
 };
 use deployment::Deployment;
-use services::services::github_owner_tokens::{
-    self, CreateGitHubOwnerTokenRequest, GitHubOwnerToken, UpdateGitHubOwnerTokenRequest,
+use services::services::{
+    github_credentials::{self, GitHubOwnerTokenHealth},
+    github_owner_tokens::{
+        self, CreateGitHubOwnerTokenRequest, GitHubOwnerToken, UpdateGitHubOwnerTokenRequest,
+    },
 };
 use utils::response::ApiResponse;
 use uuid::Uuid;
@@ -19,6 +22,7 @@ use crate::{DeploymentImpl, error::ApiError};
 pub fn router() -> Router<DeploymentImpl> {
     Router::new()
         .route("/github-owner-tokens", get(list).post(create))
+        .route("/github-owner-tokens/health", get(health))
         .route("/github-owner-tokens/{id}", put(update).delete(remove))
 }
 
@@ -27,6 +31,16 @@ async fn list(
 ) -> Result<ResponseJson<ApiResponse<Vec<GitHubOwnerToken>>>, ApiError> {
     let tokens = github_owner_tokens::list(&deployment.db().pool).await?;
     Ok(ResponseJson(ApiResponse::success(tokens)))
+}
+
+/// Whether each configured token resolves and GitHub accepts it, for the
+/// deployment's alert and the Settings page. Never includes a value.
+async fn health(
+    State(deployment): State<DeploymentImpl>,
+) -> ResponseJson<ApiResponse<GitHubOwnerTokenHealth>> {
+    ResponseJson(ApiResponse::success(
+        github_credentials::health(&deployment.db().pool).await,
+    ))
 }
 
 async fn create(

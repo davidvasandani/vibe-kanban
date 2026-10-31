@@ -28,14 +28,18 @@ use api_types::normalize_secret_reference;
 use chrono::{DateTime, Utc};
 use db::models::github_owner_token::GitHubOwnerTokenRow;
 use git::{GitCli, GitService};
+use serde::Serialize;
 use sqlx::SqlitePool;
+use ts_rs::TS;
 use utils::github_credentials::{
     GitHubCredentials, GitHubToken, OwnerCredential, parse_github_repo,
 };
 use uuid::Uuid;
 
 use super::{
-    environment_secrets::{EnvironmentSecretError, resolve_environment_secrets},
+    environment_secrets::{
+        EnvironmentSecretError, resolve_environment_secrets, server_credentials,
+    },
     github_owner_tokens::{GitHubOwnerTokenError, decrypt, load_store},
     mcp_gateway_secrets::McpGatewaySecretStore,
 };
@@ -113,11 +117,16 @@ fn owners_of<'a>(urls: impl IntoIterator<Item = &'a str>) -> Vec<String> {
         .collect()
 }
 
+/// The service never holds an `OP_*` token in its environment (agents would
+/// inherit it), so the deployment names credential *files* for these lookups
+/// ([`server_credentials`]); they are explicit credentials, tried before the
+/// ambient fallback.
 async fn resolve_reference(reference: String) -> Result<String, EnvironmentSecretError> {
-    let mut resolved =
-        resolve_environment_secrets(HashMap::from([(RESOLVED_KEY.to_owned(), reference)]))
-            .await
-            .map_err(EnvironmentSecretError::without_variable)?;
+    let mut values = server_credentials()?;
+    values.insert(RESOLVED_KEY.to_owned(), reference);
+    let mut resolved = resolve_environment_secrets(values)
+        .await
+        .map_err(EnvironmentSecretError::without_variable)?;
     Ok(resolved.remove(RESOLVED_KEY).unwrap_or_default())
 }
 
@@ -234,6 +243,190 @@ fn log_sources(owners: &[String], credentials: &GitHubCredentials) {
         } else {
             tracing::debug!(owner = %owner, source, "GitHub credential source for server operations");
         }
+    }
+}
+
+/// Whether a configured owner token can actually be used, without its value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnerTokenStatus {
+    /// Resolved, and GitHub accepted it.
+    Ok,
+    /// Resolved, but GitHub answered 401/403 (revoked, expired or wrong).
+    Rejected,
+    /// Could not be decrypted or resolved, or GitHub could not be reached.
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnerTokenKind {
+    Literal,
+    Reference,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+pub struct OwnerTokenHealth {
+    pub owner: String,
+    /// `None` when the stored value cannot be decrypted.
+    pub kind: Option<OwnerTokenKind>,
+    pub status: OwnerTokenStatus,
+    /// Why it is not `ok`; never contains a value or reference.
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+pub struct GitHubOwnerTokenHealth {
+    /// Every configured owner is `ok` (vacuously true with none configured).
+    pub healthy: bool,
+    pub owners: Vec<OwnerTokenHealth>,
+}
+
+const PROBE_URL: &str = "https://api.github.com/rate_limit";
+const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Last health status logged per owner, so a schedule logs transitions only.
+static LAST_HEALTH: LazyLock<Mutex<HashMap<String, OwnerTokenStatus>>> =
+    LazyLock::new(Default::default);
+
+/// Resolve every configured owner token the way server operations do, then
+/// ask GitHub whether it accepts it. `rate_limit` needs no repository
+/// permission and does not count against the rate limit.
+pub async fn health(pool: &SqlitePool) -> GitHubOwnerTokenHealth {
+    let rows = match GitHubOwnerTokenRow::list(pool).await {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::error!(%error, "GitHub organization token table is unreadable");
+            return GitHubOwnerTokenHealth {
+                healthy: false,
+                owners: vec![OwnerTokenHealth {
+                    owner: "*".into(),
+                    kind: None,
+                    status: OwnerTokenStatus::Unavailable,
+                    detail: Some("the GitHub organization token table could not be read".into()),
+                }],
+            };
+        }
+    };
+    if rows.is_empty() {
+        return GitHubOwnerTokenHealth {
+            healthy: true,
+            owners: Vec::new(),
+        };
+    }
+    let client = reqwest::Client::builder()
+        .timeout(PROBE_TIMEOUT)
+        .user_agent("vibe-kanban-token-health")
+        .build();
+    let store = load_store();
+    let mut owners = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let health = match &store {
+            Err(error) => unavailable(&row.owner, None, error.to_string()),
+            Ok(store) => {
+                let kind = decrypt(store, row).ok().map(|value| {
+                    if normalize_secret_reference(&value).is_some() {
+                        OwnerTokenKind::Reference
+                    } else {
+                        OwnerTokenKind::Literal
+                    }
+                });
+                match resolve_row(store, row, &resolve_reference, &OP_CACHE).await {
+                    OwnerCredential::Unavailable(reason) => unavailable(&row.owner, kind, reason),
+                    OwnerCredential::OrgToken(token) => {
+                        let (status, detail) = match &client {
+                            Ok(client) => probe(client, &token).await,
+                            Err(error) => (
+                                OwnerTokenStatus::Unavailable,
+                                Some(format!("could not build the GitHub client: {error}")),
+                            ),
+                        };
+                        OwnerTokenHealth {
+                            owner: row.owner.clone(),
+                            kind,
+                            status,
+                            detail,
+                        }
+                    }
+                }
+            }
+        };
+        log_health(&health);
+        owners.push(health);
+    }
+    GitHubOwnerTokenHealth {
+        healthy: owners
+            .iter()
+            .all(|owner| owner.status == OwnerTokenStatus::Ok),
+        owners,
+    }
+}
+
+fn unavailable(owner: &str, kind: Option<OwnerTokenKind>, reason: String) -> OwnerTokenHealth {
+    OwnerTokenHealth {
+        owner: owner.to_owned(),
+        kind,
+        status: OwnerTokenStatus::Unavailable,
+        detail: Some(reason),
+    }
+}
+
+async fn probe(
+    client: &reqwest::Client,
+    token: &GitHubToken,
+) -> (OwnerTokenStatus, Option<String>) {
+    let response = client
+        .get(PROBE_URL)
+        .bearer_auth(token.expose())
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .send()
+        .await;
+    match response {
+        Ok(response) => classify_probe(response.status().as_u16()),
+        // reqwest errors name the URL, never the Authorization header.
+        Err(error) => (
+            OwnerTokenStatus::Unavailable,
+            Some(format!("could not reach GitHub: {error}")),
+        ),
+    }
+}
+
+fn classify_probe(status: u16) -> (OwnerTokenStatus, Option<String>) {
+    match status {
+        200..=299 => (OwnerTokenStatus::Ok, None),
+        401 | 403 => (
+            OwnerTokenStatus::Rejected,
+            Some(format!(
+                "GitHub rejected the token (HTTP {status}); it may be revoked or expired"
+            )),
+        ),
+        other => (
+            OwnerTokenStatus::Unavailable,
+            Some(format!("GitHub answered HTTP {other} to the token check")),
+        ),
+    }
+}
+
+/// `error` when an owner leaves `ok`, `info` when it returns; a schedule that
+/// keeps finding the same state logs nothing new.
+fn log_health(health: &OwnerTokenHealth) {
+    let previous = LAST_HEALTH
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(health.owner.to_ascii_lowercase(), health.status);
+    if previous == Some(health.status) {
+        return;
+    }
+    let detail = health.detail.as_deref().unwrap_or("");
+    if health.status == OwnerTokenStatus::Ok {
+        tracing::info!(owner = %health.owner, "GitHub organization token is healthy");
+    } else {
+        tracing::error!(
+            owner = %health.owner,
+            status = ?health.status,
+            detail,
+            "GitHub organization token is not usable for server operations"
+        );
     }
 }
 
@@ -409,6 +602,36 @@ mod tests {
         )
         .await;
         assert!(credentials.is_empty());
+    }
+
+    #[test]
+    fn probe_statuses_are_classified_without_values() {
+        assert_eq!(classify_probe(200), (OwnerTokenStatus::Ok, None));
+        for status in [401, 403] {
+            let (state, detail) = classify_probe(status);
+            assert_eq!(state, OwnerTokenStatus::Rejected);
+            assert!(detail.unwrap().contains(&status.to_string()));
+        }
+        for status in [404, 500, 502] {
+            assert_eq!(classify_probe(status).0, OwnerTokenStatus::Unavailable);
+        }
+    }
+
+    #[test]
+    fn health_serializes_snake_case_for_the_alert() {
+        let health = GitHubOwnerTokenHealth {
+            healthy: false,
+            owners: vec![OwnerTokenHealth {
+                owner: "sweetgreen".into(),
+                kind: Some(OwnerTokenKind::Reference),
+                status: OwnerTokenStatus::Unavailable,
+                detail: Some("1Password references require …".into()),
+            }],
+        };
+        let json = serde_json::to_value(&health).unwrap();
+        assert_eq!(json["healthy"], false);
+        assert_eq!(json["owners"][0]["kind"], "reference");
+        assert_eq!(json["owners"][0]["status"], "unavailable");
     }
 
     #[tokio::test]

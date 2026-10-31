@@ -194,6 +194,9 @@ pub struct PrState {
     pub base_repo: Option<String>,
     pub merged_at: Option<DateTime<Utc>>,
     pub merge_commit_sha: Option<String>,
+    /// Login of the account that opened the PR.
+    #[serde(default)]
+    pub author: Option<String>,
 }
 
 impl PrState {
@@ -402,6 +405,9 @@ pub struct MergeOutcome {
     /// `None` when branch deletion was not requested.
     pub branch_deleted: Option<bool>,
     pub branch_delete_error: Option<String>,
+    /// Merged through the allowlisted admin bypass (`merge_pr admin=true`).
+    #[serde(default)]
+    pub admin_bypass: bool,
 }
 
 /// Fields to change on a pull request. `ready_for_review: Some(false)`
@@ -444,15 +450,30 @@ fn check_names(checks: &PrChecks, predicate: impl Fn(&PrCheck) -> bool) -> Strin
         .join(", ")
 }
 
+/// How much of VK's merge gate applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeGate {
+    /// VK's reading of the checks and the provider's verdict must both agree.
+    Normal,
+    /// Skip VK's gate entirely and let the provider decide.
+    Force,
+    /// The normal gate, except the provider's `blocked` verdict (missing
+    /// reviews, or required checks VK cannot see) is left to the provider,
+    /// which merges only when the token holder may bypass protection. Callers
+    /// must check the deployment's allowlist first.
+    Admin,
+}
+
 /// Decide whether VK may merge `pr` now.
 ///
-/// Draft, conflicted and non-open PRs are refused even with `force`: the
-/// provider cannot merge them either. `force` otherwise skips VK's own gate
-/// and leaves branch protection to the provider. Without `force`, VK needs
-/// both its own reading of the checks *and* the provider's `merge_state`
-/// verdict to agree, so a partially readable check list is never enough on
-/// its own.
-pub fn merge_gate(pr: &PrState, checks: &PrChecks, force: bool) -> Result<(), MergeRefusal> {
+/// Draft, conflicted and non-open PRs are refused in every mode: the
+/// provider cannot merge them either. [`MergeGate::Force`] otherwise skips
+/// VK's own gate and leaves branch protection to the provider. Without it, VK
+/// needs both its own reading of the checks *and* the provider's
+/// `merge_state` verdict to agree, so a partially readable check list is
+/// never enough on its own; [`MergeGate::Admin`] relaxes only the `blocked`
+/// verdict.
+pub fn merge_gate(pr: &PrState, checks: &PrChecks, gate: MergeGate) -> Result<(), MergeRefusal> {
     if pr.merged || !matches!(pr.state, MergeStatus::Open) {
         return refuse(
             format!(
@@ -481,7 +502,7 @@ pub fn merge_gate(pr: &PrState, checks: &PrChecks, force: bool) -> Result<(), Me
             false,
         );
     }
-    if force {
+    if gate == MergeGate::Force {
         return Ok(());
     }
     if pr.merge_state == "unknown" {
@@ -511,7 +532,8 @@ pub fn merge_gate(pr: &PrState, checks: &PrChecks, force: bool) -> Result<(), Me
         }
         ChecksOverall::Passing | ChecksOverall::None => {}
     }
-    if !matches!(pr.merge_state.as_str(), "clean" | "has_hooks") {
+    let admin_blocked = gate == MergeGate::Admin && pr.merge_state == "blocked";
+    if !admin_blocked && !matches!(pr.merge_state.as_str(), "clean" | "has_hooks") {
         return refuse(
             format!(
                 "GitHub reports merge state '{}' (not clean): required checks, reviews or an \
@@ -628,6 +650,7 @@ mod pr_management_tests {
             base_repo: Some("O/R".into()),
             merged_at: None,
             merge_commit_sha: None,
+            author: Some("alice".into()),
         }
     }
 
@@ -792,10 +815,16 @@ mod pr_management_tests {
             "completed",
             Some("success"),
         )]);
-        assert_eq!(merge_gate(&pr("clean"), &passing, false), Ok(()));
-        assert_eq!(merge_gate(&pr("has_hooks"), &passing, false), Ok(()));
         assert_eq!(
-            merge_gate(&pr("clean"), &checks_with(vec![]), false),
+            merge_gate(&pr("clean"), &passing, MergeGate::Normal),
+            Ok(())
+        );
+        assert_eq!(
+            merge_gate(&pr("has_hooks"), &passing, MergeGate::Normal),
+            Ok(())
+        );
+        assert_eq!(
+            merge_gate(&pr("clean"), &checks_with(vec![]), MergeGate::Normal),
             Ok(())
         );
     }
@@ -808,7 +837,7 @@ mod pr_management_tests {
             "completed",
             Some("failure"),
         )]);
-        let refusal = merge_gate(&pr("unstable"), &failing, false).unwrap_err();
+        let refusal = merge_gate(&pr("unstable"), &failing, MergeGate::Normal).unwrap_err();
         assert!(refusal.reason.contains("lint"), "{refusal:?}");
         assert!(!refusal.retryable);
 
@@ -818,7 +847,7 @@ mod pr_management_tests {
             "in_progress",
             None,
         )]);
-        let refusal = merge_gate(&pr("blocked"), &pending, false).unwrap_err();
+        let refusal = merge_gate(&pr("blocked"), &pending, MergeGate::Normal).unwrap_err();
         assert!(refusal.reason.contains("test"), "{refusal:?}");
         assert!(refusal.retryable);
     }
@@ -838,9 +867,9 @@ mod pr_management_tests {
                 Some("success"),
             )]),
         );
-        let refusal = merge_gate(&pr("blocked"), &partial, false).unwrap_err();
+        let refusal = merge_gate(&pr("blocked"), &partial, MergeGate::Normal).unwrap_err();
         assert!(refusal.reason.contains("blocked"), "{refusal:?}");
-        let unknown = merge_gate(&pr("unknown"), &partial, false).unwrap_err();
+        let unknown = merge_gate(&pr("unknown"), &partial, MergeGate::Normal).unwrap_err();
         assert!(unknown.retryable);
     }
 
@@ -852,18 +881,68 @@ mod pr_management_tests {
             "completed",
             Some("failure"),
         )]);
-        assert_eq!(merge_gate(&pr("blocked"), &failing, true), Ok(()));
+        assert_eq!(
+            merge_gate(&pr("blocked"), &failing, MergeGate::Force),
+            Ok(())
+        );
 
         let mut draft = pr("clean");
         draft.draft = true;
-        assert!(merge_gate(&draft, &failing, true).is_err());
+        assert!(merge_gate(&draft, &failing, MergeGate::Force).is_err());
 
-        assert!(merge_gate(&pr("dirty"), &failing, true).is_err());
+        assert!(merge_gate(&pr("dirty"), &failing, MergeGate::Force).is_err());
 
         let mut merged = pr("clean");
         merged.state = MergeStatus::Merged;
         merged.merged = true;
-        assert!(merge_gate(&merged, &failing, true).is_err());
+        assert!(merge_gate(&merged, &failing, MergeGate::Force).is_err());
+    }
+
+    #[test]
+    fn admin_passes_only_the_blocked_verdict() {
+        let passing = checks_with(vec![check(
+            "test",
+            CheckSource::CheckRuns,
+            "completed",
+            Some("success"),
+        )]);
+        assert_eq!(
+            merge_gate(&pr("blocked"), &passing, MergeGate::Admin),
+            Ok(())
+        );
+        assert_eq!(
+            merge_gate(&pr("blocked"), &checks_with(vec![]), MergeGate::Admin),
+            Ok(())
+        );
+        assert!(merge_gate(&pr("blocked"), &passing, MergeGate::Normal).is_err());
+
+        let failing = checks_with(vec![check(
+            "lint",
+            CheckSource::CheckRuns,
+            "completed",
+            Some("failure"),
+        )]);
+        let refusal = merge_gate(&pr("blocked"), &failing, MergeGate::Admin).unwrap_err();
+        assert!(refusal.reason.contains("failing"), "{}", refusal.reason);
+
+        let pending = checks_with(vec![check(
+            "test",
+            CheckSource::CheckRuns,
+            "in_progress",
+            None,
+        )]);
+        let refusal = merge_gate(&pr("blocked"), &pending, MergeGate::Admin).unwrap_err();
+        assert!(refusal.retryable);
+
+        for state in ["unknown", "dirty", "behind", "unstable"] {
+            assert!(
+                merge_gate(&pr(state), &passing, MergeGate::Admin).is_err(),
+                "{state}"
+            );
+        }
+        let mut draft = pr("blocked");
+        draft.draft = true;
+        assert!(merge_gate(&draft, &passing, MergeGate::Admin).is_err());
     }
 
     #[test]

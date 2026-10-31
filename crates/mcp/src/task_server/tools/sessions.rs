@@ -9,7 +9,7 @@ use rmcp::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::McpServer;
+use super::{McpServer, ToolError};
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct CreateSessionRequest {
@@ -342,7 +342,7 @@ struct RefreshMcpToolsRequest {
     #[schemars(description = "Workspace ID. Optional in an orchestrator-scoped MCP context.")]
     workspace_id: Option<Uuid>,
     #[schemars(
-        description = "Session ID whose next turn should use refreshed MCP tools. Optional for the orchestrator session in scoped mode."
+        description = "Session ID whose next turn should use refreshed MCP tools. Defaults to the orchestrator session in scoped mode, else to the workspace's only session; with several, the error lists them (or see list_sessions)."
     )]
     session_id: Option<Uuid>,
 }
@@ -352,9 +352,50 @@ struct RestartSessionRequest {
     #[schemars(description = "Workspace ID. Optional in an orchestrator-scoped MCP context.")]
     workspace_id: Option<Uuid>,
     #[schemars(
-        description = "Session ID to restart. Optional for the orchestrator session in scoped mode."
+        description = "Session ID to restart. Defaults to the orchestrator session in scoped mode, else to the workspace's only session; with several, the error lists them (or see list_sessions)."
     )]
     session_id: Option<Uuid>,
+}
+
+/// The session a recovery tool acts on when the caller named none and no
+/// orchestrator session is in scope: the workspace's only session. A shared
+/// MCP server cannot tell which of several sessions called it, so it never
+/// guesses between them.
+fn only_session(sessions: &[Session]) -> Result<Uuid, ToolError> {
+    match sessions {
+        [session] => Ok(session.id),
+        [] => Err(ToolError::message("This workspace has no sessions")),
+        many => Err(ToolError::new(
+            "session_id is required: this workspace has several sessions",
+            Some(
+                many.iter()
+                    .map(|session| {
+                        format!(
+                            "{} ({})",
+                            session.name.as_deref().unwrap_or("unnamed"),
+                            session.id
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+        )),
+    }
+}
+
+impl McpServer {
+    async fn default_session_id(
+        &self,
+        workspace_id: Uuid,
+        session_id: Option<Uuid>,
+    ) -> Result<Uuid, ToolError> {
+        if let Some(id) = session_id.or_else(|| self.orchestrator_session_id()) {
+            return Ok(id);
+        }
+        let url = self.url(&format!("/api/sessions?workspace_id={workspace_id}"));
+        let sessions: Vec<Session> = self.send_json(self.client.get(&url)).await?;
+        only_session(&sessions)
+    }
 }
 
 #[tool_router(router = session_tools_router, vis = "pub")]
@@ -376,11 +417,9 @@ impl McpServer {
         if let Err(error_result) = self.scope_allows_workspace(workspace_id) {
             return Ok(Self::tool_error(error_result));
         }
-        let Some(session_id) = session_id.or_else(|| self.orchestrator_session_id()) else {
-            return Self::err(
-                "session_id is required outside an orchestrator-scoped MCP context",
-                None,
-            );
+        let session_id = match self.default_session_id(workspace_id, session_id).await {
+            Ok(id) => id,
+            Err(error_result) => return Ok(Self::tool_error(error_result)),
         };
         if self
             .orchestrator_session_id()
@@ -424,11 +463,9 @@ impl McpServer {
         if let Err(error_result) = self.scope_allows_workspace(workspace_id) {
             return Ok(Self::tool_error(error_result));
         }
-        let Some(session_id) = session_id.or_else(|| self.orchestrator_session_id()) else {
-            return Self::err(
-                "session_id is required outside an orchestrator-scoped MCP context",
-                None,
-            );
+        let session_id = match self.default_session_id(workspace_id, session_id).await {
+            Ok(id) => id,
+            Err(error_result) => return Ok(Self::tool_error(error_result)),
         };
         if self
             .orchestrator_session_id()
@@ -914,5 +951,49 @@ impl McpServer {
             roles: roles.map(str::to_string),
         };
         self.send_json(self.client.get(&url).query(&query)).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session(name: Option<&str>) -> Session {
+        Session {
+            id: Uuid::new_v4(),
+            workspace_id: Uuid::nil(),
+            name: name.map(str::to_owned),
+            executor: None,
+            agent_working_dir: None,
+            created_at: Default::default(),
+            updated_at: Default::default(),
+        }
+    }
+
+    #[test]
+    fn only_a_single_session_is_a_default() {
+        let one = session(Some("main"));
+        assert_eq!(only_session(std::slice::from_ref(&one)).unwrap(), one.id);
+
+        assert!(
+            only_session(&[])
+                .unwrap_err()
+                .message
+                .contains("no sessions")
+        );
+
+        let (a, b) = (session(Some("main")), session(None));
+        let error = only_session(&[a.clone(), b.clone()]).unwrap_err();
+        assert!(
+            error.message.contains("several sessions"),
+            "{}",
+            error.message
+        );
+        let details = error.details.unwrap();
+        assert!(details.contains(&format!("main ({})", a.id)), "{details}");
+        assert!(
+            details.contains(&format!("unnamed ({})", b.id)),
+            "{details}"
+        );
     }
 }

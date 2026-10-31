@@ -220,6 +220,10 @@ pub enum EnvironmentSecretError {
     TimedOut,
     #[error("1Password field must be NUL-free UTF-8 text of at most 64 KiB")]
     InvalidValue,
+    #[error(
+        "the 1Password credential file named by {variable} is unreadable or is not one raw line of text"
+    )]
+    CredentialFile { variable: &'static str },
 }
 
 impl EnvironmentSecretError {
@@ -259,6 +263,73 @@ impl Credential<'_> {
 struct Credentials {
     connect: Option<(String, String)>,
     service_account: Option<String>,
+}
+
+/// Names a file holding the Connect token for the server's own lookups; it
+/// pairs with the ambient `OP_CONNECT_HOST`.
+pub const SERVER_CONNECT_TOKEN_FILE: &str = "VK_SERVER_OP_CONNECT_TOKEN_FILE";
+/// Names a file holding a service-account token for the server's own lookups.
+pub const SERVER_SERVICE_ACCOUNT_TOKEN_FILE: &str = "VK_SERVER_OP_SERVICE_ACCOUNT_TOKEN_FILE";
+const MAX_CREDENTIAL_FILE_BYTES: u64 = 16 * 1024;
+
+/// 1Password credentials the deployment supplies for the server's *own*
+/// lookups (Settings → GitHub organization tokens), as explicit entries for a
+/// single-reference request. They arrive as file paths, never values, so the
+/// service can keep `OP_*` tokens out of the environment its agents inherit.
+/// Empty when neither variable is set.
+pub fn server_credentials() -> Result<HashMap<String, String>, EnvironmentSecretError> {
+    server_credentials_from(|name| std::env::var(name).ok())
+}
+
+fn server_credentials_from(
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<HashMap<String, String>, EnvironmentSecretError> {
+    let path = |name: &str| env(name).filter(|value| !value.trim().is_empty());
+    let mut credentials = HashMap::new();
+    if let Some(file) = path(SERVER_CONNECT_TOKEN_FILE) {
+        let token = read_credential_file(Path::new(&file)).ok_or(
+            EnvironmentSecretError::CredentialFile {
+                variable: SERVER_CONNECT_TOKEN_FILE,
+            },
+        )?;
+        let host = env(CONNECT_HOST)
+            .filter(|host| usable_literal(host))
+            .ok_or(EnvironmentSecretError::IncompleteConnect)?;
+        credentials.insert(CONNECT_HOST.to_owned(), host);
+        credentials.insert(CONNECT_TOKEN.to_owned(), token);
+    }
+    if let Some(file) = path(SERVER_SERVICE_ACCOUNT_TOKEN_FILE) {
+        let token = read_credential_file(Path::new(&file)).ok_or(
+            EnvironmentSecretError::CredentialFile {
+                variable: SERVER_SERVICE_ACCOUNT_TOKEN_FILE,
+            },
+        )?;
+        credentials.insert(TOKEN.to_owned(), token);
+    }
+    Ok(credentials)
+}
+
+/// One raw line, the format `op-connect-token-read` accepts: a single
+/// trailing newline is allowed; surrounding whitespace, inner line breaks,
+/// NUL, and `NAME=value` assignment syntax are not.
+fn read_credential_file(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(MAX_CREDENTIAL_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > MAX_CREDENTIAL_FILE_BYTES {
+        return None;
+    }
+    let text = String::from_utf8(bytes).ok()?;
+    let line = text.strip_suffix('\n').unwrap_or(&text);
+    let assignment = line
+        .split_once('=')
+        .is_some_and(|(name, _)| name.starts_with("OP_"));
+    (!line.is_empty() && line.trim() == line && !line.contains(['\n', '\r', '\0']) && !assignment)
+        .then(|| line.to_owned())
 }
 
 /// Literal-only environments do not require a token or an installed CLI.
@@ -499,6 +570,89 @@ async fn read_reference(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn credential_file(contents: &[u8]) -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credential");
+        std::fs::write(&path, contents).unwrap();
+        (dir, path.to_string_lossy().into_owned())
+    }
+
+    #[test]
+    fn credential_files_accept_one_raw_line_only() {
+        for (contents, expected) in [
+            (&b"ops_abc=="[..], Some("ops_abc==")),
+            (b"ops_abc\n", Some("ops_abc")),
+            (b"", None),
+            (b"\n", None),
+            (b" ops_abc", None),
+            (b"ops_abc\n\n", None),
+            (b"ops\r\nabc", None),
+            (b"ops\0abc", None),
+            (b"OP_CONNECT_TOKEN=ops_abc", None),
+            (b"\xff\xfe", None),
+        ] {
+            let (_dir, path) = credential_file(contents);
+            assert_eq!(
+                read_credential_file(Path::new(&path)).as_deref(),
+                expected,
+                "{contents:?}"
+            );
+        }
+        assert_eq!(
+            read_credential_file(Path::new("/nonexistent/vk-cred")),
+            None
+        );
+    }
+
+    #[test]
+    fn server_credentials_come_from_named_files_and_never_echo_them() {
+        let (_connect_dir, connect) = credential_file(b"connect-secret\n");
+        let (_sa_dir, service_account) = credential_file(b"sa-secret");
+        let env = |pairs: Vec<(&'static str, String)>| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| value.clone())
+            }
+        };
+
+        assert!(server_credentials_from(env(vec![])).unwrap().is_empty());
+
+        let both = server_credentials_from(env(vec![
+            (SERVER_CONNECT_TOKEN_FILE, connect.clone()),
+            (CONNECT_HOST, "http://connect:8080".into()),
+            (SERVER_SERVICE_ACCOUNT_TOKEN_FILE, service_account.clone()),
+        ]))
+        .unwrap();
+        assert_eq!(both[CONNECT_HOST], "http://connect:8080");
+        assert_eq!(both[CONNECT_TOKEN], "connect-secret");
+        assert_eq!(both[TOKEN], "sa-secret");
+        // Connect is preferred, the service account is the fallback.
+        let selected = select_credentials(&both, None).unwrap();
+        assert_eq!(
+            selected.connect,
+            Some(("http://connect:8080".into(), "connect-secret".into()))
+        );
+        assert_eq!(selected.service_account.as_deref(), Some("sa-secret"));
+
+        // A Connect token without a host is a configuration error.
+        assert!(matches!(
+            server_credentials_from(env(vec![(SERVER_CONNECT_TOKEN_FILE, connect)])),
+            Err(EnvironmentSecretError::IncompleteConnect)
+        ));
+
+        let (_bad_dir, bad) = credential_file(b"  padded-secret  ");
+        let error = server_credentials_from(env(vec![(SERVER_SERVICE_ACCOUNT_TOKEN_FILE, bad)]))
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains(SERVER_SERVICE_ACCOUNT_TOKEN_FILE),
+            "{message}"
+        );
+        assert!(!message.contains("padded-secret"), "{message}");
+    }
 
     fn values(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         pairs
