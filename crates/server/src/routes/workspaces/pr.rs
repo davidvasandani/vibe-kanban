@@ -24,14 +24,14 @@ use executors::actions::{
 };
 use git::{GitCliError, GitRemote, GitServiceError};
 use git_host::{
-    CreatePrRequest, GitHostError, GitHostProvider, GitHostService, MergeMethod, MergeOutcome,
-    PrChecks, PrReference, PrState, ProviderKind, UnifiedPrComment, UpdatePrFields, github::GhCli,
-    merge_gate, parse_pr_reference, same_repo,
+    CreatePrRequest, GitHostError, GitHostProvider, GitHostService, MergeGate, MergeMethod,
+    MergeOutcome, PrChecks, PrReference, PrState, ProviderKind, UnifiedPrComment, UpdatePrFields,
+    github::GhCli, merge_gate, parse_pr_reference, same_repo,
 };
 use serde::{Deserialize, Serialize};
 use services::services::{
-    config::DEFAULT_PR_DESCRIPTION_PROMPT, container::ContainerService, github_credentials,
-    remote_sync,
+    admin_merge::AdminMergePolicy, config::DEFAULT_PR_DESCRIPTION_PROMPT,
+    container::ContainerService, github_credentials, remote_sync,
 };
 use ts_rs::TS;
 use utils::response::ApiResponse;
@@ -49,6 +49,13 @@ pub struct CreatePrApiRequest {
     pub repo_id: Uuid,
     #[serde(default)]
     pub auto_generate_description: bool,
+    /// Local branch to open a side PR from; absent means the workspace branch.
+    /// A side PR is not recorded as the workspace's PR (default PR targeting
+    /// and archival stay on the workspace branch), so the workspace branch
+    /// itself is refused here.
+    #[serde(default)]
+    #[ts(optional)]
+    pub head: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, TS)]
@@ -60,6 +67,7 @@ pub enum PrError {
     GitCliNotLoggedIn,
     GitCliNotInstalled,
     TargetBranchNotFound { branch: String },
+    InvalidHeadBranch { branch: String, reason: String },
     UnsupportedProvider,
 }
 
@@ -82,11 +90,40 @@ impl PrError {
             PrError::TargetBranchNotFound { branch } => {
                 format!("Target branch '{branch}' does not exist on the remote")
             }
+            PrError::InvalidHeadBranch { branch, reason } => {
+                format!("Head branch '{branch}' cannot be used: {reason}")
+            }
             PrError::UnsupportedProvider => {
                 "The repository's hosting provider is not supported for pull requests".into()
             }
         }
     }
+}
+
+/// Check a caller-chosen head branch before anything is pushed. `remotes` are
+/// the checkout's remote names: `origin/x` names a remote-tracking ref, which
+/// cannot be pushed as a branch.
+fn validate_head(
+    head: &str,
+    base: &str,
+    remotes: &[String],
+    name_is_valid: impl Fn(&str) -> bool,
+) -> Result<(), String> {
+    if head.is_empty() || !name_is_valid(head) {
+        return Err("not a valid branch name".into());
+    }
+    if let Some(remote) = remotes
+        .iter()
+        .find(|remote| head.starts_with(&format!("{remote}/")))
+    {
+        return Err(format!(
+            "it names a branch on remote '{remote}'; pass the local branch name"
+        ));
+    }
+    if head == base {
+        return Err("it is the base branch".into());
+    }
+    Ok(())
 }
 
 fn pr_error<T>(error: PrError) -> ApiResponse<T, PrError> {
@@ -259,7 +296,44 @@ pub async fn create_pr(
     let worktree_path = workspace_path.join(&repo.name);
 
     let git = deployment.git();
-    let push_remote = git.resolve_remote_for_branch(&repo_path, &workspace.branch)?;
+    // An explicit head opens a side PR. Naming the workspace branch is refused
+    // so that "head was passed" always means "not tracked" to the caller.
+    let side_head = request.head.as_deref().map(str::trim).map(str::to_owned);
+    if side_head.as_deref() == Some(workspace.branch.as_str()) {
+        return Ok(ResponseJson(pr_error(PrError::InvalidHeadBranch {
+            branch: workspace.branch.clone(),
+            reason: "it is the workspace branch; omit head to open the workspace's PR".into(),
+        })));
+    }
+    let head_branch = side_head
+        .clone()
+        .unwrap_or_else(|| workspace.branch.clone());
+    if let Some(head) = &side_head {
+        let remotes: Vec<String> = git
+            .list_remotes(&repo_path)
+            .map(|remotes| remotes.into_iter().map(|remote| remote.name).collect())
+            .unwrap_or_default();
+        // The base as it will be named on the remote (`upstream/main` → `main`).
+        let base = remotes
+            .iter()
+            .find_map(|remote| target_branch.strip_prefix(&format!("{remote}/")))
+            .unwrap_or(&target_branch);
+        let checked = validate_head(head, base, &remotes, |name| git.is_branch_name_valid(name))
+            .and_then(|()| match git.local_branch_exists(&worktree_path, head) {
+                Ok(true) => Ok(()),
+                Ok(false) => {
+                    Err("no local branch has this name; create and commit to it first".into())
+                }
+                Err(error) => Err(format!("could not read local branches: {error}")),
+            });
+        if let Err(reason) = checked {
+            return Ok(ResponseJson(pr_error(PrError::InvalidHeadBranch {
+                branch: head.clone(),
+                reason,
+            })));
+        }
+    }
+    let push_remote = git.resolve_remote_for_branch(&repo_path, &head_branch)?;
 
     // Try to get the remote from the branch name (works for remote-tracking branches like "upstream/main").
     // Fall back to push_remote if the branch doesn't exist locally or isn't a remote-tracking branch.
@@ -302,7 +376,7 @@ pub async fn create_pr(
 
     // Skips the push when the agent already pushed this commit, so a server
     // push problem cannot block opening the PR.
-    if let Err(e) = git.push_to_remote_if_needed(&worktree_path, &workspace.branch, &credentials) {
+    if let Err(e) = git.push_to_remote_if_needed(&worktree_path, &head_branch, &credentials) {
         tracing::error!("Failed to push branch to remote: {}", e);
         match e {
             GitServiceError::GitCLI(
@@ -340,7 +414,7 @@ pub async fn create_pr(
     let pr_request = CreatePrRequest {
         title: request.title.clone(),
         body: request.body.clone(),
-        head_branch: workspace.branch.clone(),
+        head_branch: head_branch.clone(),
         base_branch: base_branch.clone(),
         draft: request.draft,
         head_repo_url: Some(push_remote.url.clone()),
@@ -350,6 +424,18 @@ pub async fn create_pr(
         .create_pr(&repo_path, &target_remote.url, &pr_request)
         .await
     {
+        Ok(pr_info) if side_head.is_some() => {
+            // A side PR is deliberately not the workspace's PR: recording it
+            // would make it the default for get_pr/merge_pr and let its merge
+            // archive the workspace. Callers pass `pr` explicitly instead.
+            tracing::info!(
+                workspace_id = %workspace.id,
+                head = %head_branch,
+                url = %pr_info.url,
+                "Opened a side PR (not recorded as the workspace PR)"
+            );
+            Ok(ResponseJson(ApiResponse::success(pr_info.url)))
+        }
         Ok(pr_info) => {
             // Track the PR locally
             if let Err(e) = PullRequest::create_for_workspace(
@@ -1049,6 +1135,10 @@ pub struct MergePrApiRequest {
     pub delete_branch: bool,
     #[serde(default)]
     pub force: bool,
+    /// Merge past GitHub's `blocked` verdict when the deployment's
+    /// `VK_ADMIN_MERGE_ALLOW` lists the repository and PR author. Audited.
+    #[serde(default)]
+    pub admin: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1279,9 +1369,42 @@ pub async fn merge_pr(
         )
         .await?
     );
+    let gate = match (request.admin, request.force) {
+        (true, true) => {
+            return Ok(pr_tool_error(PrToolError::MergeRefused {
+                reason: "admin and force cannot be combined; admin is the narrower bypass".into(),
+                retryable: false,
+            }));
+        }
+        (true, false) => MergeGate::Admin,
+        (false, true) => MergeGate::Force,
+        (false, false) => MergeGate::Normal,
+    };
     let pr = tool_try!(target.state().await);
+    if gate == MergeGate::Admin {
+        let allowed =
+            AdminMergePolicy::from_env().allows(pr.base_repo.as_deref(), pr.author.as_deref());
+        tracing::warn!(
+            target: "audit",
+            action = "admin_merge.requested",
+            workspace_id = %workspace.id,
+            repo = pr.base_repo.as_deref().unwrap_or(""),
+            pr = pr.number,
+            author = pr.author.as_deref().unwrap_or(""),
+            head_sha = %pr.head_sha,
+            merge_state = %pr.merge_state,
+            allowed = allowed.is_ok(),
+            "admin merge requested"
+        );
+        if let Err(reason) = allowed {
+            return Ok(pr_tool_error(PrToolError::MergeRefused {
+                reason: format!("admin merge not allowed: {reason}"),
+                retryable: false,
+            }));
+        }
+    }
     let checks = tool_try!(target.checks(&pr.head_sha).await);
-    if let Err(refusal) = merge_gate(&pr, &checks, request.force) {
+    if let Err(refusal) = merge_gate(&pr, &checks, gate) {
         return Ok(pr_tool_error(PrToolError::MergeRefused {
             reason: refusal.reason,
             retryable: refusal.retryable,
@@ -1290,20 +1413,34 @@ pub async fn merge_pr(
     // A fork PR's head branch lives in the fork: deleting `head_branch` in the
     // base repository would remove an unrelated same-named branch there.
     let delete_branch = request.delete_branch && pr.head_in_base_repo();
-    let mut outcome = tool_try!(
-        target
-            .git_host
-            .merge_pr(
-                &target.repo_path,
-                &target.remote_url,
-                target.number,
-                request.method,
-                &pr.head_sha,
-                delete_branch.then_some(pr.head_branch.as_str()),
-            )
-            .await
-            .map_err(|error| PrToolError::from_git_host(error, target.provider))
-    );
+    let merged = target
+        .git_host
+        .merge_pr(
+            &target.repo_path,
+            &target.remote_url,
+            target.number,
+            request.method,
+            &pr.head_sha,
+            delete_branch.then_some(pr.head_branch.as_str()),
+        )
+        .await
+        .map_err(|error| PrToolError::from_git_host(error, target.provider));
+    if gate == MergeGate::Admin {
+        let error = merged.as_ref().err().map(PrToolError::message);
+        tracing::warn!(
+            target: "audit",
+            action = "admin_merge.completed",
+            workspace_id = %workspace.id,
+            repo = pr.base_repo.as_deref().unwrap_or(""),
+            pr = pr.number,
+            head_sha = %pr.head_sha,
+            merged = merged.as_ref().is_ok_and(|outcome| outcome.merged),
+            error = error.as_deref().unwrap_or(""),
+            "admin merge finished"
+        );
+    }
+    let mut outcome = tool_try!(merged);
+    outcome.admin_bypass = gate == MergeGate::Admin && outcome.merged;
     if request.delete_branch && !delete_branch && outcome.merged {
         outcome.branch_deleted = Some(false);
         outcome.branch_delete_error = Some(format!(
@@ -1431,5 +1568,52 @@ mod pr_tool_error_tests {
         assert_eq!(request.method, MergeMethod::Squash);
         assert!(!request.delete_branch);
         assert!(!request.force);
+        assert!(!request.admin);
+    }
+
+    #[test]
+    fn create_request_head_is_optional() {
+        let request: CreatePrApiRequest =
+            serde_json::from_value(serde_json::json!({"title": "t", "repo_id": Uuid::nil()}))
+                .unwrap();
+        assert_eq!(request.head, None);
+        let request: CreatePrApiRequest = serde_json::from_value(
+            serde_json::json!({"title": "t", "repo_id": Uuid::nil(), "head": "fix/x"}),
+        )
+        .unwrap();
+        assert_eq!(request.head.as_deref(), Some("fix/x"));
+    }
+
+    #[test]
+    fn side_heads_must_be_local_valid_and_not_the_base() {
+        let remotes = vec!["origin".to_string(), "upstream".to_string()];
+        let valid = |name: &str| git::GitService::new().is_branch_name_valid(name);
+        assert_eq!(
+            validate_head("fix/split-out", "main", &remotes, valid),
+            Ok(())
+        );
+        // A branch that merely starts with a remote's name is fine.
+        assert_eq!(
+            validate_head("origination", "main", &remotes, valid),
+            Ok(())
+        );
+
+        let invalid = validate_head("bad..name", "main", &remotes, valid).unwrap_err();
+        assert!(invalid.contains("not a valid branch name"), "{invalid}");
+        let remote = validate_head("upstream/fix", "main", &remotes, valid).unwrap_err();
+        assert!(remote.contains("remote 'upstream'"), "{remote}");
+        let base = validate_head("main", "main", &remotes, valid).unwrap_err();
+        assert!(base.contains("base branch"), "{base}");
+
+        let response = pr_error::<String>(PrError::InvalidHeadBranch {
+            branch: "main".into(),
+            reason: "it is the base branch".into(),
+        });
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(
+            json["message"],
+            "Head branch 'main' cannot be used: it is the base branch"
+        );
+        assert_eq!(json["error_data"]["type"], "invalid_head_branch");
     }
 }

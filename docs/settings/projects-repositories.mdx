@@ -203,9 +203,61 @@ hosts, SSH remotes, and commands run outside a repository.
 <Note>
 Changes apply to processes started after you save. A running agent keeps the
 environment it started with, so start a new session to pick up a new or
-rotated token. Operations that Vibe Kanban performs itself are not affected.
-One example is creating a pull request from the UI.
+rotated token. Operations that Vibe Kanban performs itself pick up the change on
+their next call. Examples are creating or merging a pull request, pushing, and
+the pull request monitor.
 </Note>
+
+### Operations Vibe Kanban performs itself
+
+Vibe Kanban's own Git and `gh` calls also use these tokens: the MCP PR tools,
+**Create PR** in the UI, pushes, and the PR monitor. No organisation is
+involved, so organisation Env Vars cannot supply the 1Password credential for a
+reference. The service needs its own, given as **file paths** so that agents
+never inherit a token:
+
+| Variable | Contents |
+| --- | --- |
+| `VK_SERVER_OP_CONNECT_TOKEN_FILE` | A 1Password Connect token. It requires `OP_CONNECT_HOST`. Tried first. |
+| `VK_SERVER_OP_SERVICE_ACCOUNT_TOKEN_FILE` | A service-account token. Used when Connect fails. |
+
+Each file holds one raw line: no `NAME=` prefix and no surrounding spaces. A
+trailing newline is fine. The service's own `OP_SERVICE_ACCOUNT_TOKEN`, if it
+has one, is the last fallback.
+
+Without any of these, a reference fails for these operations with "1Password
+references require a nonempty literal OP_SERVICE_ACCOUNT_TOKEN …". Literal
+PATs need no 1Password credential.
+
+### Checking that every token works
+
+`GET /api/github-owner-tokens/health` resolves each configured token the way
+server operations do. It then asks GitHub's `rate_limit` endpoint whether the
+token is accepted; that check does not use API quota. For each owner it reports:
+
+- `kind`: `literal` or `reference`;
+- `status`: `ok`, `rejected` (GitHub answered 401 or 403) or `unavailable`
+  (the token could not be resolved, or GitHub could not be reached);
+- `detail`: why the status is not `ok`.
+
+Values and references are never included. `healthy` is true only when every
+owner is `ok`. Poll this endpoint from your deployment's alerting: an
+unusable token otherwise shows up only as an error in the agent that hit it.
+
+### Tokens for scripts
+
+The ambient `GH_TOKEN` or `GITHUB_TOKEN` in a session is not owner-routed. A
+script that reads it directly gets the wrong token for other owners' private
+repositories, and fails with 404. Get the routed token instead:
+
+```bash
+GH_REPO=my-org/app gh auth token          # through the gh router
+printf 'protocol=https\nhost=github.com\npath=my-org/app.git\n\n' \
+  | git credential fill | sed -n 's/^password=//p'   # through Git
+```
+
+Or call GitHub through `gh api repos/my-org/app/…`, which is routed by its
+path.
 
 ## Best Practices
 

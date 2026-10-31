@@ -1357,6 +1357,57 @@ fn merge_base_ahead_of_task_should_error() {
 }
 
 #[test]
+fn a_dirty_worktree_blocks_only_pushing_the_checked_out_branch() {
+    let temp_dir = TempDir::new().unwrap();
+    let remote_path = temp_dir.path().join("remote.git");
+    Repository::init_bare(&remote_path).expect("init bare remote");
+    let remote_url = remote_path.to_str().expect("remote path str");
+    let seed_path = temp_dir.path().join("seed");
+    GitService::new()
+        .initialize_repo_with_main_branch(&seed_path)
+        .expect("init seed repo");
+    let seed_repo = Repository::open(&seed_path).expect("open seed repo");
+    seed_repo.remote("origin", remote_url).expect("add remote");
+    push_ref(&seed_repo, "refs/heads/main", "refs/heads/main");
+    Repository::open_bare(&remote_path)
+        .expect("open bare remote")
+        .set_head("refs/heads/main")
+        .expect("set remote HEAD");
+    let local_path = temp_dir.path().join("local");
+    let local_repo = Repository::clone(remote_url, &local_path).expect("clone local");
+    configure_user(&local_repo);
+    checkout_branch(&local_repo, "main");
+    write_file(&local_path, "file.txt", "one\n");
+    commit_all(&local_repo, "first");
+    // A committed side branch, while the checked-out branch has edits.
+    let head_commit = local_repo.head().unwrap().peel_to_commit().unwrap();
+    local_repo
+        .branch("side", &head_commit, false)
+        .expect("create side branch");
+    write_file(&local_path, "file.txt", "uncommitted\n");
+
+    let service = GitService::new();
+    let credentials = GitHubCredentials::default();
+    assert_eq!(
+        service
+            .push_to_remote_if_needed(&local_path, "side", &credentials)
+            .unwrap(),
+        PushOutcome::Pushed
+    );
+    let remote = Repository::open_bare(&remote_path).unwrap();
+    assert_eq!(
+        remote.find_reference("refs/heads/side").unwrap().target(),
+        Some(head_commit.id())
+    );
+    // The checked-out branch still refuses to push past its edits.
+    assert!(
+        service
+            .push_to_remote_if_needed(&local_path, "main", &credentials)
+            .is_err()
+    );
+}
+
+#[test]
 fn push_if_needed_skips_when_remote_branch_is_at_head_and_pushes_otherwise() {
     let temp_dir = TempDir::new().unwrap();
     let remote_path = temp_dir.path().join("remote.git");

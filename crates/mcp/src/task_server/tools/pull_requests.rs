@@ -16,7 +16,7 @@ use uuid::Uuid;
 use super::{McpServer, ToolError};
 
 const WORKSPACE_ID_HELP: &str = "Workspace ID. Optional inside that workspace's orchestrator \
-     context; otherwise required (it is the workspace directory name, or find it with \
+     context; otherwise required (the agent's VK_WORKSPACE_ID environment variable, or find it with \
      list_workspaces).";
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -37,6 +37,10 @@ struct CreatePrToolRequest {
     base: Option<String>,
     #[schemars(description = "Open as a draft PR")]
     draft: Option<bool>,
+    #[schemars(
+        description = "Local branch other than the workspace branch to open the PR from (omit for the workspace's own PR). It opens a side PR — a follow-up split out of the main one, or an unrelated fix — which is pushed but not tracked as the workspace's PR: pass its number or URL as `pr` to get_pr/merge_pr/update_pr."
+    )]
+    head: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -76,9 +80,13 @@ struct MergePrToolRequest {
     #[schemars(description = "Delete the remote head branch after merging (default false)")]
     delete_branch: Option<bool>,
     #[schemars(
-        description = "Skip Vibe Kanban's check/merge-state gate (default false). Only on explicit instruction; drafts and conflicted PRs are refused regardless, and GitHub branch protection still applies."
+        description = "Skip Vibe Kanban's whole check/merge-state gate, including failing and running checks (default false). Only on explicit instruction; drafts and conflicted PRs are refused regardless. GitHub then decides: it merges only what branch protection lets this token's account merge. Prefer `admin` for a review-only block."
     )]
     force: Option<bool>,
+    #[schemars(
+        description = "Admin merge (default false): like a normal merge, but GitHub's 'blocked' verdict (a required review, or a required check VK cannot see) is left to GitHub, which merges only if the token's account may bypass protection — the same as `gh pr merge --admin`. Failing or running checks, conflicts and drafts are still refused. Allowed only for repositories and PR authors this Vibe Kanban host allowlists (VK_ADMIN_MERGE_ALLOW), and audited. Use only where the repository's own rules allow admin merges; cannot be combined with force."
+    )]
+    admin: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -172,7 +180,7 @@ impl McpServer {
 #[tool_router(router = pull_requests_tools_router, vis = "pub")]
 impl McpServer {
     #[tool(
-        description = "Open a pull request for the workspace branch: pushes the branch if needed, then opens the PR against `base` (default: the workspace repo's target branch). Returns the PR number and URL. If a PR already exists for the branch, the error says so — use get_pr instead of opening another. Use this rather than `gh pr create`."
+        description = "Open a pull request for the workspace branch, or for another local branch with `head`: pushes the branch if needed, then opens the PR against `base` (default: the workspace repo's target branch). Returns the PR number and URL, and `tracked` (false for a side PR opened with `head`). If a PR already exists for the branch, the error says so — use get_pr instead of opening another. Use this rather than `gh pr create`."
     )]
     async fn create_pr(
         &self,
@@ -192,6 +200,7 @@ impl McpServer {
             "target_branch": request.base,
             "draft": request.draft,
             "repo_id": repo_id,
+            "head": request.head,
         });
         let pr_url: String = match self.send_json(self.client.post(&url).json(&payload)).await {
             Ok(pr_url) => pr_url,
@@ -202,6 +211,9 @@ impl McpServer {
             "url": pr_url,
             "repo_id": repo_id,
             "base": request.base,
+            "head": request.head,
+            // A side PR is not the workspace's PR; later calls must name it.
+            "tracked": request.head.is_none(),
         }))
     }
 
@@ -219,7 +231,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "List CI checks for the PR head commit: name, source, status, conclusion and a link for each, an overall verdict (passing/failing/pending/none), and per-source coverage. Works without the token's Checks permission by falling back to GitHub Actions jobs; then `complete` is false and non-Actions checks may be missing — never treat an incomplete list as all-green on its own."
+        description = "List CI checks for the PR head commit: name, source, status, conclusion and a link for each, an overall verdict (passing/failing/pending/none), and per-source coverage. Works without the token's Checks permission (fine-grained tokens cannot have it) by falling back to GitHub Actions jobs; commit statuses such as Atlantis's are read either way. Then `complete` is false and check runs from non-Actions GitHub Apps may be missing — never treat an incomplete list as all-green on its own. Prefer this over `gh pr checks`, which needs that permission."
     )]
     async fn list_pr_checks(
         &self,
@@ -232,7 +244,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Merge a pull request once CI passes. Refuses unless checks are passing (or there are none) and GitHub's merge_state is clean; pending checks and an 'unknown' merge state are reported as retryable, so poll get_pr and try again. Drafts and conflicted PRs are always refused. Merges exactly the head commit that was checked. Use this rather than `gh pr merge`."
+        description = "Merge a pull request once CI passes. Refuses unless checks are passing (or there are none) and GitHub's merge_state is clean; pending checks and an 'unknown' merge state are reported as retryable, so poll get_pr and try again. Drafts and conflicted PRs are always refused. Merges exactly the head commit that was checked. A PR 'blocked' only by a required review can be admin-merged with admin=true where this host allows it. Use this rather than `gh pr merge`."
     )]
     async fn merge_pr(
         &self,
@@ -253,6 +265,7 @@ impl McpServer {
             "pr": request.pr,
             "delete_branch": request.delete_branch.unwrap_or(false),
             "force": request.force.unwrap_or(false),
+            "admin": request.admin.unwrap_or(false),
         });
         if let Some(method) = request.method {
             payload["method"] = method_name(&method).into();

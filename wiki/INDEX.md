@@ -28,7 +28,7 @@ contributed to it.
 
 - [browser-verification-handoff.md](browser-verification-handoff.md) — Hosted verification limits, origin-only local handoff, session continuity, sanitized diagnostics and provider test-key coverage (`vk/aa2f-fix-cloudflare-v`).
 
-- [1password-reference-resolution.md](1password-reference-resolution.md) — How `op://` org Env Vars and owner tokens are resolved and under which token, how failures are classified (rate-limited, token rejected, not found, unknown) and why stderr is never shown, the echoed-name and pipe-deadlock gotchas, and a no-secret debugging recipe that includes the shared 1,000-request/24 h service-account quota (`vk/76ab-debug-1password`).
+- [1password-reference-resolution.md](1password-reference-resolution.md) — How `op://` org Env Vars and owner tokens are resolved and under which token, how failures are classified (rate-limited, token rejected, not found, unknown) and why stderr is never shown, the echoed-name and pipe-deadlock gotchas, and a no-secret debugging recipe that includes the shared 1,000-request/24 h service-account quota (`vk/76ab-debug-1password`); why the coordinator's own `op://` org-token lookups had no credential (env-unset guard) and the file-based `VK_SERVER_OP_*_FILE` fix (`vk/7561-investigate-vibe`).
 
 - [aws-sso-agent-state.md](aws-sso-agent-state.md) — Shared AWS state, scoped homes, profile selection, host-versus-agent availability evidence, and bounded authentication probes. Lazy admission prevents same-batch queue expiry; executable discovery is shared per refresh. Final deployed check: 31/31 authenticated, plus successful agent CLI and Node SDK default-provider authentication.
 
@@ -42,7 +42,7 @@ contributed to it.
   Also covers the browser session and profile-lock hazards and the
   stale-response rules for the Settings card.
 
-- [mcp-pr-tools-and-connection-notices.md](mcp-pr-tools-and-connection-notices.md) — Why a Claude "failed to connect" notice can name a shadowing project `.mcp.json` duplicate rather than the working VK server (same-name replacement, ancestor loading, `disabledMcpjsonServers`); reading CI without the Checks permission (per-source coverage, truncation, superseded runs, pass-by-allowlist, two-witness merge gate); safe SHA-guarded merge, fork-aware encoded branch deletion, remote-aware PR resolution and endpoint-routed `gh api` credentials (`vk/53bc-agents-fall-back`).
+- [mcp-pr-tools-and-connection-notices.md](mcp-pr-tools-and-connection-notices.md) — Why a Claude "failed to connect" notice can name a shadowing project `.mcp.json` duplicate rather than the working VK server (same-name replacement, ancestor loading, `disabledMcpjsonServers`); reading CI without the Checks permission (per-source coverage, truncation, superseded runs, pass-by-allowlist, two-witness merge gate); safe SHA-guarded merge, fork-aware encoded branch deletion, remote-aware PR resolution and endpoint-routed `gh api` credentials (`vk/53bc-agents-fall-back`); untracked side PRs, the `blocked`-only admin gate with a deployment allowlist, `vk_reported`/`error_kind` and a ladder limited to what refresh/restart can fix (`vk/7561-investigate-vibe`).
 
 - [embedded-mcp-oauth-server.md](embedded-mcp-oauth-server.md) — VK as the
   OAuth 2.1 server for OAuth-only MCP clients (ChatGPT connectors): opt-in
@@ -356,7 +356,9 @@ contributed to it.
   routes around a credential helper (URL forms,
   `insteadOf`/`pushInsteadOf` longest-first-match, `extraHeader`, rewritten
   `remote -v`/libgit2 URLs, `gh pr checkout`'s own git, Enterprise), with
-  network-free verification recipes.
+  network-free verification recipes. Also the token health endpoint, its
+  ntfy alert, and the routed-token recipe for scripts
+  (`vk/7561-investigate-vibe`).
 - [coordinator-restart-handoff.md](coordinator-restart-handoff.md) — Why a VK
   deploy no longer stops worker-owned tasks (parents, sub-tasks, pollers).
   Shutdown hands them off with no cancel and no WIP commit. Boot re-attaches

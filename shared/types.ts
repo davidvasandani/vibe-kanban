@@ -1072,7 +1072,14 @@ export type CreateWorkspaceApiRequest = { name: string | null, };
 
 export type LinkedIssueInfo = { remote_project_id: string, issue_id: string, };
 
-export type CreatePrApiRequest = { title: string, body: string | null, target_branch: string | null, draft: boolean | null, repo_id: string, auto_generate_description: boolean, };
+export type CreatePrApiRequest = { title: string, body: string | null, target_branch: string | null, draft: boolean | null, repo_id: string, auto_generate_description: boolean, 
+/**
+ * Local branch to open a side PR from; absent means the workspace branch.
+ * A side PR is not recorded as the workspace's PR (default PR targeting
+ * and archival stay on the workspace branch), so the workspace branch
+ * itself is refused here.
+ */
+head?: string, };
 
 export type AttachmentResponse = { id: string, file_path: string, original_name: string, mime_type: string | null, size_bytes: bigint, hash: string, created_at: string, updated_at: string, };
 
@@ -1096,7 +1103,7 @@ export type GitOperationError = { "type": "merge_conflicts", message: string, op
 
 export type PushError = { "type": "force_push_required" };
 
-export type PrError = { "type": "cli_not_installed", provider: ProviderKind, } | { "type": "cli_not_logged_in", provider: ProviderKind, } | { "type": "git_cli_not_logged_in" } | { "type": "git_cli_not_installed" } | { "type": "target_branch_not_found", branch: string, } | { "type": "unsupported_provider" };
+export type PrError = { "type": "cli_not_installed", provider: ProviderKind, } | { "type": "cli_not_logged_in", provider: ProviderKind, } | { "type": "git_cli_not_logged_in" } | { "type": "git_cli_not_installed" } | { "type": "target_branch_not_found", branch: string, } | { "type": "invalid_head_branch", branch: string, reason: string, } | { "type": "unsupported_provider" };
 
 export type RunScriptError = { "type": "no_script_configured" } | { "type": "process_already_running" };
 
@@ -1352,6 +1359,26 @@ export type GitHubOwnerToken = { id: string, owner: string, reference?: string, 
 export type CreateGitHubOwnerTokenRequest = { owner: string, value: string, };
 
 export type UpdateGitHubOwnerTokenRequest = { value: string, };
+
+export type GitHubOwnerTokenHealth = { 
+/**
+ * Every configured owner is `ok` (vacuously true with none configured).
+ */
+healthy: boolean, owners: Array<OwnerTokenHealth>, };
+
+export type OwnerTokenHealth = { owner: string, 
+/**
+ * `None` when the stored value cannot be decrypted.
+ */
+kind: OwnerTokenKind | null, status: OwnerTokenStatus, 
+/**
+ * Why it is not `ok`; never contains a value or reference.
+ */
+detail: string | null, };
+
+export type OwnerTokenStatus = "ok" | "rejected" | "unavailable";
+
+export type OwnerTokenKind = "literal" | "reference";
 
 export type PipelineStep = { 
 /**
