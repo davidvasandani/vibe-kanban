@@ -1,3 +1,4 @@
+pub mod admin_merge;
 pub mod analytics;
 pub mod approvals;
 pub mod auth;

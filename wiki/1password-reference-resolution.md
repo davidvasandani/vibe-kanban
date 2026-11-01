@@ -30,6 +30,26 @@ how to debug one.
   copy the org's `CREDENTIAL_VARIABLES` (service-account token and Connect
   pair) into each single-reference request. The server-side git and `gh` path
   (`github_credentials`) uses the server's token and caches results for 60 s.
+- **The server's own lookups get credentials from files, never env.** The
+  coordinator start script `unset`s `OP_SERVICE_ACCOUNT_TOKEN` and
+  `OP_CONNECT_TOKEN` before `exec`, so agents never inherit them. A side
+  effect: from #352 (2026-10-01) every `op://` org-token row failed on every
+  server-side call with `MissingToken`. That was SWE-232's "intermittent"
+  outage. It "recovered" only because the rows were re-saved as literals
+  (`updated_at` 2026-10-04T19:21Z, no `reference`).
+  - The fix is `server_credentials()`. It reads
+    `VK_SERVER_OP_CONNECT_TOKEN_FILE` (with the ambient `OP_CONNECT_HOST`) and
+    `VK_SERVER_OP_SERVICE_ACCOUNT_TOKEN_FILE`, which point at
+    `$CREDENTIALS_DIRECTORY`. Their contents are merged into the
+    single-reference map as *explicit* credentials, so Connect is tried
+    first and the breaker still applies.
+  - The files follow `op-connect-token-read`'s rules: one raw line, at most
+    one trailing newline, no `OP_*=` prefix. Tokens may contain `=` padding.
+  - When diagnosing, read the live process's env *names*
+    (`/proc/<pid>/environ | cut -d= -f1`) before suspecting 1Password.
+    `GET /api/github-owner-tokens` shows whether a row is a reference
+    (`reference` present) and when it was last saved.
+  (`vk/7561-investigate-vibe`)
 - **Project vs org.** The org that owns a project is not obvious from its
   name. The project "Platform Ops" belongs to the **Sweetgreen** org, not the
   "Platform Ops" org. Check the project's organization before reading Env
@@ -85,3 +105,4 @@ of stderr.
 ## Contributed by
 
 - vk/76ab-debug-1password
+- vk/7561-investigate-vibe

@@ -24,6 +24,12 @@ type ToolCallResult = Result<CallToolResult, ErrorData>;
 struct ToolError {
     message: String,
     details: Option<String>,
+    /// `error_data.type` of a typed VK route error (e.g. `merge_refused`).
+    kind: Option<String>,
+    /// The VK backend answered and explained the failure itself, as opposed
+    /// to a transport or proxy failure. Refreshing or restarting MCP cannot
+    /// fix a reported error, so the recovery ladder does not apply to it.
+    reported: bool,
 }
 
 impl ToolError {
@@ -31,6 +37,24 @@ impl ToolError {
         Self {
             message: message.into(),
             details: details.map(Into::into),
+            kind: None,
+            reported: false,
+        }
+    }
+
+    /// An error the VK backend explained in its response envelope.
+    fn reported(
+        message: impl Into<String>,
+        details: String,
+        error_data: Option<&serde_json::Value>,
+    ) -> Self {
+        Self {
+            kind: error_data
+                .and_then(|data| data.get("type"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+            reported: true,
+            ..Self::new(message, Some(details))
         }
     }
 
@@ -145,12 +169,10 @@ fn decode_envelope<T: DeserializeOwned>(
             serde_json::from_slice::<ApiResponseEnvelope<serde::de::IgnoredAny>>(bytes)
             && (envelope.message.is_some() || envelope.error_data.is_some())
         {
-            return Err(ToolError::new(
+            return Err(ToolError::reported(
                 format!("VK API returned error status: {status}"),
-                Some(envelope_failure_detail(
-                    envelope.message.as_deref(),
-                    envelope.error_data.as_ref(),
-                )),
+                envelope_failure_detail(envelope.message.as_deref(), envelope.error_data.as_ref()),
+                envelope.error_data.as_ref(),
             ));
         }
         return Err(ToolError::new(
@@ -173,12 +195,10 @@ fn decode_envelope<T: DeserializeOwned>(
         )
     })?;
     if !envelope.success {
-        return Err(ToolError::new(
+        return Err(ToolError::reported(
             "VK API returned error",
-            Some(envelope_failure_detail(
-                envelope.message.as_deref(),
-                envelope.error_data.as_ref(),
-            )),
+            envelope_failure_detail(envelope.message.as_deref(), envelope.error_data.as_ref()),
+            envelope.error_data.as_ref(),
         ));
     }
     Ok(envelope)
@@ -253,6 +273,10 @@ impl McpServer {
         if let Some(details) = error.details {
             value["details"] = serde_json::json!(details);
         }
+        if let Some(kind) = error.kind {
+            value["error_kind"] = serde_json::json!(kind);
+        }
+        value["vk_reported"] = serde_json::json!(error.reported);
 
         CallToolResult::error(vec![Content::text(
             serde_json::to_string_pretty(&value)
@@ -889,6 +913,42 @@ pub(crate) mod tests {
             r#"{"success":false,"message":"checks are failing: lint","error_data":{"type":"merge_refused"}}"#,
         );
         assert_eq!(with_message.details.unwrap(), "checks are failing: lint");
+    }
+
+    #[test]
+    fn reported_errors_carry_their_kind_and_transport_errors_do_not() {
+        let reported = decode_err(
+            200,
+            Some("application/json"),
+            r#"{"success":false,"message":"GitHub authentication failed: the sweetgreen org token is configured but unavailable","error_data":{"type":"cli_not_logged_in","provider":"git_hub"}}"#,
+        );
+        assert!(reported.reported);
+        assert_eq!(reported.kind.as_deref(), Some("cli_not_logged_in"));
+        let result = McpServer::tool_error(reported);
+        let text = serde_json::to_string(&result.content).unwrap();
+        assert!(
+            text.contains(r#"\"error_kind\": \"cli_not_logged_in\""#),
+            "{text}"
+        );
+        assert!(text.contains(r#"\"vk_reported\": true"#), "{text}");
+
+        let untyped = decode_err(
+            500,
+            Some("application/json"),
+            r#"{"success":false,"message":"boom"}"#,
+        );
+        assert!(untyped.reported);
+        assert_eq!(untyped.kind, None);
+
+        for transport in [
+            decode_err(520, Some("text/html"), "<html>origin error</html>"),
+            decode_err(200, Some("text/html"), "<html>login</html>"),
+        ] {
+            assert!(!transport.reported);
+            let text = serde_json::to_string(&McpServer::tool_error(transport).content).unwrap();
+            assert!(text.contains(r#"\"vk_reported\": false"#), "{text}");
+            assert!(!text.contains("error_kind"), "{text}");
+        }
     }
 
     #[test]

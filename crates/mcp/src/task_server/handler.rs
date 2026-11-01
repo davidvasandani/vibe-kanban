@@ -8,17 +8,32 @@ use super::{McpMode, McpServer};
 
 /// What an agent does before abandoning a Vibe Kanban tool for an
 /// out-of-band fallback (homelab principle 143). Both `refresh_mcp_tools` and
-/// `restart_workspace` are registered in every mode, so each rung is callable.
-pub(crate) const RECOVERY_LADDER: &str = "If a Vibe Kanban tool call fails, or the harness says \
-     a Vibe Kanban MCP server failed to connect, climb this ladder before using any fallback: \
-     (1) retry the call; (2) call 'refresh_mcp_tools' (an 'unsupported' result, as for Claude \
-     Code, counts as done); (3) call 'restart_workspace', which keeps the worktree, Git state, \
-     sessions and conversations; (4) only then fall back (for example `gh` instead of \
-     'create_pr'/'get_pr'/'merge_pr'), and say so in your final report, naming the rung you \
-     reached. A connection notice about a differently named entry (such as 'vibe-kanban' from a \
-     repository .mcp.json) is not evidence that this server is down: a real tool call is the \
-     test. Open, poll and merge pull requests with 'create_pr', 'get_pr'/'list_pr_checks' and \
-     'merge_pr' rather than `gh`.";
+/// `restart_workspace` are registered in every mode, so each rung is callable;
+/// the ladder only promises what they can fix (transport and tool discovery),
+/// and errors the backend explained (`vk_reported`) skip it.
+pub(crate) const RECOVERY_LADDER: &str = "If a Vibe Kanban tool call fails, read the error \
+     first. With \"vk_reported\": true, Vibe Kanban itself answered and explained the failure \
+     (authentication, an org token that is configured but unavailable, configuration, a merge \
+     refusal, GitHub's own message): refreshing or restarting cannot fix that, so act on the \
+     message (fix the cause, retry later when it says so, or fall back at once) and quote it in \
+     your report. Climb this ladder only for a transport or tool-discovery failure (no \
+     vk_reported: a connection error or timeout, a non-JSON or proxy response, an unknown tool, \
+     or the harness saying a Vibe Kanban MCP server failed to connect): (1) retry the call; (2) \
+     call 'refresh_mcp_tools' with workspace_id (your VK_WORKSPACE_ID environment variable; \
+     optional in an orchestrator-scoped context) and, if the \
+     workspace has several sessions, session_id from 'list_sessions' (an 'unsupported' result, \
+     as for Claude Code, counts as done); (3) call 'restart_workspace' with workspace_id, which \
+     keeps the worktree, Git state, sessions and conversations; (4) only then fall back (for \
+     example `gh` instead of 'create_pr'/'get_pr'/'merge_pr'). Rungs 2 and 3 are Vibe Kanban \
+     calls too: if the server itself is unreachable (every call gets a connection error or a \
+     proxy error page such as a Cloudflare 5xx), go from (1) straight to (4). When you fall \
+     back, say so in your final report, naming the rung you reached or the reported error. A \
+     connection notice about a differently named entry (such as 'vibe-kanban' from a repository \
+     .mcp.json) is not evidence that this server is down: a real tool call is the test. Open, \
+     poll and merge pull requests with 'create_pr' (with head for another PR from a different \
+     branch), 'get_pr'/'list_pr_checks' and 'merge_pr' rather than `gh`. A script that needs a \
+     GitHub token gets the owner-routed one from `GH_REPO=<owner>/<repo> gh auth token`, never \
+     from the ambient GH_TOKEN or GITHUB_TOKEN.";
 
 /// An issue comment and a delivered message are different things; say which
 /// tool does what so an agent does not report a saved note as delivered.
@@ -163,6 +178,27 @@ mod tests {
             assert!(positions.windows(2).all(|w| w[0] < w[1]), "{text}");
             assert!(text.contains("keeps the worktree, Git state"), "{text}");
             assert!(text.contains("naming the rung you reached"), "{text}");
+            // Explained errors skip the ladder; an unreachable server skips
+            // the rungs that are themselves VK calls.
+            let reported = text
+                .find("\"vk_reported\": true")
+                .expect("vk_reported rule");
+            assert!(reported < positions[0], "{text}");
+            assert!(
+                text.contains("refreshing or restarting cannot fix that"),
+                "{text}"
+            );
+            assert!(text.contains("go from (1) straight to (4)"), "{text}");
+            // The rungs name the ids they need.
+            assert!(
+                text.contains("'refresh_mcp_tools' with workspace_id"),
+                "{text}"
+            );
+            assert!(text.contains("session_id from 'list_sessions'"), "{text}");
+            assert!(
+                text.contains("GH_REPO=<owner>/<repo> gh auth token"),
+                "{text}"
+            );
             assert!(
                 text.contains("not evidence that this server is down"),
                 "{text}"
@@ -173,6 +209,7 @@ mod tests {
                 "'restart_workspace'",
                 "'create_pr'",
                 "'merge_pr'",
+                "'list_sessions'",
             ] {
                 assert!(text.matches(tool).count() >= 2, "{tool} not listed: {text}");
             }

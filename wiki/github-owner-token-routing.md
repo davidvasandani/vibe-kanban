@@ -153,6 +153,30 @@ fix:
   possibly stale `origin/<branch>`. Skip only when `pushInsteadOf` does not
   send pushes elsewhere.
 
+### Health check and paging (`vk/7561-investigate-vibe`)
+
+`GET /api/github-owner-tokens/health` resolves every row through the same
+`resolve_row` and cache that server operations use. It then probes
+`GET https://api.github.com/rate_limit`, which needs no repository permission
+and costs no quota, so it suits any fine-grained PAT. The result is `ok`,
+`rejected` (401/403) or `unavailable` per owner, logged only on transitions.
+
+- Homelab's `vibe-kanban-github-token-alert` polls it every 30 min. It pages
+  the already-subscribed re-auth ntfy topic: a new topic pages nobody until
+  someone subscribes.
+- It treats **404 and 405** as "release predates the endpoint". The old
+  release answers 405, because `/github-owner-tokens/{id}` is PUT/DELETE
+  only.
+- It records state only after ntfy accepts the post, so a failed page is
+  retried (Codex review).
+
+### Scripts need the routed token, not the ambient one
+
+The session's ambient `GH_TOKEN`/`GITHUB_TOKEN` is not owner-routed. Verified
+by comparing hashes: `GH_REPO=<owner>/<repo> gh auth token` and
+`git credential fill` (`path=<owner>/<repo>.git`) return the same routed token.
+`gh auth token -R` is rejected by gh itself.
+
 ### Git config can route around a credential helper (12 Codex rounds)
 
 Installing an owner-scoped helper is not enough. Each of these bypassed it,
@@ -192,3 +216,4 @@ defined only through `-c`.
 
 - vk/0f52-manage-gh-token
 - vk/8b57-use-settings-git
+- vk/7561-investigate-vibe

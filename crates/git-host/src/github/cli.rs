@@ -792,6 +792,7 @@ struct RestPullRequest {
     base: RestRef,
     merged_at: Option<DateTime<Utc>>,
     merge_commit_sha: Option<String>,
+    user: Option<GhUserLogin>,
 }
 
 #[derive(Deserialize)]
@@ -1166,6 +1167,7 @@ impl GhCli {
             merged_at: pr.merged_at,
             // GitHub fills this with a test-merge commit for open PRs.
             merge_commit_sha: if pr.merged { pr.merge_commit_sha } else { None },
+            author: pr.user.and_then(|user| user.login),
         })
     }
 
@@ -1253,6 +1255,7 @@ impl GhCli {
             message: response.message,
             branch_deleted: None,
             branch_delete_error: None,
+            admin_bypass: false,
         })
     }
 }
@@ -1267,7 +1270,7 @@ mod pr_management_parser_tests {
             "state":"open","draft":false,"merged":false,"mergeable":true,"mergeable_state":"blocked",
             "head":{"sha":"1b1e","ref":"vk/x","repo":{"full_name":"o/r"}},
             "base":{"sha":"aaaa","ref":"main","repo":{"full_name":"o/r"}},
-            "merged_at":null,"merge_commit_sha":"testmerge"}"#;
+            "merged_at":null,"merge_commit_sha":"testmerge","user":{"login":"alice"}}"#;
         let pr = GhCli::parse_pr_state(raw).unwrap();
         assert!(matches!(pr.state, MergeStatus::Open));
         assert_eq!(pr.merge_state, "blocked");
@@ -1277,6 +1280,7 @@ mod pr_management_parser_tests {
         assert_eq!(pr.mergeable, Some(true));
         assert_eq!(pr.merge_commit_sha, None);
         assert!(pr.head_in_base_repo());
+        assert_eq!(pr.author.as_deref(), Some("alice"));
 
         let merged = r#"{"number":1,"state":"closed","merged":true,"mergeable":null,
             "mergeable_state":"unknown","head":{"sha":"h","ref":"b"},"base":{"ref":"main"},
@@ -1285,6 +1289,7 @@ mod pr_management_parser_tests {
         assert!(matches!(pr.state, MergeStatus::Merged));
         assert_eq!(pr.merge_commit_sha.as_deref(), Some("9a96"));
         assert_eq!(pr.mergeable, None);
+        assert_eq!(pr.author, None);
     }
 
     #[test]

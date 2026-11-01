@@ -404,6 +404,42 @@ Some agents support fewer MCP transports than others. Vibe Kanban blocks an
 assignment when the transport cannot be represented safely in that agent's
 native configuration.
 
+## Pull request tools
+
+The Vibe Kanban MCP server opens, reads and merges pull requests with
+`create_pr`, `get_pr`, `list_pr_checks`, `update_pr` and `merge_pr`. It uses
+the [GitHub organisation tokens](/settings/projects-repositories#github-organisation-tokens)
+configured on the host.
+
+- **A second PR from one workspace.** Pass `head` to `create_pr` to open a PR
+  from another local branch, for example a follow-up split out of the main PR
+  or an unrelated fix. The branch is pushed, but the PR is not tracked as the
+  workspace's own PR. It never becomes the default for the other tools, and
+  merging it does not archive the workspace. Pass its number or URL as `pr`
+  in later calls.
+- **Checks.** Fine-grained PATs cannot be granted GitHub's Checks permission,
+  so `list_pr_checks` reads commit statuses (for example Atlantis) and GitHub
+  Actions jobs instead. Check runs from other GitHub Apps can be missing, and
+  `complete: false` says so.
+- **Admin merges.** `merge_pr admin=true` leaves GitHub's `blocked` verdict to
+  GitHub. That verdict usually means a missing required review. GitHub then
+  merges only if the token's account may bypass protection, the same as
+  `gh pr merge --admin`. Failing or running checks, conflicts and drafts are
+  still refused. It is allowed only for repositories and PR authors listed in
+  the host's `VK_ADMIN_MERGE_ALLOW` environment variable, for example
+  `my-org/app:alice,bob;my-org/infra:alice`.
+  - The allowlist is deliberately not a setting. Agents can write Settings
+    through the API.
+  - Every attempt is logged under the `audit` tracing target, and a merged
+    result has `admin_bypass: true`.
+- **`force`.** `merge_pr force=true` skips Vibe Kanban's whole gate, including
+  failing checks, and lets GitHub decide. Use it only on explicit instruction.
+- **Errors.** Tool errors carry `vk_reported`. It is `true` when Vibe Kanban
+  answered and explained the failure, for example an unusable org token, a
+  merge refusal, or GitHub's own message. Restarting or refreshing MCP cannot
+  fix those, so agents act on the message instead. `error_kind` names the
+  typed error when there is one.
+
 ## Best Practices
 
 <Tip>
@@ -452,7 +488,12 @@ still confirm the post-restart registry and identify a configured server that
 registered no tools.
 
 Agents connected to the Vibe Kanban MCP server can call `restart_session`.
-Inside a scoped session, the session and workspace identifiers are optional. The
+Inside a scoped session, the session and workspace identifiers are optional.
+Elsewhere, pass `workspace_id`: agents find it in their `VK_WORKSPACE_ID`
+environment variable, or with `list_workspaces`. The session
+defaults to the workspace's only session. When there are several, the error
+lists them, and the caller passes one as `session_id`. `refresh_mcp_tools`
+works the same way. The
 backend accepts the restart before the current process exits, preserves the
 conversation, and starts a continuation from a fresh executor process.
 

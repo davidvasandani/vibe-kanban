@@ -1302,6 +1302,17 @@ impl GitService {
         }
     }
 
+    /// Whether `branch_name` is a local branch (`refs/heads/<name>`); unlike
+    /// [`Self::check_branch_exists`], a remote-tracking branch does not count.
+    pub fn local_branch_exists(
+        &self,
+        repo_path: &Path,
+        branch_name: &str,
+    ) -> Result<bool, GitServiceError> {
+        let repo = self.open_repo(repo_path)?;
+        Ok(repo.find_branch(branch_name, BranchType::Local).is_ok())
+    }
+
     pub fn rename_local_branch(
         &self,
         worktree_path: &Path,
@@ -1539,7 +1550,11 @@ impl GitService {
         credentials: &GitHubCredentials,
     ) -> Result<(), GitServiceError> {
         let repo = Repository::open(worktree_path)?;
-        self.check_worktree_clean(&repo)?;
+        // Uncommitted edits only matter for the branch they sit on: pushing
+        // another committed branch (a side PR's head) leaves them untouched.
+        if Self::is_checked_out(&repo, branch_name) {
+            self.check_worktree_clean(&repo)?;
+        }
 
         // Get the remote
         let remote = self.default_remote(&repo, worktree_path)?;
@@ -1601,6 +1616,16 @@ impl GitService {
                 self.push_to_remote(worktree_path, branch_name, false, credentials)?;
                 Ok(PushOutcome::Pushed)
             }
+        }
+    }
+
+    /// Whether `branch_name` is the branch checked out in this worktree. An
+    /// unreadable or detached HEAD counts as checked out, so the clean check
+    /// still applies when in doubt.
+    fn is_checked_out(repo: &Repository, branch_name: &str) -> bool {
+        match repo.head() {
+            Ok(head) if head.is_branch() => head.shorthand() == Some(branch_name),
+            _ => true,
         }
     }
 
