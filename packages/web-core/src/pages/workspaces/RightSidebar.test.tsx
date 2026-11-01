@@ -1,4 +1,5 @@
 /* @vitest-environment jsdom */
+vi.mock('./ArchiveProvenance', () => ({ ArchiveProvenance: () => null }));
 vi.mock('./useWorkspaceWakeups', () => ({
   useWorkspaceWakeups: () => ({ data: [], error: null }),
 }));

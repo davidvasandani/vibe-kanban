@@ -63,10 +63,21 @@ pub async fn validate_session(
     workspace: &Workspace,
     id: Uuid,
 ) -> Result<Session, ApiError> {
-    if workspace.archived || workspace.worktree_deleted {
-        return Err(ApiError::BadRequest(
-            "Cannot schedule in an archived or deleted workspace".into(),
-        ));
+    let worktree_exists = match workspace.container_ref.as_deref() {
+        Some(path) => tokio::fs::metadata(path)
+            .await
+            .is_ok_and(|metadata| metadata.is_dir()),
+        None => false,
+    };
+    if workspace.worktree_deleted || !worktree_exists {
+        let events = Workspace::archive_provenance(pool, workspace.id).await?;
+        let origin = events
+            .first()
+            .map(|e| format!("{} at {}", e.rule, e.triggered_at))
+            .unwrap_or_else(|| "unknown legacy or manual archive rule".into());
+        return Err(ApiError::BadRequest(format!(
+            "Cannot schedule: workspace worktree is unavailable; archive origin: {origin}. Restore the worktree and retry. An archived workspace with an existing worktree is reactivated automatically when scheduling."
+        )));
     }
     let session = Session::find_by_id(pool, id)
         .await?
@@ -94,7 +105,14 @@ pub async fn schedule(
         trigger_context: None,
         created_at: now,
     };
-    if !row.insert(&deployment.db().pool).await? {
+    let inserted = row
+        .insert(&deployment.db().pool)
+        .await
+        .map_err(|error| match error {
+            sqlx::Error::Protocol(message) => ApiError::BadRequest(message),
+            other => ApiError::from(other),
+        })?;
+    if !inserted {
         return Err(ApiError::BadRequest(
             "Wake-up limit reached: eight pending or 32 total per session".into(),
         ));
@@ -255,6 +273,68 @@ mod tests {
     use super::*;
 
     #[cfg(unix)]
+    #[tokio::test]
+    async fn unavailable_worktree_error_names_archive_rule_and_recovery() {
+        use db::models::{session::CreateSession, workspace::CreateWorkspace};
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("../db/migrations").run(&pool).await.unwrap();
+        let id = Uuid::new_v4();
+        Workspace::create(
+            &pool,
+            &CreateWorkspace {
+                branch: "archived-timer".into(),
+                name: None,
+            },
+            id,
+        )
+        .await
+        .unwrap();
+        Workspace::record_archive_intent(&pool, id, "done-event", "issue_done", Utc::now())
+            .await
+            .unwrap();
+        assert!(
+            Workspace::try_archive_automatically(&pool, id)
+                .await
+                .unwrap()
+        );
+        let sid = Uuid::new_v4();
+        Session::create(
+            &pool,
+            &CreateSession {
+                executor: None,
+                name: None,
+            },
+            sid,
+            id,
+        )
+        .await
+        .unwrap();
+        let workspace = Workspace::find_by_id(&pool, id).await.unwrap().unwrap();
+        let message = validate_session(&pool, &workspace, sid)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("issue_done"));
+        assert!(message.contains("Restore the worktree"));
+        sqlx::query("UPDATE workspaces SET container_ref = ? WHERE id = ?")
+            .bind(std::env::temp_dir().to_string_lossy().as_ref())
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let workspace = Workspace::find_by_id(&pool, id).await.unwrap().unwrap();
+        assert!(validate_session(&pool, &workspace, sid).await.is_ok());
+        assert!(
+            validate_session(&pool, &workspace, Uuid::new_v4())
+                .await
+                .is_err()
+        );
+    }
+
     #[tokio::test]
     async fn receipt_reader_rejects_fifos_and_symlinks_without_waiting() {
         use std::{ffi::CString, os::unix::fs::symlink};

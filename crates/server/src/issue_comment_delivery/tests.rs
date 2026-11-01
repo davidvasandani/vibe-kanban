@@ -1711,6 +1711,18 @@ async fn wakeup_fires_once_without_remote_service() {
     f.waiting(session).await;
     f.backend.state().issue_error = Some(503);
     f.backend.state().comment_error = Some(503);
+    // Both completion sources remain pending while scheduling revives the
+    // workspace; the local timer must not depend on reopening the Done issue.
+    for (key, rule) in [("merge", "pr_merged"), ("done", "issue_done")] {
+        Workspace::record_archive_intent(&f.pool, workspace, key, rule, Utc::now())
+            .await
+            .unwrap();
+    }
+    assert!(
+        Workspace::try_archive_automatically(&f.pool, workspace)
+            .await
+            .unwrap()
+    );
     let row = wakeup(
         &f,
         workspace,
@@ -1718,8 +1730,18 @@ async fn wakeup_fires_once_without_remote_service() {
         Utc::now() - ChronoDuration::seconds(1),
     )
     .await;
+    assert!(
+        !Workspace::try_archive_automatically(&f.pool, workspace)
+            .await
+            .unwrap()
+    );
     f.dispatcher.sweep().await.unwrap();
     f.dispatcher.sweep().await.unwrap();
+    assert!(
+        !Workspace::try_archive_automatically(&f.pool, workspace)
+            .await
+            .unwrap()
+    );
     let state = f.backend.state();
     assert_eq!(state.starts.len(), 1);
     assert_eq!(state.starts[0].0, session);

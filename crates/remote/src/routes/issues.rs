@@ -261,6 +261,16 @@ async fn archive_workspaces_for_terminal_issue(
         return Ok(());
     };
 
+    // A new terminal transition is a new event even if a previous remote
+    // archive flag was never cleared. Local explicit-unarchive acknowledgements
+    // must not suppress this new completion event.
+    sqlx::query("INSERT INTO workspace_archive_events (workspace_id, rule) SELECT id, $2 FROM workspaces WHERE issue_id = $1 ON CONFLICT (workspace_id) DO UPDATE SET trigger_key = gen_random_uuid(), rule = EXCLUDED.rule, triggered_at = NOW()")
+        .bind(new_issue.id).bind(format!("issue_{}", terminal.to_lowercase()))
+        .execute(&mut *conn).await.map_err(|error| {
+            tracing::error!(?error, "failed to record terminal archive event");
+            ErrorResponse::new(StatusCode::INTERNAL_SERVER_ERROR, "failed to record archive event")
+        })?;
+
     let workspaces = WorkspaceRepository::list_active_by_issue_id(&mut *conn, new_issue.id)
         .await
         .map_err(|error| {
@@ -302,6 +312,19 @@ async fn archive_workspaces_for_terminal_issue(
         .map_err(|error| {
             tracing::error!(?error, issue_id = %new_issue.id, "failed to archive workspaces for terminal issue");
             ErrorResponse::new(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
+        })?;
+
+    sqlx::query("UPDATE workspace_archive_events SET rule = $1 WHERE workspace_id = ANY($2)")
+        .bind(format!("issue_{}", terminal.to_lowercase()))
+        .bind(workspaces.iter().map(|w| w.id).collect::<Vec<_>>())
+        .execute(&mut *conn)
+        .await
+        .map_err(|error| {
+            tracing::error!(?error, "failed to record terminal archive provenance");
+            ErrorResponse::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to record archive provenance",
+            )
         })?;
 
     tracing::info!(

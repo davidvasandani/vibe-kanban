@@ -10,6 +10,26 @@ use super::{
     remote_client::{RemoteClient, RemoteClientError},
 };
 
+/// Activity can temporarily reactivate a completed workspace without withdrawing
+/// its completion event. Only explicit unarchive acknowledges those events.
+/// Omit the archive field from activity/statistics sync while a hold is in effect.
+pub async fn activity_archive_state(
+    pool: &SqlitePool,
+    workspace_id: Uuid,
+    archived: bool,
+) -> Result<Option<bool>, sqlx::Error> {
+    if archived {
+        return Ok(Some(true));
+    }
+    let pending: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM workspace_archive_intents WHERE workspace_id = $1 AND NOT acknowledged)",
+    )
+    .bind(workspace_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(if pending { None } else { Some(false) })
+}
+
 /// Persist accepted workspace activity and promptly propagate it to the issue store.
 /// Remote failure remains best effort, as with explicit workspace edits.
 pub async fn activate_workspace(
@@ -18,7 +38,11 @@ pub async fn activate_workspace(
     workspace_id: Uuid,
 ) -> Result<(), sqlx::Error> {
     Workspace::set_archived(pool, workspace_id, false).await?;
-    if let Some(client) = client {
+    if activity_archive_state(pool, workspace_id, false)
+        .await?
+        .is_some()
+        && let Some(client) = client
+    {
         // Also reconcile an already-active local workspace after a previous
         // sync failure or a remote issue-driven archive.
         let client = client.clone();
@@ -231,7 +255,9 @@ pub async fn sync_all_linked_workspaces(
             client,
             workspace.id,
             workspace.name.clone().map(Some),
-            Some(workspace.archived),
+            activity_archive_state(pool, workspace.id, workspace.archived)
+                .await
+                .unwrap_or(None),
             stats.as_ref(),
         )
         .await;
@@ -258,6 +284,12 @@ mod lifecycle_tests {
         .execute(&pool)
         .await
         .unwrap();
+        sqlx::query(
+            "CREATE TABLE workspace_archive_intents (workspace_id BLOB, acknowledged BOOLEAN)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
         let workspace = Uuid::new_v4();
         sqlx::query("INSERT INTO workspaces (id, archived) VALUES ($1, true)")
             .bind(workspace)
@@ -266,10 +298,13 @@ mod lifecycle_tests {
             .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let received = requests.clone();
         let server = tokio::spawn(async move {
             let mut patches = 0;
             for _ in 0..4 {
                 let (mut stream, _) = listener.accept().await.unwrap();
+                received.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let mut request = Vec::new();
                 let mut buf = [0; 4096];
                 loop {
@@ -313,6 +348,36 @@ mod lifecycle_tests {
             Default::default(),
         );
         let client = RemoteClient::new(&format!("http://{address}"), auth, true).unwrap();
+        // A scheduled follow-up is activity, not an explicit unarchive. Its
+        // activation and completion sync must leave remote Done/archive intact.
+        sqlx::query("INSERT INTO workspace_archive_intents VALUES ($1, false)")
+            .bind(workspace)
+            .execute(&pool)
+            .await
+            .unwrap();
+        activate_workspace(&pool, Some(&client), workspace)
+            .await
+            .unwrap();
+        assert_eq!(
+            activity_archive_state(&pool, workspace, false)
+                .await
+                .unwrap(),
+            None
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), async {
+                while !server.is_finished() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .is_err()
+        );
+        assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 0);
+        sqlx::query("UPDATE workspace_archive_intents SET acknowledged = true")
+            .execute(&pool)
+            .await
+            .unwrap();
         for _ in 0..2 {
             activate_workspace(&pool, Some(&client), workspace)
                 .await

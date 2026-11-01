@@ -63,13 +63,21 @@ pub async fn archive_workspace_automatically(
     if current.archived {
         return Ok(ResponseJson(ApiResponse::success("already_archived")));
     }
-    let remote = deployment
+    let Some(event) = deployment
         .remote_client()?
-        .get_workspace_by_local_id(workspace.id)
-        .await?;
-    if !remote.archived {
+        .get_workspace_archive_intent(workspace.id)
+        .await?
+    else {
         return Ok(ResponseJson(ApiResponse::success("not_requested")));
-    }
+    };
+    Workspace::record_archive_intent(
+        &deployment.db().pool,
+        workspace.id,
+        &event.trigger_key,
+        &event.rule,
+        event.triggered_at,
+    )
+    .await?;
     let archived = deployment
         .container()
         .archive_workspace_automatically(workspace.id)
@@ -89,6 +97,16 @@ pub async fn update_workspace(
     let pool = &deployment.db().pool;
     let is_archiving = request.archived == Some(true) && !workspace.archived;
 
+    if is_archiving {
+        Workspace::record_archive_intent(
+            pool,
+            workspace.id,
+            &format!("manual:{}", uuid::Uuid::new_v4()),
+            "manual_archive",
+            chrono::Utc::now(),
+        )
+        .await?;
+    }
     Workspace::update(
         pool,
         workspace.id,
@@ -239,4 +257,13 @@ pub async fn get_workspace_creation_progress(
 ) -> Result<ResponseJson<ApiResponse<WorkspaceCreationProgress>>, ApiError> {
     let progress = WorkspaceCreationProgress::find(&deployment.db().pool, workspace.id).await?;
     Ok(ResponseJson(ApiResponse::success(progress)))
+}
+
+pub async fn get_archive_provenance(
+    Extension(workspace): Extension<Workspace>,
+    State(deployment): State<DeploymentImpl>,
+) -> Result<ResponseJson<ApiResponse<Vec<db::models::workspace::ArchiveIntent>>>, ApiError> {
+    Ok(ResponseJson(ApiResponse::success(
+        Workspace::archive_provenance(&deployment.db().pool, workspace.id).await?,
+    )))
 }

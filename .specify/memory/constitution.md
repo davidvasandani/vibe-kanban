@@ -1419,3 +1419,10 @@ adding a parallel grouping. II requires unit tests for the grouping rules;
 IV applies because `web-core` changes reach both frontends. The homelab
 constitution named by the command template was not changed, because this
 project manages only the Vibe Kanban repository.
+
+## Review: vk/e8d6-wake-ups-an-auto
+
+Applied `/speckit.constitution`. II, V, VI, XI and XII govern this change:
+reuse automatic archive admission and durable delivery; persist explicit user
+intent and provenance; serialize scheduling and archive decisions; preserve
+remote transaction boundaries. No new principle is required.

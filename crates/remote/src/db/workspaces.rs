@@ -463,6 +463,52 @@ mod lifecycle_tests {
     }
 
     #[sqlx::test(migrations = false)]
+    async fn archive_event_is_stable_across_metadata_and_new_on_rearchive(pool: PgPool) {
+        let (workspace, _, _, _) = fixture(&pool).await;
+        sqlx::raw_sql(include_str!(
+            "../../migrations/20261031000000_workspace_archive_events.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        async fn key(pool: &PgPool, id: Uuid) -> Uuid {
+            sqlx::query_scalar(
+                "SELECT trigger_key FROM workspace_archive_events WHERE workspace_id = $1",
+            )
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+        }
+        let inserted = Uuid::new_v4();
+        sqlx::query("INSERT INTO workspaces (id, project_id, owner_user_id, archived) VALUES ($1, $2, $3, true)")
+            .bind(inserted).bind(Uuid::new_v4()).bind(Uuid::new_v4())
+            .execute(&pool).await.unwrap();
+        assert_ne!(key(&pool, inserted).await, Uuid::nil());
+        let original = key(&pool, workspace).await;
+        update(&pool, workspace, None).await.unwrap();
+        update(&pool, workspace, Some(true)).await.unwrap();
+        assert_eq!(key(&pool, workspace).await, original);
+        update(&pool, workspace, Some(false)).await.unwrap();
+        update(&pool, workspace, Some(true)).await.unwrap();
+        let next = key(&pool, workspace).await;
+        assert_ne!(next, original);
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("UPDATE workspaces SET archived = false WHERE id = $1")
+            .bind(workspace)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE workspaces SET archived = true WHERE id = $1")
+            .bind(workspace)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        tx.rollback().await.unwrap();
+        assert_eq!(key(&pool, workspace).await, next);
+    }
+
+    #[sqlx::test(migrations = false)]
     async fn reactivation_reopens_done_only_on_transition(pool: PgPool) {
         let (workspace, issue, done, progress) = fixture(&pool).await;
         assert!(update(&pool, workspace, None).await.unwrap().archived);

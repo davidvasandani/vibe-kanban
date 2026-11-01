@@ -264,6 +264,8 @@ speckit_feature_key: string | null,
  */
 speckit_host_repo_id: string | null, creation_status: WorkspaceCreationStatus, creation_error: string | null, };
 
+export type ArchiveIntent = { workspace_id: string, trigger_key: string, rule: string, triggered_at: string, archived_at: string | null, acknowledged: boolean, };
+
 export type WorkspaceWithStatus = { is_running: boolean, is_errored: boolean, id: string, task_id: string | null, container_ref: string | null, branch: string, setup_completed_at: string | null, created_at: string, updated_at: string, archived: boolean, pinned: boolean, name: string | null, worktree_deleted: boolean, 
 /**
  * Which numbered `## Pipeline` stage the execution agent last reported

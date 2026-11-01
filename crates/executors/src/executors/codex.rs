@@ -1596,9 +1596,20 @@ impl Codex {
             .env("RUST_LOG", "error")
             .args(&args);
 
-        env.clone()
-            .with_profile(&self.cmd)
-            .apply_to_command(&mut process);
+        let execution_env = env.clone().with_profile(&self.cmd);
+        let config_home = execution_env
+            .get("CODEX_HOME")
+            .map(PathBuf::from)
+            .or_else(codex_home);
+        if let Some(home) = config_home
+            && let Ok(content) = tokio::fs::read_to_string(home.join("config.toml")).await
+            && let Ok(mut document) = content.parse::<toml::Table>()
+        {
+            for override_value in crate::mcp_config::forward_codex_workspace_origin(&mut document) {
+                process.arg("-c").arg(override_value);
+            }
+        }
+        execution_env.apply_to_command(&mut process);
 
         let mut child = process.group_spawn_no_window()?;
 

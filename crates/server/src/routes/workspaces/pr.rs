@@ -572,8 +572,18 @@ pub async fn attach_existing_pr(
             let open_pr_count = PullRequest::count_open_for_workspace(pool, workspace.id).await?;
 
             if open_pr_count == 0 {
-                if !workspace.pinned
-                    && let Err(e) = deployment.container().archive_workspace(workspace.id).await
+                Workspace::record_archive_intent(
+                    pool,
+                    workspace.id,
+                    &format!("pr:{}", pr_info.url),
+                    "pr_merged",
+                    pr_info.merged_at.unwrap_or_else(chrono::Utc::now),
+                )
+                .await?;
+                if let Err(e) = deployment
+                    .container()
+                    .archive_workspace_automatically(workspace.id)
+                    .await
                 {
                     tracing::error!("Failed to archive workspace {}: {}", workspace.id, e);
                 }

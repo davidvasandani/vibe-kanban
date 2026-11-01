@@ -40,6 +40,7 @@ struct WorkspaceSummary {
     created_at: String,
     #[schemars(description = "Last update timestamp")]
     updated_at: String,
+    archive_provenance: serde_json::Value,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -200,11 +201,19 @@ impl McpServer {
         let offset = offset.unwrap_or(0).max(0) as usize;
         let limit = limit.unwrap_or(50).max(0) as usize;
 
-        let workspace_summaries = workspaces
-            .into_iter()
-            .skip(offset)
-            .take(limit)
-            .map(|workspace| WorkspaceSummary {
+        let mut workspace_summaries = Vec::new();
+        for workspace in workspaces.into_iter().skip(offset).take(limit) {
+            let archive_provenance: serde_json::Value = match self
+                .send_json(self.client.get(self.url(&format!(
+                    "/api/workspaces/{}/archive/provenance",
+                    workspace.id
+                ))))
+                .await
+            {
+                Ok(value) => value,
+                Err(error) => return Ok(Self::tool_error(error)),
+            };
+            workspace_summaries.push(WorkspaceSummary {
                 id: workspace.id.to_string(),
                 branch: workspace.branch,
                 archived: workspace.archived,
@@ -212,8 +221,9 @@ impl McpServer {
                 name: workspace.name,
                 created_at: workspace.created_at.to_rfc3339(),
                 updated_at: workspace.updated_at.to_rfc3339(),
-            })
-            .collect::<Vec<_>>();
+                archive_provenance,
+            });
+        }
 
         McpServer::success(&McpListWorkspacesResponse {
             returned_count: workspace_summaries.len(),
