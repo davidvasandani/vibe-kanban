@@ -8,6 +8,6 @@ Applied `/speckit.tasks`. Dependencies flow top to bottom; independent file grou
 - [x] T004 Propagate exact origin in `crates/local-deployment/src/container.rs`; resolve it in `crates/mcp/src/task_server/tools/pollers.rs`. Independent of T001–T003.
 - [x] T005 Expose provenance in workspace API, MCP list and shared workspace UI. Depends T001.
 - [ ] T006 Add regression tests beside changed modules; format and run relevant verification. Depends T002–T005.
-- [ ] T007 Run independent Codex diff review, address confirmed findings and reverify.
-- [ ] T008 Update `wiki/durable-session-wakeups.md`, `wiki/issue-workspace-lifecycle.md` and `wiki/INDEX.md`; commit knowledge.
+- [x] T007 Run independent Codex diff review, address confirmed findings and reverify.
+- [x] T008 Update `wiki/durable-session-wakeups.md`, `wiki/issue-workspace-lifecycle.md` and `wiki/INDEX.md`; commit knowledge.
 - [ ] T009 Open PR, verify checks and merge against the repository base branch.
