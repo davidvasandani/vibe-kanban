@@ -35,6 +35,7 @@ pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
             "/archive/automatic",
             post(core::archive_workspace_automatically),
         )
+        .route("/archive/provenance", get(core::get_archive_provenance))
         .route("/messages/first", get(core::get_first_user_message))
         .route("/placement", get(core::get_workspace_placement))
         .route(

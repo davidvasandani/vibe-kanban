@@ -1,8 +1,11 @@
 # Implementation plan
 
-1. Read the affected durable timer and session state, prior knowledge, dispatcher selection and startup wiring. Establish evidence for why zero attempts were made.
-2. Complete SpecKit constitution, specification, clarification, technical plan, task breakdown and analysis in the task feature directory named by the workspace commands.
-3. Add a regression test for the confirmed cause and implement the narrowest correction, preserving serialization, launch evidence and cancellation.
-4. Install locked dependencies, run relevant regression tests and repository formatting; record limitations accurately.
-5. Run independent Codex CLI review and fix significant findings.
-6. Record reusable findings in the project wiki, commit artifacts, open and merge the reviewed PR(s).
+1. Persist archive trigger/provenance and explicit-unarchive acknowledgement without changing existing workspace row decoding unnecessarily.
+2. Route merge paths and remote reconciliation through one guarded automatic admission method. Retain blocked intent for periodic retry; compare explicit-unarchive acknowledgement at the write boundary.
+3. Atomically reactivate the local workspace when accepting a valid wake-up. Preserve remote completion intent and existing delivery machinery.
+4. Propagate originating session identity alongside workspace identity and use it for omitted MCP targets, without guessing among sessions.
+5. Expose archive provenance in workspace listing and UI, and improve unavailable-worktree errors.
+6. Add regression tests for holds, release, races, context defaults, scheduling, and diagnostics. Run required setup, formatting, and relevant validation.
+7. Run independent Codex review, fix findings, update knowledge pages, commit, open PR, verify checks, and merge.
+
+Detailed SpecKit artifacts follow in specs/vk/e8d6-wake-ups-an-auto/. Prior knowledge is recorded at ../PRIOR_KNOWLEDGE.md. Only Vibe Kanban service files are in scope.

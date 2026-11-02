@@ -33,6 +33,13 @@ use uuid::Uuid;
 
 use super::{auth::AuthContext, oauth_credentials::Credentials};
 
+#[derive(Debug, Deserialize)]
+pub struct RemoteArchiveIntent {
+    pub trigger_key: String,
+    pub rule: String,
+    pub triggered_at: chrono::DateTime<chrono::Utc>,
+}
+
 #[derive(Debug, Clone, Error)]
 pub enum RemoteClientError {
     #[error("network error: {0}")]
@@ -723,6 +730,14 @@ impl RemoteClient {
         local_workspace_id: Uuid,
     ) -> Result<Workspace, RemoteClientError> {
         self.get_authed(&format!("/v1/workspaces/by-local-id/{local_workspace_id}"))
+            .await
+    }
+
+    pub async fn get_workspace_archive_intent(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<RemoteArchiveIntent>, RemoteClientError> {
+        self.get_authed(&format!("/v1/workspaces/by-local-id/{id}/archive-intent"))
             .await
     }
 

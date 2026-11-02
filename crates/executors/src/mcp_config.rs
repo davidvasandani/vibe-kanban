@@ -246,6 +246,39 @@ pub enum CodexConfigMode<'a> {
     Refresh,
 }
 
+/// Forward names, never values, through Codex's restricted stdio MCP environment.
+/// Returns equivalent per-process overrides for coordinator-local launches.
+pub fn forward_codex_workspace_origin(document: &mut toml::Table) -> Vec<String> {
+    let mut overrides = Vec::new();
+    let Some(servers) = document
+        .get_mut("mcp_servers")
+        .and_then(toml::Value::as_table_mut)
+    else {
+        return overrides;
+    };
+    for name in ["vibe_kanban", "vibe-kanban"] {
+        let Some(server) = servers.get_mut(name).and_then(toml::Value::as_table_mut) else {
+            continue;
+        };
+        if !server.contains_key("command") || server.contains_key("url") {
+            continue;
+        }
+        let env_vars = server
+            .entry("env_vars")
+            .or_insert_with(|| toml::Value::Array(Vec::new()));
+        let Some(names) = env_vars.as_array_mut() else {
+            continue;
+        };
+        for key in ["VK_WORKSPACE_ID", "VK_SESSION_ID"] {
+            if !names.iter().any(|value| value.as_str() == Some(key)) {
+                names.push(toml::Value::String(key.into()));
+            }
+        }
+        overrides.push(format!("mcp_servers.{name}.env_vars={env_vars}"));
+    }
+    overrides
+}
+
 pub async fn write_scoped_codex_config(
     source: &Path,
     target: &Path,
@@ -270,6 +303,7 @@ pub async fn write_scoped_codex_config(
         let value = toml::Value::try_from(servers).map_err(|_| CodexConfigError::Serialize)?;
         document.insert("mcp_servers".into(), value);
     }
+    forward_codex_workspace_origin(&mut document);
     if let CodexConfigMode::Initial {
         authorized_directory,
     } = mode
@@ -1669,6 +1703,44 @@ mod tests {
 #[cfg(test)]
 mod scoped_codex_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn origin_forwarding_preserves_native_config_and_existing_names() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source.toml");
+        let target = root.path().join("scoped/config.toml");
+        let content = "[mcp_servers.vibe_kanban]\ncommand = 'vk-mcp'\nenv_vars = ['CUSTOM', 'VK_SESSION_ID']\n[mcp_servers.other]\ncommand = 'other'\n";
+        fs::write(&source, content).await.unwrap();
+        write_scoped_codex_config(
+            &source,
+            &target,
+            CodexConfigMode::Initial {
+                authorized_directory: root.path(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        write_scoped_codex_config(&target, &target, CodexConfigMode::Refresh, None)
+            .await
+            .unwrap();
+        let mut config: toml::Table = fs::read_to_string(&target).await.unwrap().parse().unwrap();
+        let overrides = forward_codex_workspace_origin(&mut config);
+        let names = config["mcp_servers"]["vibe_kanban"]["env_vars"]
+            .as_array()
+            .unwrap();
+        assert_eq!(names.len(), 3);
+        assert!(names.iter().any(|v| v.as_str() == Some("CUSTOM")));
+        assert!(names.iter().any(|v| v.as_str() == Some("VK_WORKSPACE_ID")));
+        assert_eq!(overrides.len(), 1);
+        assert!(overrides[0].contains("VK_SESSION_ID"));
+        assert!(config["mcp_servers"]["other"].get("env_vars").is_none());
+        assert_eq!(fs::read_to_string(&source).await.unwrap(), content);
+        let mut http: toml::Table = "[mcp_servers.vibe_kanban]\nurl = 'https://example.test/mcp'"
+            .parse()
+            .unwrap();
+        assert!(forward_codex_workspace_origin(&mut http).is_empty());
+    }
 
     #[tokio::test]
     async fn scoped_sqlite_index_overrides_shared_home_and_survives_refresh() {

@@ -2959,7 +2959,16 @@ impl LocalContainerService {
                     let client = client.clone();
                     let workspace_id = ctx.workspace.id;
                     let workspace_name = current_workspace.as_ref().and_then(|ws| ws.name.clone());
-                    let archived = current_workspace.map(|ws| ws.archived);
+                    let archived = match current_workspace {
+                        Some(ws) => remote_sync::activity_archive_state(
+                            &container.db.pool,
+                            ws.id,
+                            ws.archived,
+                        )
+                        .await
+                        .unwrap_or(None),
+                        None => None,
+                    };
                     tokio::spawn(async move {
                         remote_sync::sync_workspace_to_remote(
                             &client,
@@ -5110,6 +5119,10 @@ impl ContainerService for LocalContainerService {
         // not necessarily valid on a heterogeneous worker.
         environment.extend(workspace_go_environment(Path::new(&workspace_path), None));
         environment.insert("VK_WORKSPACE_ID".into(), workspace.id.to_string());
+        environment.insert(
+            "VK_SESSION_ID".into(),
+            execution_process.session_id.to_string(),
+        );
         environment.insert("VK_WORKSPACE_BRANCH".into(), workspace.branch.clone());
 
         let executor_config = match executor_action.typ() {
@@ -5487,6 +5500,7 @@ impl ContainerService for LocalContainerService {
 
         // Always inject workspace/session context (wins over any org var above).
         env.insert("VK_WORKSPACE_ID", workspace.id.to_string());
+        env.insert("VK_SESSION_ID", execution_process.session_id.to_string());
         env.insert("VK_WORKSPACE_BRANCH", &workspace.branch);
 
         // Expose app-installed CLI tools (services::cli_tools) to agents.
@@ -6760,6 +6774,7 @@ mod warm_tests {
     fn organization_environment_cannot_replace_runtime_contract() {
         for name in [
             "VK_WORKSPACE_ID",
+            "VK_SESSION_ID",
             "VK_WORKSPACE_BRANCH",
             "GOBIN",
             "GOCACHE",

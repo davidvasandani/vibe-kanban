@@ -249,8 +249,18 @@ pub async fn merge_workspace(
         });
     }
 
-    if !workspace.pinned
-        && let Err(e) = deployment.container().archive_workspace(workspace.id).await
+    Workspace::record_archive_intent(
+        pool,
+        workspace.id,
+        &format!("merge:{merge_commit_id}"),
+        "local_merge",
+        chrono::Utc::now(),
+    )
+    .await?;
+    if let Err(e) = deployment
+        .container()
+        .archive_workspace_automatically(workspace.id)
+        .await
     {
         tracing::error!("Failed to archive workspace {}: {}", workspace.id, e);
     }

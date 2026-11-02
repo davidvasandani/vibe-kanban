@@ -39,6 +39,16 @@ struct WorkspaceContainerRefRow {
 }
 
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize, TS)]
+pub struct ArchiveIntent {
+    pub workspace_id: Uuid,
+    pub trigger_key: String,
+    pub rule: String,
+    pub triggered_at: DateTime<Utc>,
+    pub archived_at: Option<DateTime<Utc>>,
+    pub acknowledged: bool,
+}
+
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize, TS)]
 pub struct Workspace {
     pub id: Uuid,
     pub task_id: Option<Uuid>,
@@ -797,16 +807,69 @@ impl Workspace {
             .map(|(workspace_id, _)| workspace_id)
     }
 
+    /// A completion event is durable even when ongoing work defers its admission.
+    pub async fn record_archive_intent(
+        pool: &SqlitePool,
+        workspace_id: Uuid,
+        trigger_key: &str,
+        rule: &str,
+        triggered_at: DateTime<Utc>,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("INSERT OR IGNORE INTO workspace_archive_intents (workspace_id, trigger_key, rule, triggered_at, acknowledged) VALUES (?, ?, ?, ?, EXISTS (SELECT 1 FROM workspace_archive_overrides WHERE workspace_id = ? AND julianday(unarchived_at) >= julianday(?)))")
+            .bind(workspace_id).bind(trigger_key).bind(rule).bind(triggered_at)
+            .bind(workspace_id).bind(triggered_at).execute(pool).await?;
+        Ok(())
+    }
+
+    pub async fn archive_provenance(
+        pool: &SqlitePool,
+        workspace_id: Uuid,
+    ) -> Result<Vec<ArchiveIntent>, sqlx::Error> {
+        sqlx::query_as("SELECT * FROM workspace_archive_intents WHERE workspace_id = ? ORDER BY triggered_at DESC")
+            .bind(workspace_id).fetch_all(pool).await
+    }
+
+    pub async fn acknowledge_archive_intent(
+        pool: &SqlitePool,
+        workspace_id: Uuid,
+        trigger_key: &str,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE workspace_archive_intents SET acknowledged = TRUE WHERE workspace_id = ? AND trigger_key = ?")
+            .bind(workspace_id).bind(trigger_key).execute(pool).await?;
+        Ok(())
+    }
+
+    pub async fn pending_archive_workspaces(pool: &SqlitePool) -> Result<Vec<Uuid>, sqlx::Error> {
+        sqlx::query_scalar("SELECT DISTINCT i.workspace_id FROM workspace_archive_intents i JOIN workspaces w ON w.id = i.workspace_id WHERE i.acknowledged = FALSE AND w.archived = FALSE")
+            .fetch_all(pool).await
+    }
+
     /// Admit remote-driven archival using current local state in the same write
     /// that changes the flag. A false result must never trigger archive cleanup.
     pub async fn try_archive_automatically(
         pool: &SqlitePool,
         workspace_id: Uuid,
     ) -> Result<bool, sqlx::Error> {
-        Ok(sqlx::query(
+        Self::try_archive_with_remote_intents(pool, workspace_id, true).await
+    }
+
+    pub async fn try_archive_with_remote_intents(
+        pool: &SqlitePool,
+        workspace_id: Uuid,
+        allow_remote_intents: bool,
+    ) -> Result<bool, sqlx::Error> {
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+        let archived = sqlx::query(
             r#"
             UPDATE workspaces SET archived = TRUE, updated_at = datetime('now', 'subsec')
             WHERE id = $1 AND archived = FALSE AND pinned = FALSE
+              AND EXISTS (SELECT 1 FROM workspace_archive_intents i
+                WHERE i.workspace_id = workspaces.id AND i.acknowledged = FALSE
+                  AND ($2 OR (substr(i.rule, 1, 6) != 'issue_'
+                    AND substr(i.rule, 1, 7) != 'remote_' AND i.rule != 'legacy_remote_archive'))
+                  AND (i.rule != 'pr_merged' OR NOT EXISTS (
+                    SELECT 1 FROM pull_requests pr WHERE pr.workspace_id = workspaces.id AND pr.pr_status = 'open'
+                  )))
               AND NOT EXISTS (
                 SELECT 1 FROM execution_processes ep
                 JOIN sessions s ON s.id = ep.session_id
@@ -828,10 +891,19 @@ impl Workspace {
             "#,
         )
         .bind(workspace_id)
-        .execute(pool)
+        .bind(allow_remote_intents)
+        .execute(&mut *tx)
         .await?
         .rows_affected()
-            == 1)
+            == 1;
+        if archived {
+            // Attribute the transition only to an eligible event. A deferred
+            // remote event must not receive credit for a local-only archive.
+            sqlx::query("UPDATE workspace_archive_intents SET archived_at = ? WHERE workspace_id = ? AND trigger_key = (SELECT trigger_key FROM workspace_archive_intents i WHERE i.workspace_id = ? AND i.acknowledged = FALSE AND (? OR (substr(i.rule, 1, 6) != 'issue_' AND substr(i.rule, 1, 7) != 'remote_' AND i.rule != 'legacy_remote_archive')) AND (i.rule != 'pr_merged' OR NOT EXISTS (SELECT 1 FROM pull_requests pr WHERE pr.workspace_id = i.workspace_id AND pr.pr_status = 'open')) ORDER BY triggered_at DESC, trigger_key LIMIT 1)")
+                .bind(Utc::now()).bind(workspace_id).bind(workspace_id).bind(allow_remote_intents).execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        Ok(archived)
     }
 
     pub async fn set_archived(
@@ -862,6 +934,17 @@ impl Workspace {
         let name_value = name.filter(|s| !s.is_empty());
         let name_provided = name.is_some();
 
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+        if archived == Some(false) {
+            sqlx::query("INSERT INTO workspace_archive_overrides VALUES (?, ?) ON CONFLICT(workspace_id) DO UPDATE SET unarchived_at = excluded.unarchived_at")
+                .bind(workspace_id).bind(Utc::now()).execute(&mut *tx).await?;
+            sqlx::query(
+                "UPDATE workspace_archive_intents SET acknowledged = TRUE WHERE workspace_id = ?",
+            )
+            .bind(workspace_id)
+            .execute(&mut *tx)
+            .await?;
+        }
         sqlx::query!(
             r#"UPDATE workspaces SET
                 archived = COALESCE($1, archived),
@@ -875,8 +958,13 @@ impl Workspace {
             name_value,
             workspace_id
         )
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+        if archived == Some(true) {
+            sqlx::query("UPDATE workspace_archive_intents SET archived_at = ? WHERE workspace_id = ? AND rule = 'manual_archive' AND archived_at IS NULL AND acknowledged = FALSE")
+                .bind(Utc::now()).bind(workspace_id).execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
 
@@ -1307,6 +1395,9 @@ mod tests {
             )
             .await
             .unwrap();
+            Workspace::record_archive_intent(&pool, id, "test-merge", "pr_merged", Utc::now())
+                .await
+                .unwrap();
             // The relevant execution is in the older session; a latest-session
             // check would miss it.
             let session_id = Uuid::new_v4();
@@ -1439,6 +1530,349 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn explicit_unarchive_acknowledges_old_events_in_both_race_orders() {
+        let pool = test_pool().await;
+        for archive_first in [true, false] {
+            let id = Uuid::new_v4();
+            Workspace::create(
+                &pool,
+                &CreateWorkspace {
+                    branch: id.to_string(),
+                    name: None,
+                },
+                id,
+            )
+            .await
+            .unwrap();
+            let old = Utc::now() - chrono::Duration::minutes(1);
+            if archive_first {
+                Workspace::record_archive_intent(&pool, id, "old", "issue_done", old)
+                    .await
+                    .unwrap();
+                assert!(
+                    Workspace::try_archive_automatically(&pool, id)
+                        .await
+                        .unwrap()
+                );
+            }
+            Workspace::update(&pool, id, Some(false), None, None)
+                .await
+                .unwrap();
+            // A remote read started before unarchive may complete afterwards.
+            Workspace::record_archive_intent(&pool, id, "old", "issue_done", old)
+                .await
+                .unwrap();
+            assert!(
+                !Workspace::try_archive_automatically(&pool, id)
+                    .await
+                    .unwrap()
+            );
+            assert!(Workspace::archive_provenance(&pool, id).await.unwrap()[0].acknowledged);
+            Workspace::record_archive_intent(
+                &pool,
+                id,
+                "new",
+                "pr_merged",
+                Utc::now() + chrono::Duration::seconds(1),
+            )
+            .await
+            .unwrap();
+            assert!(
+                Workspace::try_archive_automatically(&pool, id)
+                    .await
+                    .unwrap()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn merge_then_schedule_reactivates_and_holds_until_last_cancellation() {
+        use crate::models::{
+            session::{CreateSession, Session},
+            wakeup::Wakeup,
+        };
+        let pool = test_pool().await;
+        let id = Uuid::new_v4();
+        Workspace::create(
+            &pool,
+            &CreateWorkspace {
+                branch: "timer".into(),
+                name: None,
+            },
+            id,
+        )
+        .await
+        .unwrap();
+        let sid = Uuid::new_v4();
+        Session::create(
+            &pool,
+            &CreateSession {
+                executor: None,
+                name: None,
+            },
+            sid,
+            id,
+        )
+        .await
+        .unwrap();
+        Workspace::record_archive_intent(&pool, id, "merge", "pr_merged", Utc::now())
+            .await
+            .unwrap();
+        assert!(
+            Workspace::try_archive_automatically(&pool, id)
+                .await
+                .unwrap()
+        );
+        let row = Wakeup {
+            id: Uuid::new_v4(),
+            workspace_id: id,
+            session_id: sid,
+            fire_at: Utc::now() + chrono::Duration::minutes(1),
+            prompt: "exact stored follow-up".into(),
+            poller_id: None,
+            receipt_path: None,
+            trigger_context: None,
+            created_at: Utc::now(),
+        };
+        assert!(row.insert(&pool).await.unwrap());
+        assert!(
+            !Workspace::find_by_id(&pool, id)
+                .await
+                .unwrap()
+                .unwrap()
+                .archived
+        );
+        assert!(
+            !Workspace::try_archive_automatically(&pool, id)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            Wakeup::find(&pool, row.id).await.unwrap().unwrap().prompt,
+            "exact stored follow-up"
+        );
+        let second = Wakeup {
+            id: Uuid::new_v4(),
+            ..row.clone()
+        };
+        assert!(second.insert(&pool).await.unwrap());
+        assert!(Wakeup::cancel(&pool, row.id, "operator").await.unwrap());
+        assert!(
+            !Workspace::try_archive_automatically(&pool, id)
+                .await
+                .unwrap()
+        );
+        assert!(Wakeup::cancel(&pool, second.id, "operator").await.unwrap());
+        assert!(
+            Workspace::try_archive_automatically(&pool, id)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn replacement_remote_event_remains_in_retry_set() {
+        let pool = test_pool().await;
+        let id = Uuid::new_v4();
+        Workspace::create(
+            &pool,
+            &CreateWorkspace {
+                branch: "replacement".into(),
+                name: None,
+            },
+            id,
+        )
+        .await
+        .unwrap();
+        Workspace::record_archive_intent(&pool, id, "old", "issue_done", Utc::now())
+            .await
+            .unwrap();
+        Workspace::update(&pool, id, None, Some(true), None)
+            .await
+            .unwrap();
+        Workspace::record_archive_intent(&pool, id, "replacement", "issue_cancelled", Utc::now())
+            .await
+            .unwrap();
+        Workspace::acknowledge_archive_intent(&pool, id, "old")
+            .await
+            .unwrap();
+        assert!(
+            Workspace::pending_archive_workspaces(&pool)
+                .await
+                .unwrap()
+                .contains(&id)
+        );
+        Workspace::update(&pool, id, None, Some(false), None)
+            .await
+            .unwrap();
+        assert!(
+            Workspace::try_archive_automatically(&pool, id)
+                .await
+                .unwrap()
+        );
+        let events = Workspace::archive_provenance(&pool, id).await.unwrap();
+        assert!(
+            events
+                .iter()
+                .find(|e| e.trigger_key == "replacement")
+                .unwrap()
+                .archived_at
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_outage_blocks_only_remote_intents() {
+        let pool = test_pool().await;
+        let id = Uuid::new_v4();
+        Workspace::create(
+            &pool,
+            &CreateWorkspace {
+                branch: "offline".into(),
+                name: None,
+            },
+            id,
+        )
+        .await
+        .unwrap();
+        Workspace::record_archive_intent(&pool, id, "remote", "issue_done", Utc::now())
+            .await
+            .unwrap();
+        assert!(
+            !Workspace::try_archive_with_remote_intents(&pool, id, false)
+                .await
+                .unwrap()
+        );
+        Workspace::record_archive_intent(&pool, id, "local", "pr_merged", Utc::now())
+            .await
+            .unwrap();
+        assert!(
+            Workspace::try_archive_with_remote_intents(&pool, id, false)
+                .await
+                .unwrap()
+        );
+        let events = Workspace::archive_provenance(&pool, id).await.unwrap();
+        assert!(
+            events
+                .iter()
+                .find(|e| e.trigger_key == "remote")
+                .unwrap()
+                .archived_at
+                .is_none()
+        );
+        assert!(
+            events
+                .iter()
+                .find(|e| e.trigger_key == "local")
+                .unwrap()
+                .archived_at
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn withdrawn_remote_intent_cannot_archive_after_hold_releases() {
+        let pool = test_pool().await;
+        let id = Uuid::new_v4();
+        Workspace::create(
+            &pool,
+            &CreateWorkspace {
+                branch: "withdrawn".into(),
+                name: None,
+            },
+            id,
+        )
+        .await
+        .unwrap();
+        Workspace::record_archive_intent(&pool, id, "remote-event", "issue_done", Utc::now())
+            .await
+            .unwrap();
+        Workspace::update(&pool, id, None, Some(true), None)
+            .await
+            .unwrap();
+        assert!(
+            !Workspace::try_archive_automatically(&pool, id)
+                .await
+                .unwrap()
+        );
+        Workspace::acknowledge_archive_intent(&pool, id, "remote-event")
+            .await
+            .unwrap();
+        Workspace::update(&pool, id, None, Some(false), None)
+            .await
+            .unwrap();
+        assert!(
+            !Workspace::try_archive_automatically(&pool, id)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !Workspace::pending_archive_workspaces(&pool)
+                .await
+                .unwrap()
+                .contains(&id)
+        );
+    }
+
+    #[tokio::test]
+    async fn refused_timer_does_not_unarchive_or_create_delivery() {
+        use crate::models::{
+            session::{CreateSession, Session},
+            wakeup::Wakeup,
+        };
+        let pool = test_pool().await;
+        let id = Uuid::new_v4();
+        Workspace::create(
+            &pool,
+            &CreateWorkspace {
+                branch: "limit".into(),
+                name: None,
+            },
+            id,
+        )
+        .await
+        .unwrap();
+        let sid = Uuid::new_v4();
+        Session::create(
+            &pool,
+            &CreateSession {
+                executor: None,
+                name: None,
+            },
+            sid,
+            id,
+        )
+        .await
+        .unwrap();
+        let mut row = Wakeup {
+            id: Uuid::new_v4(),
+            workspace_id: id,
+            session_id: sid,
+            fire_at: Utc::now(),
+            prompt: "continue".into(),
+            poller_id: None,
+            receipt_path: None,
+            trigger_context: None,
+            created_at: Utc::now(),
+        };
+        for _ in 0..8 {
+            row.id = Uuid::new_v4();
+            assert!(row.insert(&pool).await.unwrap());
+        }
+        Workspace::set_archived(&pool, id, true).await.unwrap();
+        row.id = Uuid::new_v4();
+        assert!(!row.insert(&pool).await.unwrap());
+        assert!(
+            Workspace::find_by_id(&pool, id)
+                .await
+                .unwrap()
+                .unwrap()
+                .archived
+        );
+        assert!(Wakeup::find(&pool, row.id).await.unwrap().is_none());
     }
 
     #[tokio::test]

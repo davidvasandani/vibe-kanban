@@ -1,6 +1,6 @@
 # Terminal-status side effects on the remote issue-update path
 
-**Contributing tasks:** `2f63-auto-archive-wor`, `f464-vk-workspace-mgm`, `vk/88c5-marking-an-issue`, `VAS-892`
+**Contributing tasks:** `2f63-auto-archive-wor`, `f464-vk-workspace-mgm`, `vk/88c5-marking-an-issue`, `VAS-892`, `VAS-910`
 
 How the remote/cloud server reacts to an issue changing status — specifically the
 "archive an issue's workspaces when it reaches a terminal status" behaviour — and
@@ -35,7 +35,9 @@ missed update. Keep it on the caller's connection.
   returns the canonical label for "Done" and for "Cancelled"/"Canceled". Known
   limitation: a project that *renames* Done/Cancelled won't trigger — accepted,
   and identical to how the original Done-only hook behaved.
-- **Early-out on empty:** `WorkspaceRepository::list_active_by_issue_id` then
+- **Persist the event first:** refresh `workspace_archive_events` for every linked
+  workspace on a new terminal transition, including already-archived rows. Then
+  **early-out on empty:** `WorkspaceRepository::list_active_by_issue_id` then
   return if empty; `archive_active_by_issue_id(issue_id)` flips `archived = TRUE`
   for that issue's active workspaces (both executor-generic → run in-tx).
 
@@ -97,7 +99,8 @@ Do not archive from the optimistically updated issue status: a rejected status
 mutation must leave local workspaces active. Persisted remote workspace archive
 flags are the reconciliation authority. The hook retries every 30 seconds while mounted as well as on subsequent
 snapshots. This is UI-mounted reconciliation; it does
-not provide backend convergence when neither relevant provider is mounted.
+not discover new remote events when neither relevant provider is mounted. Once
+an event has been recorded locally, the PR monitor retries it headlessly.
 
 `LinkedIssueContext.test.tsx` exercises the rendered provider with the real archive
 hook: delayed persisted state, optimistic rollback, initial snapshots, multiple
@@ -128,11 +131,14 @@ Dropped history is not evidence that an agent or poller stopped.
 Only a successful transition runs cleanup (preview revocation, helper stops,
 archive scripts). A refusal returns blocked and leaves remote archived=true
 pending. Do not restore remote archived=false just to reconcile refusal: remote
-reactivation can reopen a Done issue. Mounted reconciliation retries after
-blockers clear; there is no new headless worker. Explicit user archive keeps its
+reactivation can reopen a Done issue. Mounted reconciliation discovers remote events; the existing PR monitor also
+retries persisted intents after blockers clear. Explicit user archive keeps its
 existing unconditional behavior. Remote-read and database failures fail closed.
 
 Keep the guard and the archived write atomic; separate eligibility reads followed
 by the manual archive path allow activity to arrive between check and teardown.
 The remote read and local write are still separate stores, not a distributed
-transaction. New activity retains its existing local reactivation behavior.
+transaction. New activity retains local reactivation but omits remote archived=false while
+completion intent is unacknowledged. Explicit unarchive acknowledges old intent
+and records a cutoff; a genuinely new completion event can archive again.
+See `wiki/issue-workspace-lifecycle.md` for event identity and retry details.

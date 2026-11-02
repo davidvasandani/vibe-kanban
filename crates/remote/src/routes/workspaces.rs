@@ -46,6 +46,10 @@ pub(super) fn router() -> Router<AppState> {
         )
         .route("/workspaces/{workspace_id}", delete(unlink_workspace))
         .route(
+            "/workspaces/by-local-id/{local_workspace_id}/archive-intent",
+            get(get_archive_intent),
+        )
+        .route(
             "/workspaces/{local_workspace_id}/sync_issue_status_from_local_merge",
             post(sync_issue_status_from_local_merge),
         )
@@ -360,4 +364,22 @@ async fn workspace_exists(
             "workspace not found",
         ))
     }
+}
+
+/// Read stable archive provenance under the same project authorization as the workspace.
+async fn get_archive_intent(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<RequestContext>,
+    Path(local_workspace_id): Path<Uuid>,
+) -> Result<Json<Option<serde_json::Value>>, ErrorResponse> {
+    let workspace = WorkspaceRepository::find_by_local_id(state.pool(), local_workspace_id)
+        .await
+        .map_err(|e| db_error(e, "failed to find workspace"))?
+        .ok_or_else(|| ErrorResponse::new(StatusCode::NOT_FOUND, "workspace not found"))?;
+    ensure_project_access(state.pool(), ctx.user.id, workspace.project_id).await?;
+    let event: Option<serde_json::Value> = sqlx::query_scalar(
+        "SELECT jsonb_build_object('trigger_key', e.trigger_key, 'rule', e.rule, 'triggered_at', e.triggered_at) FROM workspace_archive_events e JOIN workspaces w ON w.id = e.workspace_id WHERE w.id = $1 AND w.archived")
+        .bind(workspace.id).fetch_optional(state.pool()).await
+        .map_err(|e| db_error(e, "failed to read archive intent"))?;
+    Ok(Json(event))
 }

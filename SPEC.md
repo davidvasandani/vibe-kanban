@@ -1,18 +1,19 @@
-# Scheduled wakeups remain pending
+# Durable wake-ups across workspace archival
 
-Investigate overdue durable wakeups in workspace 84ce5feb-390e-4879-8aa2-c07d36e933b6 and correct the confirmed cause within Vibe Kanban only.
+## Problem and evidence
+Follow-up work must remain schedulable after merge or issue completion. The current local wake-up API rejects the local Workspace archived flag; it does not read a remote cache. Explicit edits update that same SQLite store. Remote terminal-issue archival runs on status transitions, while local PR monitoring and merge routes still call unconditional archive. Remote archive reconciliation has activity guards already, but explicit unarchive does not persist an acknowledgement of the archive trigger.
+
+The October 25 incident's exact actor cannot be proved from current source alone. Record archive provenance so subsequent incidents are attributable.
 
 ## Required behavior
-Due wakeups must be reconsidered after restart and when their session becomes eligible. Active turns must retain serialization; cancelled or delivered wakeups must not run again. Persistent failure must be distinguishable from normal scheduling delay. Preserve existing durable state and avoid manually replaying user prompts during diagnosis.
+- Every automatic archive path protects active coding turns, running pollers, and pending or dispatching wake-ups.
+- Explicit unarchive acknowledges existing archive intent; repeated reconciliation cannot undo it. A genuinely new terminal-issue transition or merge may archive again.
+- Scheduling validates time, prompt, ownership, worktree availability, and limits, then atomically persists the wake-up and reactivates an archived workspace. Scheduling is a temporary hold, not permanent dismissal of completion intent. When the last continuation finishes or is cancelled, automatic archive can resume. Activity activation and metadata synchronization must preserve unacknowledged completion intent and must not reopen the remote Done issue.
+- Store archive rule, timestamp, and trigger identity. Expose provenance through workspace APIs, MCP listing, and UI. Errors for unavailable worktrees identify archive context and recovery action.
+- Workspace agents inherit their own workspace and session identity; global external clients without that identity must supply explicit targets. Never guess the latest session.
 
-## Investigation and acceptance
-Read affected wakeup/session state, trace scheduling and delivery ownership, and reproduce the confirmed failure with a focused regression test. Implement the smallest safe correction, verify existing delivery safeguards, document the causal evidence and operational limitations, obtain independent Codex review, record reusable project knowledge, and open and merge a PR against the repository base branch.
+## Implementation boundaries
+Only the Vibe Kanban repository and, if required for its context propagation, its homelab deployment configuration are in scope. Preserve explicit user archive semantics, delivery admission, timer limits, and prompt durability. Centralize automatic archive admission in the local database and cover races with transactional state changes. Preserve separate remote intent and local runtime authority.
 
-Root cause is not yet established. Deployment configuration changes, if necessary, are limited to the Vibe Kanban service in homelab/modules/vibe-kanban-rebuild.nix.
-
-## Confirmed cause and repair
-Production standalone startup in crates/server/src/main.rs bypasses the shared
-startup::initialize_deployment function, omitting the durable delivery dispatcher
-and startup reconciliation marker. Delegate to the shared initializer; preserve
-listener setup and shutdown behavior. See ../PRIOR_KNOWLEDGE.md and the SpecKit
-artifacts in ../homelab/specs/vk/d5c5-scheduled-wakeup/.
+## Validation
+Regression coverage must include merge then scheduling, issue Done plus pending timer, unarchive against stale archive requests, running poller and active turn holds, last wake-up release, missing worktree diagnostics, exact originating-session inference, and delayed dispatch of the stored prompt. Run repository formatting and appropriate Rust/frontend verification, independent Codex review, record reusable knowledge, then open and merge a PR after checks pass.

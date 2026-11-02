@@ -1,3 +1,4 @@
+import type { ArchiveIntent } from 'shared/types';
 import type { WakeupSummary } from 'shared/types';
 // Import all necessary types from shared types
 
@@ -2328,6 +2329,19 @@ export const searchApi = {
       options
     );
     return handleApiResponse<SearchResult[]>(response);
+  },
+};
+
+export const workspaceArchiveApi = {
+  provenance: async (
+    workspaceId: string,
+    signal?: AbortSignal
+  ): Promise<ArchiveIntent[]> => {
+    const response = await makeRequest(
+      `/api/workspaces/${workspaceId}/archive/provenance`,
+      { signal }
+    );
+    return handleApiResponse<ArchiveIntent[]>(response);
   },
 };
 

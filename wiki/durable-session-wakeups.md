@@ -4,7 +4,34 @@ An agent can schedule one future turn with `schedule_wakeup`: exactly one of
 RFC 3339 `fire_at` (with timezone) or positive `delay_secs`, plus
 `on_fire_prompt`. The deadline must be in the future and within seven days.
 `list_wakeups` and `cancel_wakeup` expose the durable record. The orchestrator
-can only target its own session. Global tooling must identify the target.
+can only target its own session. Workspace stdio tooling infers the target from paired `VK_WORKSPACE_ID` and
+`VK_SESSION_ID`; external global callers must identify it explicitly. Codex
+requires these names in the MCP server `env_vars` allowlist, including scoped
+configurations and coordinator-local launches. Parent-process environment alone
+is insufficient. Never infer the latest session.
+
+## Scheduling after completion (VAS-910)
+
+Scheduling on an archived workspace is allowed when its worktree still exists
+and the session belongs to it. Limit checks, reactivation, the wake-up record,
+and its delivery row commit in one SQLite immediate transaction. A rejected
+request cannot accidentally unarchive the workspace. Validate worktree availability
+from a fresh database read: poller preparation may create the worktree after
+the route captured its Workspace extension. Both the workspace-update
+and wake-up APIs read/write this local store; remote state is separate intent.
+
+Scheduling retains completion intent as a temporary hold. Pending/dispatching
+deliveries, running turns, and running pollers block every automatic archive
+source. After the last hold clears, the PR monitor retries persisted intent.
+Activity activation, completion statistics, and login sync omit archived=false
+while completion intent is unacknowledged, so a scheduled follow-up cannot
+reopen Done or erase the event that should archive it afterward.
+
+Explicit unarchive acknowledges old events, including delayed events older than
+its persisted cutoff. It survives repeated reconciliation until a new event.
+Explicit manual archive still takes precedence and can cancel pending timers.
+Missing/deleted worktree errors include known rule/time and restoration advice;
+legacy records honestly report unknown provenance.
 
 ## Delivery admission and restart
 
@@ -93,4 +120,6 @@ as a successful trigger.
 ## Contributed by
 
 - vk/5ae4-pollers-add-a-ti
+
+- VAS-910 (`vk/e8d6-wake-ups-an-auto`)
 - vk/d5c5-scheduled-wakeup

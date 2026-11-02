@@ -120,7 +120,7 @@ struct McpStopPollerResponse {
 struct ScheduleWakeupRequest {
     /// Workspace ID; defaults to the current workspace.
     workspace_id: Option<Uuid>,
-    /// Session ID; required in global mode, defaults to the originating session in orchestrator mode.
+    /// Session ID; defaults to the exact originating agent session. Required for external callers.
     session_id: Option<Uuid>,
     /// Timezone-aware RFC 3339 timestamp. Supply exactly one of fire_at or delay_secs.
     fire_at: Option<String>,
@@ -134,7 +134,7 @@ struct ScheduleWakeupRequest {
 struct ListWakeupsRequest {
     /// Workspace ID; defaults to the current workspace.
     workspace_id: Option<Uuid>,
-    /// Session ID; required in global mode, defaults to the originating session in orchestrator mode.
+    /// Session ID; defaults to the exact originating agent session. Required for external callers.
     session_id: Option<Uuid>,
 }
 
@@ -152,12 +152,27 @@ struct WakeupPayload {
     delivery: serde_json::Value,
 }
 
+fn parse_origin(workspace: Option<&str>, session: Option<&str>) -> Option<(Uuid, Uuid)> {
+    Some((
+        Uuid::parse_str(workspace?).ok()?,
+        Uuid::parse_str(session?).ok()?,
+    ))
+}
+
 impl McpServer {
+    fn origin_from_environment() -> Option<(Uuid, Uuid)> {
+        parse_origin(
+            std::env::var("VK_WORKSPACE_ID").ok().as_deref(),
+            std::env::var("VK_SESSION_ID").ok().as_deref(),
+        )
+    }
+
     /// Fail closed when scoped context is unavailable; never infer another session.
     fn resolve_wakeup_session(&self, explicit: Option<Uuid>) -> Result<Uuid, ToolError> {
         match self.mode() {
             McpMode::Global => {
-                explicit.ok_or_else(|| ToolError::message("session_id is required in global mode"))
+                explicit.or_else(|| Self::origin_from_environment().map(|(_, session)| session))
+                    .ok_or_else(|| ToolError::message("session_id is required outside a workspace agent session; supply workspace_id and session_id"))
             }
             McpMode::Orchestrator => {
                 let origin = self.orchestrator_session_id().ok_or_else(|| {
@@ -178,7 +193,10 @@ impl McpServer {
         workspace_id: Option<Uuid>,
         session_id: Option<Uuid>,
     ) -> Result<(Uuid, Uuid), ToolError> {
-        let workspace_id = self.resolve_workspace_id(workspace_id)?;
+        let workspace_id = self.resolve_workspace_id(
+            workspace_id
+                .or_else(|| Self::origin_from_environment().map(|(workspace, _)| workspace)),
+        )?;
         self.scope_allows_workspace(workspace_id)?;
         let session_id = self.resolve_wakeup_session(session_id)?;
         let session: Session = self
@@ -214,7 +232,7 @@ impl McpServer {
 #[tool_router(router = pollers_tools_router, vis = "pub")]
 impl McpServer {
     #[tool(
-        description = "Schedule a durable one-shot continuation on the originating agent session. Supply exactly one of fire_at (timezone-aware RFC 3339) or delay_secs, and on_fire_prompt. Maximum delay: 7 days; maximum 8 pending and 32 lifetime wake-ups per session (including poller wake-ups), so self-chaining is bounded. Survives turns and server restarts; overdue timers fire late with timing context. An active turn is never interrupted. Pending wake-ups are visible and cancellable in the workspace UI. Global callers must supply session_id."
+        description = "Schedule a durable one-shot continuation on the originating agent session. Supply exactly one of fire_at (timezone-aware RFC 3339) or delay_secs, and on_fire_prompt. Maximum delay: 7 days; maximum 8 pending and 32 lifetime wake-ups per session (including poller wake-ups), so self-chaining is bounded. Survives turns and server restarts; overdue timers fire late with timing context. An active turn is never interrupted. Pending wake-ups are visible and cancellable in the workspace UI. Workspace agents infer their originating workspace and session. External callers must supply workspace_id and session_id. Scheduling reactivates an archived workspace with an available worktree; pending timers block automatic archive."
     )]
     async fn schedule_wakeup(
         &self,
@@ -248,7 +266,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "List durable timer and poller wake-ups and their delivery status for the originating session. Global callers must supply session_id."
+        description = "List durable timer and poller wake-ups and their delivery status for the originating session. Workspace agents infer their originating workspace and session. External callers must supply workspace_id and session_id. Scheduling reactivates an archived workspace with an available worktree; pending timers block automatic archive."
     )]
     async fn list_wakeups(
         &self,
@@ -270,7 +288,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Cancel a pending wake-up belonging to the originating session. A successful cancellation guarantees it will not fire. Returns cancelled=false if delivery already started or it is no longer pending. Global callers must supply session_id."
+        description = "Cancel a pending wake-up belonging to the originating session. A successful cancellation guarantees it will not fire. Returns cancelled=false if delivery already started or it is no longer pending. Workspace agents infer their originating workspace and session. External callers must supply workspace_id and session_id. Scheduling reactivates an archived workspace with an available worktree; pending timers block automatic archive."
     )]
     async fn cancel_wakeup(
         &self,
@@ -448,6 +466,19 @@ mod tests {
     use executors::actions::script::{MAX_POLLER_INTERVAL_SECS, MIN_POLLER_INTERVAL_SECS};
 
     #[test]
+    fn exact_origin_requires_both_valid_ids() {
+        let workspace = uuid::Uuid::new_v4().to_string();
+        let session = uuid::Uuid::new_v4().to_string();
+        assert_eq!(
+            super::parse_origin(Some(&workspace), Some(&session)),
+            Some((workspace.parse().unwrap(), session.parse().unwrap()))
+        );
+        assert_eq!(super::parse_origin(Some(&workspace), None), None);
+        assert_eq!(super::parse_origin(None, Some(&session)), None);
+        assert_eq!(super::parse_origin(Some("invalid"), Some(&session)), None);
+    }
+
+    #[test]
     fn parses_stopping_rules_and_legacy_list_metadata() {
         let request: super::McpSpawnPollerRequest = serde_json::from_value(serde_json::json!({
             "command": "echo tick", "interval_secs": 60,
@@ -537,7 +568,10 @@ mod tests {
                 .is_err()
         );
         server.mode = super::McpMode::Global;
-        assert!(server.resolve_wakeup_session(None).is_err());
+        assert_eq!(
+            server.resolve_wakeup_session(None).ok(),
+            McpServer::origin_from_environment().map(|(_, id)| id)
+        );
         assert_eq!(
             server.resolve_wakeup_session(Some(session_id)).unwrap(),
             session_id

@@ -1,3 +1,4 @@
+import { ArchiveProvenance } from './ArchiveProvenance';
 import { useWorkspaceWakeups } from './useWorkspaceWakeups';
 import { memo, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -418,6 +419,12 @@ export const RightSidebar = memo(function RightSidebar({
   return (
     <div className="h-full min-h-0 border-l bg-secondary overflow-x-hidden overflow-y-auto">
       <div className="flex h-full min-h-0 flex-col divide-y border-b">
+        {selectedWorkspace && (
+          <ArchiveProvenance
+            workspaceId={selectedWorkspace.id}
+            archived={selectedWorkspace.archived}
+          />
+        )}
         {sections
           .filter((section) => section.visible)
           .map((section) => (

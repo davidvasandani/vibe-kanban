@@ -1526,7 +1526,22 @@ pub trait ContainerService {
         &self,
         workspace_id: Uuid,
     ) -> Result<bool, ContainerError> {
-        if !Workspace::try_archive_automatically(&self.db().pool, workspace_id).await? {
+        self.archive_workspace_with_remote_intents(workspace_id, true)
+            .await
+    }
+
+    async fn archive_workspace_with_remote_intents(
+        &self,
+        workspace_id: Uuid,
+        allow_remote_intents: bool,
+    ) -> Result<bool, ContainerError> {
+        if !Workspace::try_archive_with_remote_intents(
+            &self.db().pool,
+            workspace_id,
+            allow_remote_intents,
+        )
+        .await?
+        {
             return Ok(false);
         }
         self.cleanup_archived_workspace(workspace_id).await?;

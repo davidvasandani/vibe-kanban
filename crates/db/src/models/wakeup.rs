@@ -53,6 +53,17 @@ impl Wakeup {
         if total >= MAX_LIFETIME || pending >= MAX_PENDING {
             return Ok(false);
         }
+        let eligible: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM workspaces w JOIN sessions s ON s.workspace_id = w.id WHERE w.id = ? AND s.id = ? AND w.worktree_deleted = FALSE)")
+            .bind(self.workspace_id).bind(self.session_id).fetch_one(&mut *tx).await?;
+        if !eligible {
+            return Err(sqlx::Error::Protocol("Wake-up target is unavailable: restore its worktree and use a session belonging to this workspace".into()));
+        }
+        // Old archived rows predate provenance. Preserve their completion intent
+        // while admitting a temporary timer hold, without inventing an actor.
+        sqlx::query("INSERT OR IGNORE INTO workspace_archive_intents (workspace_id, trigger_key, rule, triggered_at, archived_at) SELECT id, 'legacy', 'legacy_archive_unknown', updated_at, updated_at FROM workspaces WHERE id = ? AND archived = TRUE AND NOT EXISTS (SELECT 1 FROM workspace_archive_intents WHERE workspace_id = ? AND acknowledged = FALSE)")
+            .bind(self.workspace_id).bind(self.workspace_id).execute(&mut *tx).await?;
+        sqlx::query("UPDATE workspaces SET archived = FALSE, updated_at = datetime('now', 'subsec') WHERE id = ?")
+            .bind(self.workspace_id).execute(&mut *tx).await?;
         sqlx::query("INSERT INTO wakeups VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
             .bind(self.id)
             .bind(self.workspace_id)
