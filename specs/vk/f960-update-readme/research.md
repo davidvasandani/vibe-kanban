@@ -25,7 +25,7 @@ Task: f960-update-readme. Examined the checked-out app at 906d62d4, existing REA
 ## Setup corrections and boundaries
 
 - rust-toolchain.toml pins nightly-2025-12-04; package.json pins pnpm 10.13.1. CI uses Node 22. Recommend Node 22.12+ or 24 rather than the old broad Node >=20 statement with Vite 7.
-- local-build.sh builds the local web, server, MCP, review, worker, remote and relay binaries plus the launcher. It installs npx-cli dependencies but needs root pnpm dependencies first. Headless build excludes Tauri; --desktop is optional with native prerequisites.
+- local-build.sh builds the local web, server, MCP, review, worker, remote and relay binaries plus the launcher. It installs npx-cli dependencies but needs root pnpm dependencies first. Its publish step also unconditionally uses flock, which must be installed on macOS. Headless build excludes Tauri; --desktop is optional with native prerequisites.
 - local-build.sh explicitly sets the hosted collaboration API at build time. Runtime VK_SHARED_API_BASE overrides it in crates/local-deployment/src/lib.rs. Explain this near the build command, so source build does not imply a full self-hosted collaboration stack.
 - BACKEND_PORT takes precedence over PORT. PREVIEW_PROXY_PORT is separate. VIBE_BACKEND_URL pins MCP backend routing; VIBE_KANBAN_MCP_COMMAND selects this build's MCP binary.
 - crates/remote/docker-compose.yml is a development baseline. remote:dev uses down -v; recommend remote:dev:persist for retained data. The relay is an optional profile, despite older local-development prose saying it always starts.

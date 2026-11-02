@@ -200,7 +200,8 @@ permissions and tools depend on the selected agent, account and profile.
 Build this repository to run its current feature set. The source build uses:
 
 - Git, a native C/C++ build toolchain, `pkg-config`, OpenSSL development libraries,
-  libclang and `zip` on Linux; equivalent build tools on macOS.
+  libclang on Linux; equivalent build tools on macOS.
+- `zip` and `flock` on PATH. macOS users need to install `flock` separately.
 - Rust through rustup, using the toolchain pinned in [rust-toolchain.toml](rust-toolchain.toml).
 - Node.js 22.12+ or 24 and pnpm 10.13.1, pinned in [package.json](package.json).
 - An authenticated coding agent and any tools required by your project.

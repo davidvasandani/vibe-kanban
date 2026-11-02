@@ -12,3 +12,6 @@ Task: f960-update-readme.
 
 - README parsed successfully using the installed Prettier Markdown parser. Root script references and all 17 literal architecture paths checked successfully.
 - Independent Codex review: no actionable findings, exit 0. See review.md.
+
+- PR opened against main: https://github.com/davidvasandani/vibe-kanban/pull/390. Final merge outcome is recorded by GitHub; merge-stage checkbox remains pending until that outcome exists.
+- Final prerequisite audit explicitly lists `flock`, used unconditionally by local-build.sh, including the macOS prerequisite.
