@@ -33,3 +33,9 @@ confirmed the fix and reported no introduced defects.
 Knowledge pages and index are committed. The latest main was merged; conflicts
 were confined to task-specific root specification/plan files, which retain this
 feature. No other service or homelab deployment was changed.
+
+A second integration pulled main 0493a8a7 (standalone dispatcher wiring and
+pipeline-artifact isolation). Root task docs retain this feature and wiki
+contributor entries retain both tasks. The local archive-intent migration was
+renumbered to 20261102000000 to avoid the new base migration version. Final
+verification and a full review are being repeated on this integrated tree.
