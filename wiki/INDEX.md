@@ -398,3 +398,5 @@ contributed to it.
   `vk/77a2-session-step-tim`).
 
 - **Overdue wakeups / standalone startup** (`vk/d5c5-scheduled-wakeup`): [Durable session wake-ups](durable-session-wakeups.md#standalone-startup-must-use-the-shared-initializer) — production must use shared initialization; zero-attempt pending records can indicate absent dispatcher wiring.
+
+- [readme-product-guide.md](readme-product-guide.md) — Product documentation evidence boundaries: source builds versus collaboration services, matching MCP binaries, Compose data lifetime, optional capabilities and deployment ownership (`vk/f960-update-readme`).

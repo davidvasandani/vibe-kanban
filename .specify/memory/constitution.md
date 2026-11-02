@@ -1426,3 +1426,11 @@ Applied `/speckit.constitution`. II, V, VI, XI and XII govern this change:
 reuse automatic archive admission and durable delivery; persist explicit user
 intent and provenance; serialize scheduling and archive decisions; preserve
 remote transaction boundaries. No new principle is required.
+
+## Review: vk/f960-update-readme
+
+Applied `/speckit.constitution`. I, II, III, VI and XIV govern this documentation
+change: write plain, source-backed claims, define checkable acceptance criteria,
+reuse focused guides, keep runtime behavior unchanged, and perform verification
+from the fresh worktree. Application capabilities must be distinguished from
+optional deployment configuration. No new principle or version change is needed.
