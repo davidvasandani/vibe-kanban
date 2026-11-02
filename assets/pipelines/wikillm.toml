@@ -5,19 +5,19 @@ description = "Knowledge-augmented dev flow: recall prior knowledge before plann
 id = "spec"
 label = "Create spec"
 default_enabled = true
-prompt = "Write a technical spec for this task before implementing and save it to `specs/vk/<task-id>/technical-spec.md`, replacing `<task-id>` with the current task's identifier from the task or task branch."
+prompt = "Write a technical spec for this task before implementing and save it to `specs/vk/<task-id>/technical-spec.md`, replacing `<task-id>` with the current task's identifier from the task or task branch. If git reports that path as ignored, this repository keeps pipeline artifacts out of git: leave the file uncommitted and never force-add it."
 
 [[stage]]
 id = "recall-knowledge"
 label = "Recall prior knowledge"
 default_enabled = true
-prompt = "Before planning, recall what this project already knows: search the project knowledge base for pages relevant to this task and distill the matches into `specs/vk/<task-id>/prior-knowledge.md`, replacing `<task-id>` with the current task's identifier from the task or task branch, for the spec and plan stages to build on. Read-only on the knowledge base; if it is empty (first task), note that and continue."
+prompt = "Before planning, recall what this project already knows: search the project knowledge base for pages relevant to this task and distill the matches into `specs/vk/<task-id>/prior-knowledge.md`, replacing `<task-id>` with the current task's identifier from the task or task branch, for the spec and plan stages to build on. Read-only on the knowledge base; if it is empty (first task), note that and continue. If git reports that path as ignored, this repository keeps pipeline artifacts out of git: leave the file uncommitted and never force-add it."
 
 [[stage]]
 id = "plan"
 label = "Create plan"
 default_enabled = true
-prompt = "Write a step-by-step implementation plan and save it to `specs/vk/<task-id>/implementation-plan.md`, replacing `<task-id>` with the current task's identifier from the task or task branch."
+prompt = "Write a step-by-step implementation plan and save it to `specs/vk/<task-id>/implementation-plan.md`, replacing `<task-id>` with the current task's identifier from the task or task branch. If git reports that path as ignored, this repository keeps pipeline artifacts out of git: leave the file uncommitted and never force-add it."
 
 [[stage]]
 id = "plan-review"

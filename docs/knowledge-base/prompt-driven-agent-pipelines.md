@@ -1,6 +1,6 @@
 # Prompt-driven agent pipelines
 
-Tags: `a17f-fix-parallel-age`, `89c5-pipeline-instruc`
+Tags: `a17f-fix-parallel-age`, `89c5-pipeline-instruc`, `30aa-speckit-analyis`
 
 ## Treat prompts as executable contracts
 
@@ -65,3 +65,36 @@ This migration is naturally idempotent because the new default no longer
 matches the historical bytes. Regression coverage should prove exact upgrade,
 one-byte customization preservation, deletion preservation, and a second
 reconciliation with no further change.
+
+Changing a bundled default *without* recording its predecessor strands every
+install seeded earlier: `b6f2e5ef` moved WikiLLM to task-scoped paths, but
+existing installs kept writing root `SPEC.md` until the predecessor bytes were
+added. The predecessors now live as exact `git show` copies in
+`assets/pipelines/historical/<name>-<commit>.toml`, listed in
+`HISTORICAL_BUNDLED`. Any edit to a bundled TOML must add the previous bytes
+there; a test asserts no current default is listed as historical and every
+listed version upgrades. Never reformat those files, since a single changed
+byte stops matching.
+
+## Keeping artifacts out of git per repository
+
+Task-scoped directories turn root-file rewrites into additions, but some
+repositories should not carry design records at all. The repo setting
+`local_pipeline_artifacts` is enforced by a managed block in the repo's
+`info/exclude`, not by prompt prose, because the Claude Stop hook demands
+commits for untracked changes and agents commit whatever `git status` shows.
+Lessons from review:
+
+- Resolve the file with `git rev-parse --git-path info/exclude`. In a linked
+  worktree it is the shared common-dir file, so the block is repo-wide.
+- A pattern containing a middle `/` is anchored to the repo root. Artifacts
+  can sit below a repo working directory, so use `**/specs/vk/`.
+- SpecKit files records under `specs/<feature-key>/`, where the key is the
+  *persisted* `speckit_feature_key` (it survives branch renames), falling back
+  to the branch. Cover both keys' first components.
+- Because the file is shared, branch-derived patterns must accumulate, not be
+  replaced by whichever workspace synced last, and the read/merge/write needs
+  an exclusive lock: atomic rename prevents torn writes but not lost updates.
+- Prompts still say "if git reports the path as ignored, never force-add it",
+  since an explicit `git add <path>` fails on ignored files and invites `-f`.
+- Excludes never untrack files a repo already committed.

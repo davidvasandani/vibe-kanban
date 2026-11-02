@@ -20,6 +20,8 @@
 //! ordered `## Pipeline` block into the task description. Stages are ordered by
 //! their position in the file. Bundled defaults are seeded to disk on first run.
 
+pub mod git_exclude;
+
 use std::{
     collections::HashSet,
     io::Write,
@@ -70,37 +72,39 @@ const SEED_MANIFEST_VERSION: u32 = 1;
 /// that must be added incrementally.
 const LEGACY_BUNDLED: &[&str] = &["basic.toml", "wikillm.toml", "speckit.toml"];
 
-const PARALLEL_SUBAGENTS_FILENAME: &str = "parallel-subagents.toml";
-/// Exact first shipped version. Matching bytes authorize the one automatic
-/// refresh; any difference is treated as a user customization.
-const LEGACY_PARALLEL_SUBAGENTS: &str = r#"name = "Parallel Sub-Agents"
-description = "Fan a single prompt out to Claude, Codex, and Grok in parallel, analyze their responses, and iterate up to N rounds."
-
-[[stage]]
-id = "fanout"
-label = "Fan out in parallel"
-default_enabled = true
-heavy = true
-prompt = "Fan this task's prompt out to three sub-agents running in parallel — one using Claude, one using Codex, and one using Grok — giving each the exact same prompt, and collect all three complete responses. Launch them concurrently rather than one after another. If a backend is unavailable, note which one and continue with the sub-agents you can run."
-
-[[stage]]
-id = "analyze"
-label = "Analyze & synthesize"
-default_enabled = true
-prompt = "Analyze the three sub-agent responses side by side: call out where they agree, where they disagree, and the strongest idea from each. Synthesize a single consolidated answer, and list any remaining open questions or contradictions the round did not resolve."
-
-[[stage]]
-id = "iterate"
-label = "Loop N rounds"
-default_enabled = true
-prompt = "Treat the fan-out and analysis you just completed as round 1, then repeat the parallel fan-out and analysis for the remaining rounds up to a total of N rounds (default N = 3; the operator may change N in this task's description). Feed the previous round's synthesis back to the three sub-agents as context each round. Stop early once the responses converge; otherwise stop after the Nth round. Then emit the final consolidated result."
-
-[[stage]]
-id = "code-review"
-label = "Review via Codex"
-default_enabled = false
-prompt = "After implementing, run an independent Codex review of the task's diff (the `codex-review` skill / Codex CLI), iterating until it reports no significant findings. Address confirmed findings and re-verify before marking the task ready."
-"#;
+/// Exact bytes of every superseded bundled default, keyed by filename. Bundled
+/// files become user-owned once seeded, so reconciliation replaces one with
+/// the current default only when its bytes equal a historical entry; any
+/// difference is treated as a user customization. When changing a bundled
+/// file, add its previous bytes here (never edit or remove an entry).
+const HISTORICAL_BUNDLED: &[(&str, &[&str])] = &[
+    (
+        "basic.toml",
+        &[include_str!(
+            "../../../../../assets/pipelines/historical/basic-44e7c7ef.toml"
+        )],
+    ),
+    (
+        "wikillm.toml",
+        &[
+            include_str!("../../../../../assets/pipelines/historical/wikillm-44e7c7ef.toml"),
+            include_str!("../../../../../assets/pipelines/historical/wikillm-b6f2e5ef.toml"),
+        ],
+    ),
+    (
+        "speckit.toml",
+        &[
+            include_str!("../../../../../assets/pipelines/historical/speckit-84796bb1.toml"),
+            include_str!("../../../../../assets/pipelines/historical/speckit-b6f2e5ef.toml"),
+        ],
+    ),
+    (
+        "parallel-subagents.toml",
+        &[include_str!(
+            "../../../../../assets/pipelines/historical/parallel-subagents-12ed6434.toml"
+        )],
+    ),
+];
 
 static SEED_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// `load_pipelines` and `load_pipeline_statuses` can run on different request
@@ -575,24 +579,31 @@ fn write_seed_manifest(dir: &Path) -> Result<(), PipelineError> {
     result.map_err(PipelineError::Io)
 }
 
-fn refresh_legacy_parallel_subagents(dir: &Path) -> Result<(), PipelineError> {
-    let path = dir.join(PARALLEL_SUBAGENTS_FILENAME);
+fn refresh_unmodified_historical_defaults(dir: &Path) -> Result<(), PipelineError> {
+    for (name, historical) in HISTORICAL_BUNDLED {
+        refresh_if_historical(dir, name, historical)?;
+    }
+    Ok(())
+}
+
+fn refresh_if_historical(dir: &Path, name: &str, historical: &[&str]) -> Result<(), PipelineError> {
+    let path = dir.join(name);
     let existing = match std::fs::read(&path) {
         Ok(existing) => existing,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(PipelineError::Io(e)),
     };
-    if existing != LEGACY_PARALLEL_SUBAGENTS.as_bytes() {
+    if !historical.iter().any(|old| existing == old.as_bytes()) {
         return Ok(());
     }
 
     let current = BUNDLED
         .iter()
-        .find_map(|(name, content)| (*name == PARALLEL_SUBAGENTS_FILENAME).then_some(*content))
-        .expect("parallel sub-agents pipeline must remain bundled");
+        .find_map(|(bundled, content)| (*bundled == name).then_some(*content))
+        .expect("historical pipeline defaults must remain bundled");
     let nonce = SEED_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     let temp_path = dir.join(format!(
-        ".parallel-subagents.bundle-refresh-{}-{nonce}",
+        ".{name}.bundle-refresh-{}-{nonce}",
         std::process::id()
     ));
     let result = (|| -> Result<(), std::io::Error> {
@@ -646,7 +657,7 @@ pub fn ensure_seeded(dir: &Path) -> Result<(), PipelineError> {
         })
     };
 
-    refresh_legacy_parallel_subagents(dir)?;
+    refresh_unmodified_historical_defaults(dir)?;
 
     let mut created = Vec::new();
     for (name, content) in BUNDLED {
@@ -1083,45 +1094,101 @@ mod tests {
         );
     }
 
-    #[test]
-    fn refreshes_exact_legacy_parallel_subagents_pipeline() {
-        let d = TmpDir::new();
-        ensure_seeded(d.path()).unwrap();
-        let path = d.path().join(PARALLEL_SUBAGENTS_FILENAME);
-        std::fs::write(&path, LEGACY_PARALLEL_SUBAGENTS).unwrap();
-
-        ensure_seeded(d.path()).unwrap();
-
-        let current = BUNDLED
+    fn bundled_content(name: &str) -> &'static str {
+        BUNDLED
             .iter()
-            .find_map(|(name, content)| (*name == PARALLEL_SUBAGENTS_FILENAME).then_some(*content))
-            .unwrap();
-        assert_eq!(std::fs::read_to_string(path).unwrap(), current);
+            .find_map(|(bundled, content)| (*bundled == name).then_some(*content))
+            .unwrap()
     }
 
     #[test]
-    fn preserves_customized_legacy_parallel_subagents_pipeline() {
-        let d = TmpDir::new();
-        ensure_seeded(d.path()).unwrap();
-        let path = d.path().join(PARALLEL_SUBAGENTS_FILENAME);
-        let customized = format!("{LEGACY_PARALLEL_SUBAGENTS}# local edit\n");
-        std::fs::write(&path, &customized).unwrap();
-
-        ensure_seeded(d.path()).unwrap();
-
-        assert_eq!(std::fs::read_to_string(path).unwrap(), customized);
+    fn historical_defaults_are_never_current_defaults() {
+        for (name, historical) in HISTORICAL_BUNDLED {
+            let current = bundled_content(name);
+            for old in *historical {
+                assert_ne!(
+                    *old, current,
+                    "{name} lists its current default as historical"
+                );
+                parse_pipeline(name.trim_end_matches(".toml"), old).unwrap();
+            }
+        }
     }
 
     #[test]
-    fn does_not_restore_deleted_parallel_subagents_pipeline() {
+    fn refreshes_every_exact_historical_default() {
+        for (name, historical) in HISTORICAL_BUNDLED {
+            for old in *historical {
+                let d = TmpDir::new();
+                ensure_seeded(d.path()).unwrap();
+                let path = d.path().join(name);
+                std::fs::write(&path, old).unwrap();
+
+                ensure_seeded(d.path()).unwrap();
+
+                assert_eq!(
+                    std::fs::read_to_string(&path).unwrap(),
+                    bundled_content(name)
+                );
+                // The refreshed file no longer matches history, so a second
+                // reconciliation leaves it alone.
+                ensure_seeded(d.path()).unwrap();
+                assert_eq!(
+                    std::fs::read_to_string(&path).unwrap(),
+                    bundled_content(name)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn refresh_leaves_no_temp_files_behind() {
         let d = TmpDir::new();
         ensure_seeded(d.path()).unwrap();
-        let path = d.path().join(PARALLEL_SUBAGENTS_FILENAME);
-        std::fs::remove_file(&path).unwrap();
+        for (name, historical) in HISTORICAL_BUNDLED {
+            std::fs::write(d.path().join(name), historical[0]).unwrap();
+        }
 
         ensure_seeded(d.path()).unwrap();
 
-        assert!(!path.exists());
+        let mut entries: Vec<String> = std::fs::read_dir(d.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        entries.sort();
+        let mut expected: Vec<String> = BUNDLED.iter().map(|(n, _)| n.to_string()).collect();
+        expected.push(SEED_MANIFEST.to_string());
+        expected.sort();
+        assert_eq!(entries, expected);
+    }
+
+    #[test]
+    fn preserves_customized_historical_defaults() {
+        for (name, historical) in HISTORICAL_BUNDLED {
+            let d = TmpDir::new();
+            ensure_seeded(d.path()).unwrap();
+            let path = d.path().join(name);
+            let customized = format!("{}#", historical[0]);
+            std::fs::write(&path, &customized).unwrap();
+
+            ensure_seeded(d.path()).unwrap();
+
+            assert_eq!(std::fs::read_to_string(path).unwrap(), customized);
+        }
+    }
+
+    #[test]
+    fn does_not_restore_deleted_historical_defaults() {
+        for (name, _) in HISTORICAL_BUNDLED {
+            let d = TmpDir::new();
+            ensure_seeded(d.path()).unwrap();
+            let path = d.path().join(name);
+            std::fs::remove_file(&path).unwrap();
+
+            ensure_seeded(d.path()).unwrap();
+
+            assert!(!path.exists());
+        }
     }
 
     #[test]
@@ -1331,42 +1398,60 @@ mod tests {
     }
 
     #[test]
-    fn bundled_basic_spec_prompt_is_verbatim() {
+    fn bundled_artifacts_are_task_scoped() {
         let d = TmpDir::new();
         let pipelines = load_pipelines(d.path());
-        let basic = pipelines.iter().find(|p| p.id == "basic").unwrap();
-        let spec = basic.stages.iter().find(|s| s.id == "spec").unwrap();
-        assert_eq!(
-            spec.prompt_fragment,
-            "Write a technical spec for this task and save it to `SPEC.md` at the repo root before implementing."
-        );
-    }
-
-    #[test]
-    fn bundled_wikillm_artifacts_are_task_scoped() {
-        let d = TmpDir::new();
-        let pipelines = load_pipelines(d.path());
-        let wikillm = pipelines.iter().find(|p| p.id == "wikillm").unwrap();
 
         let cases = [
-            ("spec", "specs/vk/<task-id>/technical-spec.md"),
-            ("recall-knowledge", "specs/vk/<task-id>/prior-knowledge.md"),
-            ("plan", "specs/vk/<task-id>/implementation-plan.md"),
+            ("basic", "spec", "specs/vk/<task-id>/technical-spec.md"),
+            ("basic", "plan", "specs/vk/<task-id>/implementation-plan.md"),
+            ("wikillm", "spec", "specs/vk/<task-id>/technical-spec.md"),
+            (
+                "wikillm",
+                "recall-knowledge",
+                "specs/vk/<task-id>/prior-knowledge.md",
+            ),
+            (
+                "wikillm",
+                "plan",
+                "specs/vk/<task-id>/implementation-plan.md",
+            ),
         ];
 
-        for (stage_id, path) in cases {
-            let stage = wikillm
+        for (pipeline_id, stage_id, path) in cases {
+            let pipeline = pipelines.iter().find(|p| p.id == pipeline_id).unwrap();
+            let stage = pipeline
                 .stages
                 .iter()
                 .find(|stage| stage.id == stage_id)
                 .unwrap();
-            assert!(stage.prompt_fragment.contains(path));
-            assert!(
-                stage
-                    .prompt_fragment
-                    .contains("current task's identifier from the task or task branch")
-            );
+            let prompt = &stage.prompt_fragment;
+            assert!(prompt.contains(path), "{pipeline_id}/{stage_id}");
+            assert!(prompt.contains("current task's identifier from the task or task branch"));
+            assert!(prompt.contains("reports that path as ignored"));
+            assert!(prompt.contains("never force-add"));
         }
+
+        for pipeline in &pipelines {
+            for stage in &pipeline.stages {
+                for root_file in ["SPEC.md", "PRIOR_KNOWLEDGE.md", "IMPLEMENTATION_PLAN.md"] {
+                    assert!(
+                        !stage.prompt_fragment.contains(root_file),
+                        "{}/{} still writes {root_file}",
+                        pipeline.id,
+                        stage.id
+                    );
+                }
+            }
+        }
+
+        let speckit = pipelines.iter().find(|p| p.id == "speckit").unwrap();
+        let specify = speckit
+            .stages
+            .iter()
+            .find(|stage| stage.id == "speckit-specify")
+            .unwrap();
+        assert!(specify.prompt_fragment.contains("never force-add"));
     }
 
     #[test]

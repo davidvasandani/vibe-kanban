@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT r.id as \"id!: Uuid\",\n                      r.path,\n                      r.name,\n                      r.display_name,\n                      r.setup_script,\n                      r.cleanup_script,\n                      r.archive_script,\n                      r.copy_files,\n                      r.parallel_setup_script as \"parallel_setup_script!: bool\",\n                      r.dev_server_script,\n                      r.default_target_branch,\n                      r.default_working_dir,\n                      r.created_at as \"created_at!: DateTime<Utc>\",\n                      r.updated_at as \"updated_at!: DateTime<Utc>\",\n                      wr.target_branch\n               FROM repos r\n               JOIN workspace_repos wr ON r.id = wr.repo_id\n               WHERE wr.workspace_id = $1\n               ORDER BY r.display_name ASC",
+  "query": "SELECT r.id as \"id!: Uuid\",\n                      r.path,\n                      r.name,\n                      r.display_name,\n                      r.setup_script,\n                      r.cleanup_script,\n                      r.archive_script,\n                      r.copy_files,\n                      r.parallel_setup_script as \"parallel_setup_script!: bool\",\n                      r.dev_server_script,\n                      r.default_target_branch,\n                      r.default_working_dir,\n                      r.local_pipeline_artifacts as \"local_pipeline_artifacts!: bool\",\n                      r.created_at as \"created_at!: DateTime<Utc>\",\n                      r.updated_at as \"updated_at!: DateTime<Utc>\"\n               FROM repos r\n               JOIN workspace_repos wr ON r.id = wr.repo_id\n               WHERE wr.workspace_id = $1\n               ORDER BY r.display_name ASC",
   "describe": {
     "columns": [
       {
@@ -64,17 +64,17 @@
         "type_info": "Text"
       },
       {
-        "name": "created_at!: DateTime<Utc>",
+        "name": "local_pipeline_artifacts!: bool",
         "ordinal": 12,
-        "type_info": "Text"
+        "type_info": "Integer"
       },
       {
-        "name": "updated_at!: DateTime<Utc>",
+        "name": "created_at!: DateTime<Utc>",
         "ordinal": 13,
         "type_info": "Text"
       },
       {
-        "name": "target_branch",
+        "name": "updated_at!: DateTime<Utc>",
         "ordinal": 14,
         "type_info": "Text"
       }
@@ -100,5 +100,5 @@
       false
     ]
   },
-  "hash": "9f783d1b275548a59429235991e5299b7aaf071effebbd62f006404b3ce83dc8"
+  "hash": "d4d3e974d8d69956a76eabf41bb3588bdc33c8a6376b3441394d044b1ec7f198"
 }
