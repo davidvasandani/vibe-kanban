@@ -15,7 +15,9 @@ is insufficient. Never infer the latest session.
 Scheduling on an archived workspace is allowed when its worktree still exists
 and the session belongs to it. Limit checks, reactivation, the wake-up record,
 and its delivery row commit in one SQLite immediate transaction. A rejected
-request cannot accidentally unarchive the workspace. Both the workspace-update
+request cannot accidentally unarchive the workspace. Validate worktree availability
+from a fresh database read: poller preparation may create the worktree after
+the route captured its Workspace extension. Both the workspace-update
 and wake-up APIs read/write this local store; remote state is separate intent.
 
 Scheduling retains completion intent as a temporary hold. Pending/dispatching

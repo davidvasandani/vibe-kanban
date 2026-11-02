@@ -1,22 +1,35 @@
 # Independent review and validation
 
-Five independent `codex review --uncommitted` passes completed. The fifth reported no clear, actionable regressions. Confirmed findings from the first four were fixed:
+Seven independent Codex review passes completed (five initial passes, a full
+post-integration review against origin/main, and a focused review of its fix).
+Confirmed findings were addressed:
 
-1. Generate the ArchiveIntent TypeScript export before frontend verification.
-2. Revalidate deferred remote events and acknowledge withdrawn events.
-3. Keep local merge intents eligible during remote outages; attribute archives only to eligible events.
+1. Generate ArchiveIntent's TypeScript export.
+2. Revalidate withdrawn/replaced remote events, retaining replacement retry selection.
+3. Admit eligible local merges during remote outages and attribute only admitted events.
 4. Show pending provenance ahead of acknowledged history in active workspaces.
-5. Forward paired origin environment names through Codex stdio MCP's restricted environment, both in scoped configuration and local runtime overrides.
-6. Register replacement remote events before acknowledging their predecessors so retry selection is durable.
-7. Preserve completion intent during activity activation, completion statistics sync, and post-login sync. Explicit unarchive acknowledges intent; an agent turn does not.
-8. Capture initially archived remote inserts as well as archive transitions.
+5. Forward paired origin names through Codex stdio MCP's restricted environment.
+6. Preserve completion intent during activation, completion, and post-login sync.
+7. Capture initially archived remote inserts.
+8. Reload persisted workspace state during wake-up validation after poller preparation
+   creates a worktree. The regression test retains the stale pre-creation snapshot.
 
-Completed validation before the restart:
-- Database workspace suite: 14 tests passed.
-- MCP poller/wakeup target tests: 6 passed.
-- Frontend provenance/sidebar suite: 14 passed; shared frontend ESLint passed.
-- Full frontend/backend type checks and remote Rust check passed on the earlier snapshot.
+The full post-integration review identified only item 8. The final focused review
+confirmed the fix and reported no introduced defects.
 
-After restart, PostgreSQL 16 live migration validation passed, including archived inserts, metadata stability, a new identity after rearchive, and transactional rollback. Final formatting completed and the 14 frontend tests passed again. Final Rust regression suites are running. Earlier results are not represented as final-snapshot verification.
+## Completed verification
 
-The latest main commit was merged after review; conflicts were limited to the task-specific root spec and implementation plan, which retain this task. Knowledge pages were committed separately. A durable Vibe Kanban poller runs final formatting, check/lint, unified-package targeted Rust tests, frontend tests, and an additional review against origin/main. Its completion receipt resumes this session; readiness awaits those results.
+- `pnpm run format`, `pnpm run check`, and `pnpm run lint`: passed.
+- Targeted Rust wake-up, workspace, lifecycle, origin forwarding, and poller suites:
+  passed; this includes 15 workspace tests, 13 server wake-up tests, and 6 MCP
+  poller/target tests.
+- Frontend provenance/sidebar tests: 14 passed.
+- Live PostgreSQL 16 migration validation: archived inserts, metadata stability,
+  new event identity after rearchive, and transactional rollback passed.
+- PR #388 CI on 81834221: frontend, backend Clippy/tests/schema, and remote tests passed.
+- Focused server wake-up rerun for item 8 is in progress; PR checks must also pass
+  on the final pushed commit before merge.
+
+Knowledge pages and index are committed. The latest main was merged; conflicts
+were confined to task-specific root specification/plan files, which retain this
+feature. No other service or homelab deployment was changed.

@@ -63,6 +63,11 @@ pub async fn validate_session(
     workspace: &Workspace,
     id: Uuid,
 ) -> Result<Session, ApiError> {
+    // Poller preparation may have just created/restored the worktree. The
+    // route's Extension snapshot predates that write; validate persisted state.
+    let workspace = Workspace::find_by_id(pool, workspace.id)
+        .await?
+        .ok_or_else(|| ApiError::BadRequest("Workspace no longer exists".into()))?;
     let worktree_exists = match workspace.container_ref.as_deref() {
         Some(path) => tokio::fs::metadata(path)
             .await
@@ -326,7 +331,9 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let workspace = Workspace::find_by_id(&pool, id).await.unwrap().unwrap();
+        // Keep the original snapshot with container_ref=None, as start_poller
+        // does after prepare_helper_start persists a newly created worktree.
+        assert!(workspace.container_ref.is_none());
         assert!(validate_session(&pool, &workspace, sid).await.is_ok());
         assert!(
             validate_session(&pool, &workspace, Uuid::new_v4())
