@@ -396,3 +396,5 @@ contributed to it.
   under a budget, and why an unreadable turn must not count as a searched
   empty one. Also how it differs from global search (`vk/5b8a-vk-mcp-chat-logs`,
   `vk/77a2-session-step-tim`).
+
+- **Overdue wakeups / standalone startup** (`vk/d5c5-scheduled-wakeup`): [Durable session wake-ups](durable-session-wakeups.md#standalone-startup-must-use-the-shared-initializer) — production must use shared initialization; zero-attempt pending records can indicate absent dispatcher wiring.
