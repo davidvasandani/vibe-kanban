@@ -1,296 +1,351 @@
-# 2001zhaozhao's Vibe-Kanban Fork
+# Vibe Kanban
 
-`Disclaimer: the extra README sections in this fork are written by a human.`
+Vibe Kanban is a workspace for managing software projects with coding agents.[^lineage]
+Plan work on a kanban board, give agents their own Git worktrees, follow their
+progress, test the result, and review changes before merging. Run it on your
+machine or host it centrally, with optional workers for distributing execution
+across servers.
 
-A fork of Vibe-Kanban with various improvements.
+The app brings issues, conversations, terminals, previews, diffs and pull requests
+into one place. It supports individual development and shared projects, with
+configurable pipelines and durable follow-ups for work that spans several agent
+turns.
 
-The improvements are AI-coded with bare minimum quality control, as I don't intend to contribute them.
-The main purpose of this fork is to experiment with AI development workflows that let me manage agents at a
-higher level while preserving high code quality through manual oversight.
-My aim is to push the human-in-the-loop AI development workflow as far as possible.
+## Working with Vibe Kanban
 
-## Improvements
+1. Create a project and organize its issues by status, priority, assignee and tags.
+2. Start a workspace with one or more repositories, target branches and a coding agent.
+3. Follow the conversation, answer questions, approve plans and send feedback.
+4. Run the application in the preview, inspect changes and leave inline review comments.
+5. Push a branch, open a pull request or merge locally, then complete the issue and archive the workspace.
 
-* Added a Remote Single-User Mode for use without OAuth
-  * Allows skipping GitHub/Google OAuth and support a local account when self-hosting both the remote server,
-    local server, and frontend.
-  * All new Vibe-Kanban features such as organizations, projects, and the kanban board work properly.
-  * You can remotely deploy vibe-kanban in Single User Mode to skip authentication.
-    Configuring separate authentication via HTTP proxy Basic Auth is fully supported and provides
-    security reassurances that do not depend on vibe-kanban itself.
-* Added a convenience button to Merge All repositories, and a variant that also moves the linked issue to Done.
-  * The feature is adaptive: if code is already merged, the Merge button will be disabled,
-    and the Merge & Complete button can still move issue to done.
-    If linked issue is already done, the Merge & Complete button will be disabled.
-    If the workspace is not linked to any issue in any kanban board, the Merge & Complete button will be hidden.
-  * Clicking the Merge & Complete button will move the issue to the top of the "Done" category.
-    If this category is not found, it will move it to the rightmost category instead.
-* Added Toasts feature
-  * Vibe-Kanban dev complained it isn't accessible, but it sure can be helpful so I've added it to this fork.
-  * Toasts are shown when Merge (both single-repo and multi-repo shortcut) are successful; when an issue is created;
-    when an issue is moved between categories by user action; and when an agent completes
-    (which previously only played sound).
-* You can now see basic information of the linked issue from the Workspace UI
-* Added TLS support for the local development remote server, enabling HTTP/2 and removing a browser concurrent
-  connections limit issue that caused unusable performance when running the original `vibe-kanban` setup locally.
-  Additional setup is required, see the `TLS Setup Guide` section below.
-  * The TLS support is optional. You can leave it disabled if you are running the remote server behind a HTTPS proxy.
-* Added the ability to right click a workspace card in the Project / Kanban Board page to directly go to the
-  full-screen workspace view. Left click still shows a preview of the workspace just like before.
-* Fixed a bug where agent logs from one workspace appears to show up in another workspace if directly switching between
-  workspace previews in the Kanban page.
-* When pasting multi-line text into the title of a new issue in the kanban board,
-  any additional lines will overflow into the description.
-* Added the ability to archive workspaces in the kanban board issue-linked workspace dropdown.
-  This saves several clicks every time you are done with a task but did not merge into the main branch
-  (e.g. for exploration tasks or tasks you decide to abandon).
-* When using the feature to automatically resolve Git rebase conflicts, if the coding agent is currently in Plan mode,
-  it will send the command in non-Plan mode instead. This avoids the agent creating an unnecessary plan to implement
-  a simple rebase.
-* Added a preconnect hint to the remote server's URL from the frontend to improve performance, and upgrade the
-  connection to HTTP 2 sooner to resolve ElectricSQL shape loading issues on initial load.
-  Also, the frontend will now delay loading until HTTP/2 has been negotiated with the remote server, or a fixed timeout.
-* When accepting a plan in Claude Code ExitPlanMode, the UI will now automatically switch to Edit mode instead of
-  remaining in Plan mode. This lets you send follow-up prompts without the agent switching back to plan mode.
-* Added a new button when exiting the Claude Code Plan Mode to implement in a new workspace,
-  similar to the "Clear Context and Implement" feature in Claude Code CLI which technically does the same thing.
-  The button will create a new Workspace with a new agent being fed the plan as its prompt, switch to the current
-  window to the new agent, and archive the existing workspace.
-  This is analogous to how the same feature in the Claude Code CLI behaves, except it also creates a new Git worktree
-  for the workspace due to how vibe-kanban works.
-* Remove the "vibe kanban is shutting down" banner because don't care
+Issues track the work; workspaces contain the checkout and execution history.
+An issue can have multiple workspaces, and a workspace can have multiple agent
+sessions. You can also start a workspace directly without creating an issue.
 
-## TLS Setup Guide
+## Capabilities
 
-This fork includes a feature to allow local development without slowdowns by enabling HTTP/2 for the remote dev server.
-HTTP/2 requires TLS so you need to follow the below guide to set up a local certificate via `mkcert`.
-Without this, the server would use plain-HTTP with HTTP 1.1, which causes ElectricSQL's long-polling sync requests
-to block each other due to the browser's 6 concurrent connection limit in HTTP 1.1.
-(This is an issue in vanilla vibe-kanban which is fixed in this fork.)
+### Planning and collaboration
 
-Setup guide from Claude:
-```
-One-time setup with https://github.com/FiloSottile/mkcert:
+- Kanban and list views with customizable project statuses, drag-and-drop ordering,
+  priorities, assignees, tags, filters and sorting.
+- Organizations and projects with member roles and invitations when the remote
+  collaboration service is configured.
+- Markdown descriptions, attachments, comments, sub-issues and issue relationships.
+  Attachment uploads require configured storage.
+- Linked workspaces and pull requests, with issue identity visible inside the
+  workspace so you can follow a task across views.
+- Comments that can stay as notes or explicitly deliver a reply to a linked agent
+  session. Delivery state distinguishes a saved comment from an agent continuation.
+- Global search across accessible organizations, projects, issues, workspaces and
+  saved conversation prompts and final replies. Full session-log retrieval through
+  MCP separately supports time, keyword, role and turn filters.
 
-# Install mkcert (once)
-# macOS: brew install mkcert
-# Linux: see https://github.com/FiloSottile/mkcert#installation
+See [issue management](docs/issue-management.mdx),
+[organizations](docs/cloud/organizations.mdx) and
+[filtering](docs/cloud/filtering.mdx).
 
-# Install local CA into system trust store (once)
-mkcert -install
+### Agent workspaces
 
-# Generate certs for localhost (once)
-cd crates/remote
-mkcert -cert-file localhost-cert.pem -key-file localhost-key.pem localhost 127.0.0.1 ::1
+- Separate Git worktrees and branches for concurrent tasks, including workspaces
+  that span multiple repositories. Worktree isolation separates Git changes;
+  execution permissions depend on the agent and host configuration.
+- Multiple sessions, follow-up prompts, queued messages, image attachments, file
+  mentions, slash commands and live tool output.
+- Agent profiles with model and execution settings, plus controls for which agents
+  and models appear in pickers. Plan mode, approvals, context usage and session
+  forking depend on the executor's capabilities.
+- Repository setup, development-server and cleanup scripts, integrated terminals,
+  process logs, workspace notes and editor links, including Remote SSH.
+- Pinning, archiving and workspace cleanup, with protection for active work and
+  recovery information when execution is interrupted.
+- A carousel for watching several workspace conversations together, responsive
+  board and workspace layouts, collapsible panels and configurable notifications.
 
-Then add to .env.remote:
-TLS_CERT_PATH=localhost-cert.pem
-TLS_KEY_PATH=localhost-key.pem
+See [creating workspaces](docs/workspaces/creating-workspaces.mdx),
+[multiple repositories](docs/workspaces/multi-repo-sessions.mdx),
+[chat](docs/workspaces/chat-interface.mdx) and
+[workspace management](docs/workspaces/managing-workspaces.mdx).
 
-And update VK_SHARED_API_BASE to use https://:
-VK_SHARED_API_BASE=https://localhost:3000
-```
+### Code review and Git
 
-## Deployment
+Review unified or side-by-side diffs, browse changed files, leave inline comments
+and send the review back to the agent. GitHub review comments can appear alongside
+local feedback.
 
-Pushes to `main` run the `Trigger homelab CD` workflow. It sends the
-`vibe-kanban-deploy` repository-dispatch event to `davidvasandani/homelab`,
-including the merged commit SHA and branch ref in the client payload. The
-homelab workflow owns the build, health gating, and deployment of this fork.
+The Git panel supports branch status, pushing, rebasing, conflict resolution and
+pull-request creation. Multi-repository workspaces have per-repository actions,
+plus **Merge All** and **Merge & Complete** for merging local changes and completing
+the linked issue. Pull-request tools expose PR details, checks, updates and merge
+actions. GitHub and Azure Repos integrations require their corresponding
+credentials and CLI setup.
 
-### Remote server setup:
+See [reviewing changes](docs/workspaces/changes.mdx),
+[Git operations](docs/workspaces/git-operations.mdx),
+[GitHub](docs/integrations/github-integration.mdx) and
+[Azure Repos](docs/integrations/azure-repos-integration.mdx).
 
-* Hosted on a Ubuntu server.
-* Runs on Docker Compose with image sourced from the private Git repository.
-* Runs in vibe-kanban Single User Mode (feature added by this fork) and listens to localhost.
-* Uses a reverse proxy with HTTPS and Basic Auth for security independent to vibe-kanban's authentication.
+### Previews and browser work
 
-### Frontend setup:
+Start a repository's development server and open it in the embedded preview.
+The preview includes navigation, responsive and mobile sizes, component selection
+as agent context, and built-in developer tools. Its in-app path is remembered
+separately from the development server's address.
 
-* A local script conveniently runs the frontend binary, pointing it to the deployed remote server.
-* A user-scope systemctl service runs the above local script as a background process.
-* A custom bash script controls the service.
-  I can simply type the `kanban` command to start my vibe-kanban local server.
+Configured deployments can also provide managed browser sessions shared between
+people and agents. The workspace shows the browser while MCP tools navigate,
+click, type, scroll, inspect pages and take screenshots. Explicit control ownership
+prevents competing human and agent input. Optional preview leases give a remote
+browser temporary access to one workspace development-server port.
 
-## Long-term goal of the fork
+See [browser testing](docs/browser-testing.mdx),
+[shared browser control](wiki/browser-session-control-arbiter.md) and
+[remote preview verification](docs/remote-browser-dev-server-verification.mdx).
 
-Eventually, I would like to experiment with agent orchestration systems that use vibe-kanban as the
-task sharing UI to give humans visibility and high-level control of the agent team's workflow.
+### Pipelines and continuing work
 
-I think that effective quality-control by humans at the highest possible "managerial" level is the key to building an
-effective agent swarm architecture that saves human time without going off the rails, and UI is a very important
-piece of the puzzle which I would like to experiment with by forking vibe-kanban.
-Basically I want to build better UIs that let the human more effectively play the role of a manager of
-a team of coding agents.
+Pipelines add ordered instructions to an issue and show stage progress in the UI.
+The bundled choices include Basic, SpecKit, WikiLLM and parallel-agent workflows.
+Edit pipeline definitions and choose defaults at machine, organization or project
+scope. The SpecKit viewer lets you read and edit specifications, plans and task
+checklists in the workspace.
 
-<p align="center">
-  <a href="https://vibekanban.com">
-    <picture>
-      <source srcset="packages/public/vibe-kanban-logo-dark.svg" media="(prefers-color-scheme: dark)">
-      <source srcset="packages/public/vibe-kanban-logo.svg" media="(prefers-color-scheme: light)">
-      <img src="packages/public/vibe-kanban-logo.svg" alt="Vibe Kanban Logo">
-    </picture>
-  </a>
-</p>
+Pipelines guide agents through a process; their stage markers do not replace test
+results or pull-request checks.
 
-<p align="center">Get 10X more out of Claude Code, Gemini CLI, Codex, Amp and other coding agents...</p>
-<p align="center">
-  <a href="https://www.npmjs.com/package/vibe-kanban"><img alt="npm" src="https://img.shields.io/npm/v/vibe-kanban?style=flat-square" /></a>
-  <a href="https://github.com/BloopAI/vibe-kanban/blob/main/.github/workflows/publish.yml"><img alt="Build status" src="https://img.shields.io/github/actions/workflow/status/BloopAI/vibe-kanban/.github%2Fworkflows%2Fpublish.yml" /></a>
-  <a href="https://deepwiki.com/BloopAI/vibe-kanban"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
-</p>
+For work that continues beyond the current turn:
 
-<h1 align="center">
-  <a href="https://jobs.polymer.co/vibe-kanban?source=github"><strong>We're hiring!</strong></a>
-</h1>
+- Background helpers keep supervised commands running outside the agent's process group.
+- Pollers repeat a command on a bounded schedule, with a completion predicate or
+  timeout. A completion predicate can trigger a follow-up prompt.
+- Durable wakeups resume a session at a future time, or wait for an eligible turn
+  boundary if it is busy. Timers survive service restarts.
+- Tracked child issues run in independent workspaces and can resume the parent
+  session when their turn settles. The parent reviews the result and integrates
+  child commits explicitly.
+- Optional automatic error remediation creates or reuses a repair issue and starts
+  a configured pipeline, with limits to prevent recursive task creation.
 
-![](packages/public/vibe-kanban-screenshot-overview.png)
+See [pipeline definitions](assets/pipelines), [pipeline behavior](wiki/task-pipeline-block.md),
+[pollers](wiki/vk-pollers.md), [wakeups](wiki/durable-session-wakeups.md) and
+[tracked subtasks](wiki/tracked-background-subtasks.md).
 
-## Overview
+### Integrations and tools
 
-In a world where software engineers spend most of their time planning and reviewing coding agents, the most impactful way to ship more is to get faster at planning and review.
+| Integration | What it provides |
+| --- | --- |
+| Vibe Kanban MCP server | Programmatic access to issues, repositories, workspaces, sessions, history, PRs, browser sessions and durable automation. Workspace-scoped mode gives agents their task context. |
+| External MCP servers | Settings-managed server definitions and agent assignments, connectivity diagnostics and supported refresh or restart flows. |
+| MCP OAuth | Optional OAuth access for external clients that cannot launch a local stdio server. Requires issuer and proxy configuration. |
+| Jira | Optional bidirectional issue synchronization, project/status mapping and links back to Jira. |
+| Slack | A message shortcut that creates an issue with its source link. Optional configured AI summarization can prefill the issue from the thread. |
+| CLI tools and authentication | A pinned tool catalog, install/update/remove actions, host availability checks, vendor login flows and deployment-specific unattended reauthentication. |
+| Organization environment | Shared execution variables, including `op://` references resolved through configured 1Password access. |
+| GitHub owner credentials | Owner-specific tokens for repository and PR operations, with credential health reporting. |
+| Managed skills | Browse skills and propose edits through pull requests when a skills repository is configured. |
 
-Vibe Kanban is built for this. Use kanban issues to plan work, either privately or with your team. When you're ready to begin, create workspaces where coding agents can execute.
+Integrations need their own credentials and, in some cases, additional services.
+Installing a tool does not authenticate it on every worker.
 
-- **Plan with kanban issues** — create, prioritise, and assign issues on a kanban board
-- **Run coding agents in workspaces** — each workspace gives an agent a branch, a terminal, and a dev server
-- **Review diffs and leave inline comments** — send feedback directly to the agent without leaving the UI
-- **Preview your app** — built-in browser with devtools, inspect mode, and device emulation
-- **Switch between 10+ coding agents** — Claude Code, Codex, Gemini CLI, GitHub Copilot, Amp, Cursor, OpenCode, Droid, CCR, and Qwen Code
-- **Create pull requests and merge** — open PRs with AI-generated descriptions, review on GitHub, and merge
+See [Vibe Kanban MCP](docs/integrations/vibe-kanban-mcp-server.mdx),
+[MCP settings](docs/settings/mcp-servers.mdx),
+[CLI tools](docs/settings/cli-tools.mdx),
+[organization environment variables](docs/settings/organization-settings.mdx),
+[Jira sync](wiki/external-connector-sync.md) and
+[Slack setup](docs/integrations/slack-integration.mdx).
 
-![](packages/public/vibe-kanban-screenshot-workspace.png)
+### Distributed execution and operations
 
-Build our binaries once, then run them — no public package involved.
+An optional coordinator/worker deployment places workspaces on eligible servers
+and keeps subsequent execution on the assigned worker. Settings expose worker
+health, resource metrics, placement and recovery controls. Moving a workspace
+uses a coordinated stop, reassignment and continuation flow, subject to executor
+and artifact-transfer support.
+
+Worker-owned agent turns, child tasks, pollers and development servers can keep
+running through a coordinator restart. The coordinator reconnects to their output
+and reconciles outcomes. Work running directly in the coordinator process has a
+different restart lifecycle and may be interrupted. Worker failures are reported
+as interrupted or indeterminate when completion cannot be established.
+
+Paired remote hosts and relay access let you reach a running instance from another
+device. These are separate from cluster workers and require their own setup.
+
+See [clustered workers](docs/self-hosting/clustered-workers.mdx),
+[restart behavior](wiki/coordinator-restart-handoff.md) and
+[remote access](docs/remote-access.mdx).
+
+## Supported coding agents
+
+The executor registry includes:
+
+| Agent | Setup guide |
+| --- | --- |
+| Claude Code | [Claude Code](docs/agents/claude-code.mdx), with optional [Claude Code Router](docs/agents/ccr.mdx) configuration |
+| OpenAI Codex | [Codex](docs/agents/openai-codex.mdx) |
+| Gemini CLI | [Gemini](docs/agents/gemini-cli.mdx) |
+| Amp | [Amp](docs/agents/amp.mdx) |
+| OpenCode | [OpenCode](docs/agents/opencode.mdx) |
+| Cursor Agent | [Cursor](docs/agents/cursor-cli.mdx) |
+| Qwen Code | [Qwen Code](docs/agents/qwen-code.mdx) |
+| GitHub Copilot | [Copilot](docs/agents/github-copilot.mdx) |
+| Droid | [Droid](docs/agents/droid.mdx) |
+| Grok CLI | [Grok](docs/agents/grok.mdx) |
+
+Authenticate the agents you intend to use on the execution host. Available models,
+permissions and tools depend on the selected agent, account and profile.
+
+## Build and run
+
+Build this repository to run its current feature set. The source build uses:
+
+- Git, a native C/C++ build toolchain, `pkg-config`, OpenSSL development libraries,
+  libclang and `zip` on Linux; equivalent build tools on macOS.
+- Rust through rustup, using the toolchain pinned in [rust-toolchain.toml](rust-toolchain.toml).
+- Node.js 22.12+ or 24 and pnpm 10.13.1, pinned in [package.json](package.json).
+- An authenticated coding agent and any tools required by your project.
 
 ```bash
-./local-build.sh          # compiles our build into npx-cli/dist/
-node npx-cli/bin/cli.js    # runs our build (auto-detects the local dist)
-```
-
-
-## Installation
-
-Make sure you have authenticated with your favourite coding agent. A full list of supported coding agents can be found in the [docs](https://vibekanban.com/docs/supported-coding-agents). Then build and run our binaries:
-
-```bash
+git clone https://github.com/davidvasandani/vibe-kanban.git
+cd vibe-kanban
+pnpm install --frozen-lockfile
 ./local-build.sh
 node npx-cli/bin/cli.js
 ```
 
-For a long-running server, run the compiled `server` binary under a service
-manager instead — see `vibe-kanban.service.example` + `vibe-kanban.env.example`.
+The build produces the local web app and server, MCP, review, worker, remote API
+and relay binaries, then prepares the local launcher under `npx-cli/`. The
+launcher opens the app in your browser. Building the binaries does not start
+PostgreSQL, ElectricSQL or the remote collaboration stack.
 
-## Documentation
+`local-build.sh` currently embeds the hosted collaboration API as its default.
+To use your own remote service, override it when launching:
 
-Head to the [website](https://vibekanban.com/docs) for the latest documentation and user guides.
+```bash
+VK_SHARED_API_BASE=https://kanban.example.com node npx-cli/bin/cli.js
+```
 
-## Self-Hosting
+Use the [self-hosting section](#self-hosting) to configure that service.
 
-Want to host your own Vibe Kanban Cloud instance? See our [self-hosting guide](https://vibekanban.com/docs/self-hosting/deploy-docker).
+## Architecture
 
-## Support
+| Component | Responsibility |
+| --- | --- |
+| `packages/local-web` | Browser app served by the local execution server. |
+| `packages/remote-web` | Frontend for the remote collaboration deployment. |
+| `packages/web-core`, `packages/ui` | Shared feature logic and UI components. |
+| `crates/server`, `crates/services`, `crates/local-deployment` | Axum API, workspace lifecycle, orchestration, terminals and previews. |
+| `crates/db` | SQLite-backed local workspace, session and execution state. |
+| `crates/executors` | Agent protocols, profiles, approvals and normalized output. |
+| `crates/git`, `crates/git-host` | Git operations and hosting-provider integration. |
+| `crates/remote` | Collaboration API, authentication, organizations and issues in PostgreSQL, with ElectricSQL synchronization and REST fallback reads. |
+| `crates/worker` | Worker daemon for distributed execution. |
+| `crates/mcp`, `crates/review` | MCP server and review CLI. |
+| `crates/relay-tunnel`, `crates/relay-*` | Remote host access and relay transport. |
+| `crates/tauri-app` | Optional desktop shell. |
+| `shared` | Generated TypeScript types and schemas. |
 
-We use [GitHub Discussions](https://github.com/BloopAI/vibe-kanban/discussions) for feature requests. Please open a discussion to create a feature request. For bugs please open an issue on this repo.
+The local execution server and remote collaboration API are separate components.
+A local workspace can execute agents without operating a collaboration stack;
+shared boards, organizations and integrations use the remote service.
 
-## Contributing
+## Self-hosting
 
-We would prefer that ideas and changes are first raised with the core team via [GitHub Discussions](https://github.com/BloopAI/vibe-kanban/discussions) or [Discord](https://discord.gg/AC4nwVtJM3), where we can discuss implementation details and alignment with the existing roadmap. Please do not open PRs without first discussing your proposal with the team.
+For a persistent execution server, run the compiled binary under a service
+manager. Start with [the example service](vibe-kanban.service.example) and
+[environment file](vibe-kanban.env.example), adapting their paths and user to
+your installation. Pin the backend address and use the matching MCP binary from
+your build.
+
+| Setting | Purpose |
+| --- | --- |
+| `HOST` | Bind address, default `127.0.0.1`. |
+| `BACKEND_PORT` / `PORT` | Server port; `BACKEND_PORT` takes precedence. Otherwise the OS assigns a port. |
+| `PREVIEW_PROXY_PORT` | Separate preview proxy port. Pin it for a persistent service. |
+| `VIBE_BACKEND_URL` | Explicit backend URL for the MCP server. |
+| `VIBE_KANBAN_MCP_COMMAND` | Path to this build's `vibe-kanban-mcp` executable. |
+| `VK_ALLOWED_ORIGINS` | Comma-separated browser origins allowed to call the API behind a proxy or custom domain. |
+| `VK_SHARED_API_BASE` | Remote collaboration API URL. |
+| `VK_SHARED_RELAY_API_BASE`, `VK_TUNNEL` | Relay endpoint and opt-in tunnel mode. |
+
+For example, a reverse-proxied site at `https://kanban.example.com` needs
+`VK_ALLOWED_ORIGINS=https://kanban.example.com` on its execution server.
+
+To operate the collaboration service, configure PostgreSQL, ElectricSQL, a JWT
+secret and authentication. It supports GitHub/Google OAuth, bootstrap local
+email/password authentication, or `VIBEKANBAN_SINGLE_USER_MODE=true`. Single-user
+mode skips the normal login boundary and must sit behind your own access control.
+Issue attachments need separately configured storage.
+
+Use [the Docker deployment guide](docs/self-hosting/deploy-docker.mdx) and
+[Compose configuration](crates/remote/docker-compose.yml) as starting points,
+with this repository as the source checkout. Some inherited guides still show
+upstream clone or package commands; use the build instructions above for this
+repository's binaries.
+
+Serve remote collaboration over HTTPS with HTTP/2 to avoid browser connection
+limits affecting concurrent sync requests. A reverse proxy can terminate TLS;
+the remote binary also accepts `TLS_CERT_PATH` and `TLS_KEY_PATH` for direct TLS.
+See [attachment storage](docs/self-hosting/attachments-storage.mdx) and
+[cluster setup](docs/self-hosting/clustered-workers.mdx) for those optional parts.
+
+### Managed deployment
+
+This repository's main-branch pushes trigger
+[the homelab deployment workflow](.github/workflows/trigger-homelab-deploy.yml).
+It sends the commit SHA to `davidvasandani/homelab`, where
+[`modules/vibe-kanban-rebuild.nix`](https://github.com/davidvasandani/homelab/blob/main/modules/vibe-kanban-rebuild.nix)
+owns the NixOS service build, hosting, health gates and rollback.
+
+With `VK_RELEASES_DIR` set at build time, `local-build.sh` publishes versioned
+releases with `current` and `previous` links. Services run from those artifacts,
+not from a mutable source checkout. See [deployment details](wiki/self-hosted-deployment.md).
 
 ## Development
 
-### Prerequisites
+Install dependencies once in every fresh worktree before running repository
+verification. For the watch-based development server, also install `cargo-watch`:
 
-- [Rust](https://rustup.rs/) (latest stable)
-- [Node.js](https://nodejs.org/) (>=20)
-- [pnpm](https://pnpm.io/) (>=8)
-
-Additional development tools:
-```bash
-cargo install cargo-watch
-cargo install sqlx-cli
-```
-
-Install dependencies:
 ```bash
 pnpm install --frozen-lockfile
-```
-
-Run this install once in every fresh worktree before development or repository
-verification. `pnpm run format` checks this prerequisite before starting Rust
-and frontend formatting and prints the same setup command if it is missing.
-
-### Running the dev server
-
-```bash
+cargo install cargo-watch
 pnpm run dev
 ```
 
-This will start the backend and web app. A blank DB will be copied from the `dev_assets_seed` folder.
+The dev script selects ports and seeds the local development database. Set
+`VK_SHARED_API_BASE` before `pnpm run dev` if you want to connect it to a remote
+collaboration service. To run that stack locally, configure `crates/remote/.env.remote`
+using [the local development guide](docs/self-hosting/local-development.mdx), then
+use `pnpm run remote:dev:persist` to retain its database on shutdown.
+`remote:dev` removes Compose volumes when it stops.
 
-### Building the web app
+| Command | Purpose |
+| --- | --- |
+| `pnpm run format` | Format backend workspaces and web packages. |
+| `pnpm run check` | Frontend type checks and backend checks, including the remote crate. |
+| `pnpm run lint` | Frontend linting and backend Clippy checks. |
+| `cargo test --workspace` | Rust workspace tests. |
+| `cargo test --manifest-path crates/remote/Cargo.toml` | Tests for the separately managed remote crate. |
+| `pnpm --filter @vibe/local-web run build` | Build the local frontend. |
+| `pnpm run generate-types` / `pnpm run remote:generate-types` | Regenerate shared local or remote TypeScript types. |
+| `pnpm run prepare-db` / `pnpm run remote:prepare-db` | Prepare SQLx metadata; requires the relevant database tooling. |
 
-To build just the web app:
+Full-workspace checks include the optional Tauri crate and need its native
+platform dependencies. The default `local-build.sh` selects the headless binaries;
+desktop development is separate through `tauri:dev` and `tauri:build`.
 
-```bash
-cd packages/local-web
-pnpm run build
-```
+See [AGENTS.md](AGENTS.md) for repository conventions. Edit Rust type definitions
+and regenerate shared types rather than editing generated files.
 
-### Build from source (macOS)
+## Documentation and contributing
 
-1. Run `./local-build.sh`
-2. Test with `cd npx-cli && node bin/cli.js`
+- [Workspace guide](docs/workspaces/index.mdx) and [settings](docs/settings/index.mdx)
+- [User documentation source](docs/README.md)
+- [Project wiki](wiki/INDEX.md) and [engineering knowledge base](docs/knowledge-base/INDEX.md)
+- [Issues and feature requests](https://github.com/davidvasandani/vibe-kanban/issues)
+- [Pull requests](https://github.com/davidvasandani/vibe-kanban/pulls)
 
-### Environment Variables
+For contributions, describe the behavior being changed, keep the scope focused
+and include relevant validation. The project is licensed under [Apache 2.0](LICENSE).
 
-The following environment variables can be configured at build time or runtime:
-
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `POSTHOG_API_KEY` | Build-time | Empty | PostHog analytics API key (disables analytics if empty) |
-| `POSTHOG_API_ENDPOINT` | Build-time | Empty | PostHog analytics endpoint (disables analytics if empty) |
-| `PORT` | Runtime | Auto-assign | **Production**: Server port. **Dev**: Frontend port (backend uses PORT+1) |
-| `BACKEND_PORT` | Runtime | `0` (auto-assign) | Backend server port (dev mode only, overrides PORT+1) |
-| `FRONTEND_PORT` | Runtime | `3000` | Frontend dev server port (dev mode only, overrides PORT) |
-| `HOST` | Runtime | `127.0.0.1` | Backend server host |
-| `MCP_HOST` | Runtime | Value of `HOST` | MCP server connection host (use `127.0.0.1` when `HOST=0.0.0.0` on Windows) |
-| `MCP_PORT` | Runtime | Value of `BACKEND_PORT` | MCP server connection port |
-| `DISABLE_WORKTREE_CLEANUP` | Runtime | Not set | Disable all git worktree cleanup including orphan and expired workspace cleanup (for debugging) |
-| `VK_ALLOWED_ORIGINS` | Runtime | Not set | Comma-separated list of origins that are allowed to make backend API requests (e.g., `https://my-vibekanban-frontend.com`) |
-| `VK_SHARED_API_BASE` | Runtime | Not set | Base URL for the remote/cloud API used by the local desktop app |
-| `VK_SHARED_RELAY_API_BASE` | Runtime | Not set | Base URL for the relay API used by tunnel-mode connections |
-| `VK_TUNNEL` | Runtime | Not set | Enable relay tunnel mode when set (requires relay API base URL) |
-
-**Build-time variables** must be set when running `pnpm run build`. **Runtime variables** are read when the application starts.
-
-#### Self-Hosting with a Reverse Proxy or Custom Domain
-
-When running Vibe Kanban behind a reverse proxy (e.g., nginx, Caddy, Traefik) or on a custom domain, you must set the `VK_ALLOWED_ORIGINS` environment variable. Without this, the browser's Origin header won't match the backend's expected host, and API requests will be rejected with a 403 Forbidden error.
-
-Set it to the full origin URL(s) where your frontend is accessible:
-
-```bash
-# Single origin
-VK_ALLOWED_ORIGINS=https://vk.example.com
-
-# Multiple origins (comma-separated)
-VK_ALLOWED_ORIGINS=https://vk.example.com,https://vk-staging.example.com
-```
-
-### Remote Deployment
-
-When running Vibe Kanban on a remote server (e.g., via systemctl, Docker, or cloud hosting), you can configure your editor to open projects via SSH:
-
-1. **Access via tunnel**: Use Cloudflare Tunnel, ngrok, or similar to expose the web UI
-2. **Configure remote SSH** in Settings → Editor Integration:
-   - Set **Remote SSH Host** to your server hostname or IP
-   - Set **Remote SSH User** to your SSH username (optional)
-3. **Prerequisites**:
-   - SSH access from your local machine to the remote server
-   - SSH keys configured (passwordless authentication)
-   - VSCode Remote-SSH extension
-
-When configured, the "Open in VSCode" buttons will generate URLs like `vscode://vscode-remote/ssh-remote+user@host/path` that open your local editor and connect to the remote server.
-
-See the [documentation](https://vibekanban.com/docs/settings/general) for detailed setup instructions.
+[^lineage]: This repository is a fork of [BloopAI/vibe-kanban](https://github.com/BloopAI/vibe-kanban), incorporating work from [2001zhaozhao/vibe-kanban](https://github.com/2001zhaozhao/vibe-kanban) and subsequent development here. See [CONTRIBUTORS.md](CONTRIBUTORS.md) and Git history for attribution.
