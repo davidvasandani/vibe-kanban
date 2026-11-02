@@ -1,7 +1,8 @@
 # Independent review and validation
 
-Seven independent Codex review passes completed (five initial passes, a full
-post-integration review against origin/main, and a focused review of its fix).
+Eight independent Codex review passes completed: five initial passes, a full
+post-integration review, a focused review of its fix, and a final full review
+against origin/main. The final full review found no actionable regressions.
 Confirmed findings were addressed:
 
 1. Generate ArchiveIntent's TypeScript export.
@@ -27,8 +28,9 @@ confirmed the fix and reported no introduced defects.
 - Live PostgreSQL 16 migration validation: archived inserts, metadata stability,
   new event identity after rearchive, and transactional rollback passed.
 - PR #388 CI on 81834221: frontend, backend Clippy/tests/schema, and remote tests passed.
-- Focused server wake-up rerun for item 8 is in progress; PR checks must also pass
-  on the final pushed commit before merge.
+- Focused server wake-up rerun for item 8: all four tests passed.
+- Final integrated tree at 54c84f34: format, check, lint, all targeted Rust suites,
+  14 frontend tests, and diff checks passed. All six PR CI jobs passed.
 
 Knowledge pages and index are committed. The latest main was merged; conflicts
 were confined to task-specific root specification/plan files, which retain this
@@ -38,4 +40,6 @@ A second integration pulled main 0493a8a7 (standalone dispatcher wiring and
 pipeline-artifact isolation). Root task docs retain this feature and wiki
 contributor entries retain both tasks. The local archive-intent migration was
 renumbered to 20261102000000 to avoid the new base migration version. Final
-verification and a full review are being repeated on this integrated tree.
+verification and a full review passed on this integrated tree. The subsequent
+commit only records these results and task completion; GitHub records final
+merge status on PR #388.
