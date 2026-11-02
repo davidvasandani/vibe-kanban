@@ -1,0 +1,56 @@
+name = "SpecKit"
+description = "Spec-Driven Development flow: run the /speckit.* slash commands in order; each command carries the exact artifact paths."
+
+[[stage]]
+id = "speckit-constitution"
+label = "SpecKit: Constitution"
+default_enabled = true
+prompt = "SpecKit: establish or refresh the project constitution by running `/speckit.constitution` before specifying."
+
+[[stage]]
+id = "speckit-specify"
+label = "SpecKit: Specify"
+default_enabled = true
+prompt = "SpecKit: write the feature specification by running `/speckit.specify`, focusing on what and why (the command names the exact spec path)."
+
+[[stage]]
+id = "speckit-clarify"
+label = "SpecKit: Clarify"
+default_enabled = true
+prompt = "SpecKit: resolve the spec's open questions by running `/speckit.clarify` before planning."
+
+[[stage]]
+id = "speckit-plan"
+label = "SpecKit: Plan"
+default_enabled = true
+prompt = "SpecKit: write the technical plan plus research/data-model/contracts as needed by running `/speckit.plan`."
+
+[[stage]]
+id = "speckit-tasks"
+label = "SpecKit: Tasks"
+default_enabled = true
+prompt = "SpecKit: break the plan into a dependency-ordered, parallel-aware tasks list by running `/speckit.tasks`."
+
+[[stage]]
+id = "speckit-analyze"
+label = "SpecKit: Analyze"
+default_enabled = true
+prompt = "SpecKit: cross-check spec, plan, and tasks for gaps and constitution violations by running `/speckit.analyze` before implementing."
+
+[[stage]]
+id = "speckit-implement"
+label = "SpecKit: Implement"
+default_enabled = true
+prompt = "SpecKit: execute the tasks list in dependency order by running `/speckit.implement`, doing `[P]` tasks within a layer together and ticking each task off as it lands."
+
+[[stage]]
+id = "code-review"
+label = "Review via Codex"
+default_enabled = false
+prompt = "After implementing, run an independent Codex review of the task's diff (the `codex-review` skill / Codex CLI), iterating until it reports no significant findings. Address confirmed findings and re-verify before marking the task ready."
+
+[[stage]]
+id = "merge"
+label = "Merge to base"
+default_enabled = false
+prompt = "When the work is implemented and reviewed, merge this task's branch into the base branch."

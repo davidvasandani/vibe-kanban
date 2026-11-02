@@ -5,13 +5,13 @@ description = "Classic dev flow: spec → plan → implement → review."
 id = "spec"
 label = "Create spec"
 default_enabled = true
-prompt = "Write a technical spec for this task and save it to `SPEC.md` at the repo root before implementing."
+prompt = "Write a technical spec for this task before implementing and save it to `specs/vk/<task-id>/technical-spec.md`, replacing `<task-id>` with the current task's identifier from the task or task branch. If git reports that path as ignored, this repository keeps pipeline artifacts out of git: leave the file uncommitted and never force-add it."
 
 [[stage]]
 id = "plan"
 label = "Create plan"
 default_enabled = true
-prompt = "Write a step-by-step implementation plan and save it to `IMPLEMENTATION_PLAN.md` at the repo root."
+prompt = "Write a step-by-step implementation plan and save it to `specs/vk/<task-id>/implementation-plan.md`, replacing `<task-id>` with the current task's identifier from the task or task branch. If git reports that path as ignored, this repository keeps pipeline artifacts out of git: leave the file uncommitted and never force-add it."
 
 [[stage]]
 id = "plan-review"

@@ -712,6 +712,10 @@
           "helper": "Comma-separated list of files to copy from the original repository directory to the worktree. Useful for environment files like .env. Make sure these are gitignored!",
           "placeholder": "File paths or glob patterns (e.g., .env, config/*.json)"
         },
+        "localPipelineArtifacts": {
+          "label": "Keep pipeline artifacts out of git",
+          "helper": "Pipeline specs, plans and notes under specs/vk/ (and SpecKit's specs/ and .specify/ folders) stay in the workspace but are git-ignored, so they are never committed or shown in PRs. Applies when a workspace is next set up. Files this repository already tracks stay tracked."
+        },
         "devServer": {
           "label": "Dev Server Script",
           "helper": "Starts a development server for this repository. Scripts execute from within the repository's worktree directory."
