@@ -3,6 +3,7 @@ use axum::Router;
 use deployment::{Deployment, DeploymentError};
 use server::{
     DeploymentImpl, middleware::origin::validate_origin, routes, runtime::relay_registration,
+    startup,
 };
 use services::services::container::ContainerService;
 use sqlx::Error as SqlxError;
@@ -12,7 +13,6 @@ use tokio_util::sync::CancellationToken;
 use tower_http::validate_request::ValidateRequestHeaderLayer;
 use tracing_subscriber::{EnvFilter, prelude::*};
 use utils::{
-    assets::asset_dir,
     port_file::write_port_file_with_proxy,
     sentry::{self as sentry_utils, SentrySource, sentry_layer},
 };
@@ -49,81 +49,10 @@ async fn main() -> Result<(), VibeKanbanError> {
         .with(sentry_layer())
         .init();
 
-    // Create asset directory if it doesn't exist
-    if !asset_dir().exists() {
-        std::fs::create_dir_all(asset_dir())?;
-    }
-
-    // Copy old database to new location for safe downgrades
-    let old_db = asset_dir().join("db.sqlite");
-    let new_db = asset_dir().join("db.v2.sqlite");
-    if !new_db.exists() && old_db.exists() {
-        tracing::info!(
-            "Copying database to new location: {:?} -> {:?}",
-            old_db,
-            new_db
-        );
-        std::fs::copy(&old_db, &new_db).expect("Failed to copy database file");
-        tracing::info!("Database copy complete");
-    }
-
     let shutdown_token = CancellationToken::new();
+    // Share background-service startup and recovery with the desktop server.
+    let deployment = startup::initialize_deployment(shutdown_token.clone()).await?;
 
-    let deployment = DeploymentImpl::new(shutdown_token.clone()).await?;
-    deployment.update_sentry_scope().await?;
-    let interrupted_processes = deployment
-        .container()
-        .cleanup_orphan_executions()
-        .await
-        .map_err(DeploymentError::from)?;
-    // Worker-owned executions were handed off, not stopped, by the previous
-    // instance (or it crashed). Resume following them before anything can
-    // start new work in their sessions.
-    deployment.container().reattach_worker_executions().await;
-    let interrupted_creations =
-        db::models::workspace::Workspace::fail_unfinished_creations(&deployment.db().pool).await?;
-    if interrupted_creations > 0 {
-        tracing::warn!(
-            "Marked {} interrupted workspace creations as failed",
-            interrupted_creations
-        );
-    }
-    deployment
-        .browser_sessions()
-        .cleanup_orphan_sessions()
-        .await;
-    deployment
-        .container()
-        .restart_interrupted_dev_servers(&interrupted_processes)
-        .await;
-    if deployment
-        .config()
-        .read()
-        .await
-        .resume_interrupted_on_startup
-    {
-        deployment
-            .container()
-            .resume_interrupted_coding_agents(&interrupted_processes)
-            .await;
-    }
-    deployment
-        .container()
-        .backfill_before_head_commits()
-        .await
-        .map_err(DeploymentError::from)?;
-    deployment
-        .container()
-        .backfill_repo_names()
-        .await
-        .map_err(DeploymentError::from)?;
-    deployment
-        .track_if_analytics_allowed("session_start", serde_json::json!({}))
-        .await;
-    // Preload global executor options cache for all executors with DEFAULT presets
-    tokio::spawn(async move {
-        executors::executors::utils::preload_global_executor_options_cache().await;
-    });
     let port = std::env::var("BACKEND_PORT")
         .or_else(|_| std::env::var("PORT"))
         .ok()

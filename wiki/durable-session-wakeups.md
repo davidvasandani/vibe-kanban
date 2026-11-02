@@ -28,6 +28,29 @@ Limits are eight pending records and 32 total wake-up records per session.
 The total includes completed and cancelled records, bounding unattended
 self-chaining even when each new timer stays below the pending limit.
 
+## Standalone startup must use the shared initializer
+
+In `vk/d5c5-scheduled-wakeup`, production timers stayed pending for days with
+`attempt_count = 0` and no reason or error. The standalone `main.rs` duplicated
+deployment initialization and omitted the dispatcher subscription, periodic
+sweep and startup reconciliation marker. `startup::initialize_deployment`
+already started them, but only the desktop entrypoint used it. Restarting the
+standalone server could not repair missing startup wiring.
+
+The standalone now delegates deployment initialization to that shared function.
+Keep event subscription before orphan cleanup/resume and mark reconciliation
+after the resume decision. Do not copy background startup calls into another
+entrypoint. The source-wiring integration test in
+`crates/server/tests/startup_wiring.rs` covers the production entrypoint; existing
+behavioral dispatcher tests alone did not detect this omission.
+
+For diagnosis, compare the running release's `release.json.sha` with the source,
+then inspect delivery state, attempt count and reasons. A pending row with zero
+attempts is not proof of an active-agent delay. Do not manually replay an overdue
+operational prompt to test the scheduler. After a fixed release starts, retained
+rows are reconsidered under normal busy, stopped-target and cancellation rules;
+merge alone does not prove delivery.
+
 ## Condition pollers and completion receipts
 
 `spawn_poller(on_stop_prompt=...)` additionally requires `stop_command`.
@@ -70,3 +93,4 @@ as a successful trigger.
 ## Contributed by
 
 - vk/5ae4-pollers-add-a-ti
+- vk/d5c5-scheduled-wakeup
