@@ -1,0 +1,284 @@
+# Build every linux-x64 artifact homelab deploys and publish it as an
+# immutable GitHub Release, one per commit on main.
+#
+# Homelab no longer compiles this fork: its vibe-kanban-rebuild unit downloads
+# the release for the commit it wants, verifies SHA256SUMS, and deploys it
+# (homelab: modules/vibe-kanban-release-fetch.sh). Anything outside the homelab
+# can consume the same assets by URL + sha256.
+#
+#   tag      build-<first 12 hex of the sha>, never re-uploaded
+#   assets   <bin>-linux-x64.tar.gz per binary, remote-web-dist.tar.gz,
+#            release.json, SHA256SUMS
+#   binaries static musl (x86_64-unknown-linux-musl via cargo-zigbuild, as
+#            upstream ships them), so they run on any x86_64 Linux unpatched
+#
+# Releases are prereleases and never marked latest: consumers pin a tag.
+# Pull requests that touch the release path run the build, smoke and secret
+# scan without publishing.
+name: Release
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/release.yml
+      - scripts/release/**
+      - rust-toolchain.toml
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Commit on main to build (full 40-hex sha; default = head of main)
+        required: false
+        default: ''
+
+# One build per commit; a re-run for the same sha waits rather than racing the
+# immutable upload.
+concurrency:
+  group: release-${{ github.event.pull_request.head.sha || inputs.sha || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+  NODE_VERSION: 22
+  PNPM_VERSION: 10.13.1
+  RUST_TOOLCHAIN: nightly-2025-12-04
+  TARGET: x86_64-unknown-linux-musl
+
+jobs:
+  build:
+    name: Build linux-x64 release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    outputs:
+      sha: ${{ steps.meta.outputs.sha }}
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || inputs.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve release identity
+        id: meta
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          if [ "$EVENT" = workflow_dispatch ] && [ -n "$INPUT_SHA" ]; then
+            if ! printf '%s' "$INPUT_SHA" | grep -qxE '[0-9a-f]{40}' || [ "$INPUT_SHA" != "$sha" ]; then
+              echo "::error::sha input must be a full 40-hex commit sha (got '$INPUT_SHA')"
+              exit 1
+            fi
+          fi
+          # Only main is ever released; a dispatched sha must already be on it.
+          if [ "$EVENT" != pull_request ] && ! git merge-base --is-ancestor "$sha" origin/main; then
+            echo "::error::$sha is not on main; refusing to release it"
+            exit 1
+          fi
+          {
+            echo "sha=$sha"
+            echo "tag=build-${sha:0:12}"
+            echo "build_id=gh-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "started=$(date +%s)"
+          } >> "$GITHUB_OUTPUT"
+
+      # Hosted runners start with ~20 GB free; a release build of both cargo
+      # workspaces plus the web bundles needs more than that.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          DEBIAN_FRONTEND=noninteractive sudo apt-get install -y clang libclang-dev lld llvm nasm cmake ninja-build
+
+      - name: Setup Node
+        uses: ./.github/actions/setup-node
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ env.TARGET }}
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: |
+            . -> target
+          shared-key: release-${{ env.TARGET }}
+          cache-all-crates: true
+          # PR builds read main's cache but never write their own.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.15.2
+
+      - name: Install cargo-zigbuild
+        uses: taiki-e/cache-cargo-install-action@34ce5120836e5f9f1508d8713d7fdea0e8facd6f # v3.0.1
+        with:
+          tool: cargo-zigbuild
+          git: https://github.com/rust-cross/cargo-zigbuild
+          rev: bbb57ac6a5eb90f53617a5c218fda03080599e4a # v0.20.1
+
+      - name: Install web dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Compile-time values. VK_SHARED_API_BASE keeps local-build.sh's default;
+      # deployments override it at runtime (homelab sets VK_SHARED_API_BASE and
+      # VK_SHARED_RELAY_API_BASE in its units). Analytics and crash-reporting
+      # keys stay empty on purpose: the release is public.
+      - name: Export build environment
+        env:
+          SHA: ${{ steps.meta.outputs.sha }}
+          BUILT_AT: ${{ steps.meta.outputs.built_at }}
+        run: |
+          {
+            echo "VK_BUILD_GIT_SHA=$SHA"
+            echo "VK_BUILD_TIMESTAMP=$BUILT_AT"
+            echo "VK_SHARED_API_BASE=https://api.vibekanban.com"
+            echo "VITE_VK_SHARED_API_BASE=https://api.vibekanban.com"
+            echo "POSTHOG_API_KEY="
+            echo "POSTHOG_API_ENDPOINT="
+            echo "SENTRY_DSN="
+            echo "SENTRY_DSN_REMOTE="
+            echo "SQLX_OFFLINE=true"
+          } >> "$GITHUB_ENV"
+
+      - name: Build web bundles
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
+        run: |
+          (cd packages/local-web && npm run build)
+          (cd packages/remote-web && npm run build)
+
+      - name: Build Rust binaries
+        run: |
+          set -euo pipefail
+          # Same binaries local-build.sh builds, for the musl target.
+          cargo zigbuild --release --locked --target "$TARGET" \
+            --bin server --bin vibe-kanban-mcp --bin review --bin vibe-kanban-worker
+          # crates/remote and crates/relay-tunnel are excluded from the root
+          # workspace; build them via their own manifests into the same target dir.
+          cargo zigbuild --release --locked --target "$TARGET" \
+            --manifest-path crates/remote/Cargo.toml --target-dir target --bin remote
+          cargo zigbuild --release --locked --target "$TARGET" \
+            --manifest-path crates/relay-tunnel/Cargo.toml --target-dir target --bin relay-server
+          df -h /
+
+      - name: Package release assets
+        env:
+          BIN_DIR: target/${{ env.TARGET }}/release
+          REMOTE_WEB_DIST: packages/remote-web/dist
+          OUT_DIR: ${{ runner.temp }}/release-assets
+          RELEASE_SHA: ${{ steps.meta.outputs.sha }}
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+          BUILD_ID: ${{ steps.meta.outputs.build_id }}
+          BUILT_AT: ${{ steps.meta.outputs.built_at }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash scripts/release/package.sh
+
+      - name: Secret scan (self-test)
+        run: bash scripts/release/scan-secrets.sh --self-test
+
+      - name: Secret scan (release assets)
+        run: bash scripts/release/scan-secrets.sh "${{ runner.temp }}/release-assets"
+
+      - name: Smoke test (static, standalone, reports its sha)
+        run: bash scripts/release/smoke.sh "${{ runner.temp }}/release-assets"
+
+      - name: Record build time
+        env:
+          STARTED: ${{ steps.meta.outputs.started }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          # shellcheck disable=SC2016 # the backticks are markdown, not expansion
+          elapsed=$(( $(date +%s) - STARTED ))
+          printf '### %s\n\nBuilt in %dm%02ds (checkout to packaged assets).\n\n```\n%s\n```\n' \
+            "$TAG" $((elapsed / 60)) $((elapsed % 60)) "$(cat "${{ runner.temp }}/release-assets/SHA256SUMS")" \
+            >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice title=Release build time::$TAG built in ${elapsed}s"
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: release-assets
+          path: ${{ runner.temp }}/release-assets/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ needs.build.outputs.tag }}
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: release-assets
+          path: assets
+
+      - name: Verify assets before upload
+        working-directory: assets
+        env:
+          SHA: ${{ needs.build.outputs.sha }}
+        run: |
+          set -euo pipefail
+          sha256sum -c SHA256SUMS
+          [ "$(jq -r .sha release.json)" = "$SHA" ]
+
+      # Immutable: an existing tag is never re-uploaded. A re-run for a commit
+      # that already has a release only checks the published SHA256SUMS still
+      # matches what this run recorded for the non-binary metadata, then moves
+      # on so the homelab dispatch still fires.
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.build.outputs.tag }}
+          SHA: ${{ needs.build.outputs.sha }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "::notice::release $TAG already exists; not re-uploading (releases are immutable)"
+            gh release download "$TAG" -R "$GITHUB_REPOSITORY" -p release.json -O - | jq -e --arg sha "$SHA" '.sha == $sha' > /dev/null \
+              || { echo "::error::existing release $TAG is for a different sha"; exit 1; }
+            exit 0
+          fi
+          subject="$(gh api "repos/$GITHUB_REPOSITORY/commits/$SHA" --jq '.commit.message | split("\n")[0]')"
+          notes="$(printf 'Automated linux-x64 build of %s\n\n%s\n\nStatic musl binaries (x86_64-unknown-linux-musl). Verify with SHA256SUMS. Pin by tag; this release is never replaced.\n\nBuilt by %s' \
+            "$SHA" "$subject" "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID")"
+          gh release create "$TAG" assets/* \
+            -R "$GITHUB_REPOSITORY" \
+            --target "$SHA" \
+            --title "$TAG" \
+            --notes "$notes" \
+            --prerelease \
+            --latest=false
+
+  # Homelab deploys only after the release exists (trigger-homelab-deploy.yml).
+  dispatch-homelab:
+    name: Dispatch homelab deploy
+    needs: [build, publish]
+    if: github.event_name != 'pull_request'
+    uses: ./.github/workflows/trigger-homelab-deploy.yml
+    with:
+      sha: ${{ needs.build.outputs.sha }}
+      tag: ${{ needs.build.outputs.tag }}
+    secrets: inherit

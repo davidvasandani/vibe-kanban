@@ -1,6 +1,7 @@
-# Auto-dispatch davidvasandani/homelab's vibe-kanban-deploy workflow on every
-# merge to main, so vibe-kanban-dev.vasandani.dev redeploys without a manual
-# `gh workflow run`.
+# Dispatch davidvasandani/homelab's vibe-kanban-deploy workflow once a release
+# for a commit on main is published. Called by release.yml after its publish
+# job, so homelab is only asked to deploy a commit whose release assets exist:
+# homelab downloads that release instead of compiling the fork.
 #
 # Keep this fork-specific workflow during upstream syncs so the homelab
 # dispatch remains the deployment source of truth.
@@ -11,9 +12,26 @@
 name: Trigger homelab CD
 
 on:
-  push:
-    branches: [main]
+  workflow_call:
+    inputs:
+      sha:
+        description: Released commit (full sha)
+        required: true
+        type: string
+      tag:
+        description: Release tag (build-<12 hex>)
+        required: true
+        type: string
   workflow_dispatch:
+    inputs:
+      sha:
+        description: Released commit (full sha)
+        required: true
+        type: string
+      tag:
+        description: Release tag (build-<12 hex>)
+        required: true
+        type: string
 
 jobs:
   dispatch:
@@ -27,6 +45,8 @@ jobs:
           event-type: vibe-kanban-deploy
           client-payload: |
             {
-              "sha": "${{ github.sha }}",
-              "ref": "${{ github.ref_name }}"
+              "sha": "${{ inputs.sha }}",
+              "ref": "main",
+              "tag": "${{ inputs.tag }}",
+              "checksums_url": "${{ github.server_url }}/${{ github.repository }}/releases/download/${{ inputs.tag }}/SHA256SUMS"
             }
