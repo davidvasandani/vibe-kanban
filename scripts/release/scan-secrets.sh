@@ -34,7 +34,8 @@ PATTERNS=(
   'npm-token|npm_[A-Za-z0-9]{36}'
 )
 
-# Total matches across every file scanned (a return code would wrap at 256).
+# Total matches (and scan errors) across every file (a return code would wrap
+# at 256).
 FOUND=0
 
 # Returns 1 when the file holds at least one match.
@@ -44,12 +45,22 @@ scan_file() {
     name="${entry%%|*}"
     re="${entry#*|}"
     # -z: NUL-delimited records, so a PEM body's newline stays inside one
-    # record and multi-line shapes can match.
+    # record and multi-line shapes can match. grep exits 1 for "no match";
+    # anything above that means the file was NOT scanned, which must block
+    # publication rather than read as clean.
+    local out rc=0
+    out="$(mktemp)"
+    LC_ALL=C grep -aozP -- "$re" "$file" > "$out" 2> "$out.err" || rc=$?
+    if [ "$rc" -gt 1 ]; then
+      printf 'SCAN ERROR: %s: %s: grep exit %s: %s\n' "$label" "$name" "$rc" "$(head -c 200 "$out.err")" >&2
+      hits=$((hits + 1))
+    fi
     while IFS= read -r -d '' match; do
       [ -n "$match" ] || continue
       printf 'SECRET-SHAPED STRING: %s: %s (%s…)\n' "$label" "$name" "${match:0:4}" >&2
       hits=$((hits + 1))
-    done < <(LC_ALL=C grep -aozP -- "$re" "$file" 2>/dev/null || true)
+    done < "$out"
+    rm -f "$out" "$out.err"
   done
   FOUND=$((FOUND + hits))
   [ "$hits" -eq 0 ]
@@ -145,6 +156,11 @@ self_test() {
   cp "$dir/pkg.tar.gz" "$dir/assets/"
   if scan_path "$dir/assets" 2>/dev/null; then
     echo "self-test: token inside an archive inside a directory was NOT found" >&2
+    rc=1
+  fi
+  # A file grep cannot read must fail the scan, not pass it.
+  if scan_file "$dir/does-not-exist.bin" missing.bin 2>/dev/null; then
+    echo "self-test: an unscannable file was reported clean" >&2
     rc=1
   fi
   # And a clean file must pass.
