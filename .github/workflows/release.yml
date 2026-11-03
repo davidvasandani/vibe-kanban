@@ -206,8 +206,8 @@ jobs:
           STARTED: ${{ steps.meta.outputs.started }}
           TAG: ${{ steps.meta.outputs.tag }}
         run: |
-          # shellcheck disable=SC2016 # the backticks are markdown, not expansion
           elapsed=$(( $(date +%s) - STARTED ))
+          # shellcheck disable=SC2016 # the backticks are markdown, not expansion
           printf '### %s\n\nBuilt in %dm%02ds (checkout to packaged assets).\n\n```\n%s\n```\n' \
             "$TAG" $((elapsed / 60)) $((elapsed % 60)) "$(cat "${{ runner.temp }}/release-assets/SHA256SUMS")" \
             >> "$GITHUB_STEP_SUMMARY"
