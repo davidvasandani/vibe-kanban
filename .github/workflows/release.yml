@@ -244,10 +244,12 @@ jobs:
           sha256sum -c SHA256SUMS
           [ "$(jq -r .sha release.json)" = "$SHA" ]
 
-      # Immutable: an existing tag is never re-uploaded. A re-run for a commit
-      # that already has a release only checks the published SHA256SUMS still
-      # matches what this run recorded for the non-binary metadata, then moves
-      # on so the homelab dispatch still fires.
+      # Immutable: an existing release is never re-uploaded. The repository has
+      # immutable releases enabled, so assets go onto a draft and the draft is
+      # published last; once published nothing can be replaced. A re-run for a
+      # commit that already has a published release checks it is for the same
+      # sha and moves on so the homelab dispatch still fires. A leftover draft
+      # from a failed earlier attempt is not public and is replaced.
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -255,22 +257,40 @@ jobs:
           SHA: ${{ needs.build.outputs.sha }}
         run: |
           set -euo pipefail
-          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
-            echo "::notice::release $TAG already exists; not re-uploading (releases are immutable)"
-            gh release download "$TAG" -R "$GITHUB_REPOSITORY" -p release.json -O - | jq -e --arg sha "$SHA" '.sha == $sha' > /dev/null \
-              || { echo "::error::existing release $TAG is for a different sha"; exit 1; }
-            exit 0
+          if draft="$(gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null)"; then
+            if [ "$draft" = true ]; then
+              echo "::warning::deleting unpublished draft $TAG left by an earlier attempt"
+              gh release delete "$TAG" -R "$GITHUB_REPOSITORY" --yes
+            else
+              echo "::notice::release $TAG already published; not re-uploading (releases are immutable)"
+              gh release download "$TAG" -R "$GITHUB_REPOSITORY" -p release.json -O - \
+                | jq -e --arg sha "$SHA" '.sha == $sha' > /dev/null \
+                || { echo "::error::existing release $TAG is for a different sha"; exit 1; }
+              exit 0
+            fi
           fi
           subject="$(gh api "repos/$GITHUB_REPOSITORY/commits/$SHA" --jq '.commit.message | split("\n")[0]')"
           notes="$(printf 'Automated linux-x64 build of %s\n\n%s\n\nStatic musl binaries (x86_64-unknown-linux-musl). Verify with SHA256SUMS. Pin by tag; this release is never replaced.\n\nBuilt by %s' \
             "$SHA" "$subject" "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID")"
-          gh release create "$TAG" assets/* \
+          gh release create "$TAG" \
             -R "$GITHUB_REPOSITORY" \
+            --draft \
             --target "$SHA" \
             --title "$TAG" \
             --notes "$notes" \
             --prerelease \
             --latest=false
+          gh release upload "$TAG" assets/* -R "$GITHUB_REPOSITORY"
+          # Every asset must be on the draft before it is frozen.
+          want="$(find assets -maxdepth 1 -type f -printf "%f\n" | sort)"
+          have="$(gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | sort)"
+          if [ "$want" != "$have" ]; then
+            echo "::error::draft $TAG assets differ from the build output"
+            diff <(echo "$want") <(echo "$have") || true
+            exit 1
+          fi
+          gh release edit "$TAG" -R "$GITHUB_REPOSITORY" --draft=false --prerelease --latest=false
+          echo "::notice::published $TAG"
 
   # Homelab deploys only after the release exists (trigger-homelab-deploy.yml).
   dispatch-homelab:
