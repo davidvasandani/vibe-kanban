@@ -50,7 +50,7 @@ env -i \
 server_pid=$!
 
 deadline=$((SECONDS + 90))
-until curl -fsS -m 2 -o /dev/null "http://127.0.0.1:$port/api/health"; do
+until curl -fsS -m 2 -o /dev/null "http://127.0.0.1:$port/api/health" 2>/dev/null; do
   if ! kill -0 "$server_pid" 2>/dev/null || [ "$SECONDS" -ge "$deadline" ]; then
     echo "smoke: vibe-kanban did not become healthy; log tail:" >&2
     tail -n 50 "$log" >&2
