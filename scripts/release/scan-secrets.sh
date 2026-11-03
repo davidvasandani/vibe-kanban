@@ -55,33 +55,43 @@ scan_file() {
   [ "$hits" -eq 0 ]
 }
 
+# Archives are unpacked and their members scanned (compressed bytes would hide
+# any token), recursively, wherever they appear — top level or inside a dir.
+scan_archive() {
+  local archive="$1" label="$2" work clean=0
+  work="$(mktemp -d)"
+  if ! tar -xzf "$archive" -C "$work"; then
+    echo "scan-secrets: cannot unpack $label" >&2
+    rm -rf "$work"
+    FOUND=$((FOUND + 1))
+    return 1
+  fi
+  scan_tree "$work" "$label!" || clean=1
+  rm -rf "$work"
+  return "$clean"
+}
+
 scan_tree() {
   local root="$1" prefix="$2" clean=0 file
   while IFS= read -r -d '' file; do
-    scan_file "$file" "$prefix${file#"$root"/}" || clean=1
+    case "$file" in
+      *.tar.gz | *.tgz) scan_archive "$file" "$prefix${file#"$root"/}" || clean=1 ;;
+      *) scan_file "$file" "$prefix${file#"$root"/}" || clean=1 ;;
+    esac
   done < <(find "$root" -type f -print0)
   return "$clean"
 }
 
 scan_path() {
-  local path="$1" work clean=0
-  work="$(mktemp -d)"
-  # shellcheck disable=SC2064 # expand now: $work is local
-  trap "rm -rf '$work'" RETURN
-  case "$path" in
-    *.tar.gz | *.tgz)
-      tar -xzf "$path" -C "$work"
-      scan_tree "$work" "$(basename "$path")!" || clean=1
-      ;;
-    *)
-      if [ -d "$path" ]; then
-        scan_tree "$path" "" || clean=1
-      else
-        scan_file "$path" "$(basename "$path")" || clean=1
-      fi
-      ;;
-  esac
-  return "$clean"
+  local path="$1"
+  if [ -d "$path" ]; then
+    scan_tree "$path" ""
+  else
+    case "$path" in
+      *.tar.gz | *.tgz) scan_archive "$path" "$(basename "$path")" ;;
+      *) scan_file "$path" "$(basename "$path")" ;;
+    esac
+  fi
 }
 
 self_test() {
@@ -127,6 +137,14 @@ self_test() {
   tar -czf "$dir/pkg.tar.gz" -C "$dir/pkg" bin
   if scan_path "$dir/pkg.tar.gz" 2>/dev/null; then
     echo "self-test: token inside an archive was NOT found" >&2
+    rc=1
+  fi
+  # The workflow passes the assets DIRECTORY; archives inside it must be
+  # unpacked too, not scanned as compressed bytes.
+  mkdir -p "$dir/assets"
+  cp "$dir/pkg.tar.gz" "$dir/assets/"
+  if scan_path "$dir/assets" 2>/dev/null; then
+    echo "self-test: token inside an archive inside a directory was NOT found" >&2
     rc=1
   fi
   # And a clean file must pass.

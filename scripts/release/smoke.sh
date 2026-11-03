@@ -5,7 +5,7 @@
 #   - every binary is a static executable (no ELF interpreter, so it runs on
 #     any x86_64 Linux, NixOS included, without patchelf);
 #   - vibe-kanban starts with an empty HOME, answers /api/health, and reports
-#     the release sha from /api/info.
+#     the release's short sha from /api/info.
 #
 # Usage: smoke.sh <assets-dir>    (reads release.json for the expected sha)
 set -euo pipefail
@@ -59,9 +59,11 @@ until curl -fsS -m 2 -o /dev/null "http://127.0.0.1:$port/api/health"; do
   sleep 1
 done
 
+# /api/info reports the 7-character short sha (crates/server/build_revision.rs
+# truncates VK_BUILD_GIT_SHA); release.json carries the full one.
 version="$(curl -fsS -m 10 "http://127.0.0.1:$port/api/info" | jq -r '.data.version // empty')"
-if [ "$version" != "$sha" ]; then
-  echo "smoke: /api/info version is '${version:-<none>}', expected $sha" >&2
+if [ "$version" != "${sha:0:7}" ]; then
+  echo "smoke: /api/info version is '${version:-<none>}', expected ${sha:0:7} (from $sha)" >&2
   exit 1
 fi
-echo "smoke: vibe-kanban started standalone and reports $version"
+echo "smoke: vibe-kanban started standalone and reports $version ($sha)"
