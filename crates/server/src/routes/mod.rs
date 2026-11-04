@@ -114,6 +114,7 @@ pub fn router(
         .with_state(deployment.clone());
 
     Router::new()
+        .merge(github_owner_tokens::refresh_router().with_state(deployment.clone()))
         .merge(mcp_gateway::gateway_router().with_state(deployment.clone()))
         .merge(mcp_oauth::public_router().with_state(mcp_oauth_state))
         .route("/", get(frontend::serve_frontend_root))

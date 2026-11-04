@@ -1,8 +1,13 @@
-# Prior knowledge: scheduled wakeup pending
+# Prior knowledge: GitHub App organization credentials
 
-Read-only search of vibe-kanban/wiki and docs/knowledge-base found:
+Read-only search of vibe-kanban/wiki, especially github-owner-token-routing.md and 1password-reference-resolution.md, found:
 
-- wiki/durable-session-wakeups.md: timers are durable local metadata plus delivery ledger rows with nil issue IDs. A five-second sweep must reconsider overdue timers; remote issue access is intentionally unnecessary. Cancellation and claim are atomic. Receipt reads must be bounded.
-- wiki/issue-comment-delivery.md: the dispatcher requires a durable turn boundary, no active session turn, no queued user message and no blocking workspace process. Restart reconciliation substitutes for lost in-memory boundaries. An execution row is not launch proof; worker acceptance, pgid or agent session evidence is required.
+- Machine credentials live in github_owner_tokens, not Config, because /api/info exposes Config. Secrets use row-bound encryption and write-only literals; references may be returned.
+- services/github_credentials resolves server git and PR credentials per request; utils/github_credentials applies them to a single command. Configured failures refuse execution. Never Debug a Command with credentials.
+- Workspace gh routing and git credential helpers live in utils/github_auth. Worker and terminal boundaries also apply routing. Launch-time environment tokens currently have no refresh mechanism, so installation expiry requires a command-time resolver.
+- Owner routing must preserve argument parsing, GitHub host isolation, case variants, URL rewriting, inherited header resets, and fail-closed behavior.
+- The 1Password resolver supports organization-selected Connect then service-account fallback. Server lookups use credential files because deployment removes ambient secrets. Cache generation prevents in-flight lookups from restoring invalidated entries.
+- Health uses the same resolver and logs transitions only. Existing deployment monitors depend on the health status vocabulary.
+- 1Password errors must be classified without echoing stderr or reference names. PEM keys require a multiline-safe path; existing environment-value validation must be inspected before reuse.
 
-Preserve these safeguards. The affected timer is pending with attempt_count=0, no reason/error and next_attempt_at=2026-11-01T00:15:00Z. Inspect sweep selection before changing retry or active-turn policy. Do not replay the stored operational prompt during diagnosis.
+These findings refine SPEC.md and the implementation plan. Admin bypass remains deferred. Live acceptance requires provisioned App credentials; no unrelated service or ruleset edits are authorized.

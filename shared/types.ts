@@ -1366,11 +1366,15 @@ organizations: { [key in string]?: Array<string> },
  */
 projects: { [key in string]?: Array<string> }, };
 
-export type GitHubOwnerToken = { id: string, owner: string, reference?: string, created_at: string, updated_at: string, };
+export type AppConfig = { app_id: string, installation_id: string, private_key_reference: string, };
 
-export type CreateGitHubOwnerTokenRequest = { owner: string, value: string, };
+export type AppHealth = { app_reachable: boolean, installation_found: boolean, token_minted: boolean, missing_permissions: Array<string>, };
 
-export type UpdateGitHubOwnerTokenRequest = { value: string, };
+export type GitHubOwnerToken = { app?: AppConfig, id: string, owner: string, reference?: string, created_at: string, updated_at: string, };
+
+export type CreateGitHubOwnerTokenRequest = { owner: string, value: string, app?: AppConfig, };
+
+export type UpdateGitHubOwnerTokenRequest = { value: string, app?: AppConfig, };
 
 export type GitHubOwnerTokenHealth = { 
 /**
@@ -1378,7 +1382,7 @@ export type GitHubOwnerTokenHealth = {
  */
 healthy: boolean, owners: Array<OwnerTokenHealth>, };
 
-export type OwnerTokenHealth = { owner: string, 
+export type OwnerTokenHealth = { app?: AppHealth, owner: string, 
 /**
  * `None` when the stored value cannot be decrypted.
  */
@@ -1390,7 +1394,7 @@ detail: string | null, };
 
 export type OwnerTokenStatus = "ok" | "rejected" | "unavailable";
 
-export type OwnerTokenKind = "literal" | "reference";
+export type OwnerTokenKind = "literal" | "reference" | "app";
 
 export type PipelineStep = { 
 /**

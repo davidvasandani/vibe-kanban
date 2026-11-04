@@ -1,11 +1,11 @@
 # Implementation plan
 
-1. Persist archive trigger/provenance and explicit-unarchive acknowledgement without changing existing workspace row decoding unnecessarily.
-2. Route merge paths and remote reconciliation through one guarded automatic admission method. Retain blocked intent for periodic retry; compare explicit-unarchive acknowledgement at the write boundary.
-3. Atomically reactivate the local workspace when accepting a valid wake-up. Preserve remote completion intent and existing delivery machinery.
-4. Propagate originating session identity alongside workspace identity and use it for omitted MCP targets, without guessing among sessions.
-5. Expose archive provenance in workspace listing and UI, and improve unavailable-worktree errors.
-6. Add regression tests for holds, release, races, context defaults, scheduling, and diagnostics. Run required setup, formatting, and relevant validation.
-7. Run independent Codex review, fix findings, update knowledge pages, commit, open PR, verify checks, and merge.
-
-Detailed SpecKit artifacts follow in specs/vk/e8d6-wake-ups-an-auto/. Prior knowledge is recorded at ../PRIOR_KNOWLEDGE.md. Only Vibe Kanban service files are in scope.
+1. Complete SpecKit constitution, feature specification, clarification, technical plan, tasks, and analysis before code changes. Use this task's feature pointer and Vibe Kanban's constitution; preserve unrelated historical specs.
+2. Extend the encrypted organization credential payload and Settings request/view types with an optional App configuration. Preserve existing PAT payloads. Validate IDs and require a normalized private-key reference.
+3. Add one App JWT/installation token resolver with bounded requests, installation-owner verification, effective-permission health, expiry-aware caching, concurrency control, and secret-safe errors. Reuse the existing 1Password resolver and row-bound storage.
+4. Integrate server credential resolution and health. Preserve existing source attribution and check coverage semantics.
+5. Implement command-time refresh for workspace gh and git, including workers and terminals, using the existing authenticated coordinator/worker execution infrastructure. Do not pass private keys to agents or introduce an unauthenticated token endpoint. Test refresh after expiry and configured failures.
+6. Extend the Settings card for PAT/App selection and staged health, regenerate TypeScript definitions, and add focused component tests.
+7. Document installation, permissions, migration, rotation, and deferred admin bypass.
+8. Run fresh-worktree dependency installation, focused tests, type checks, repository formatting and lint/check commands. Resolve failures and run independent Codex review until significant findings are resolved.
+9. Record reusable knowledge with the task id and commit it. Open a PR, observe checks, and merge when eligible. Report live acceptance separately from automated test results and identify missing App provisioning if any.

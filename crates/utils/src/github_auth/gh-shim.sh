@@ -298,7 +298,15 @@ if [ -n "$vk_owner" ]; then
     # 0-9A-F, so the name is a safe variable name and cannot spell KEY, TOKEN
     # or SECRET (which some agent CLIs filter out).
     vk_key="$(printf '%s' "$vk_lower" | od -An -v -tx1 | tr -d ' \n' | tr 'abcdef' 'ABCDEF')"
-    eval "vk_token=\${VK_GITHUB_PAT_$vk_key:-}"
+    eval "vk_grant=\${VK_GITHUB_REFRESH_$vk_key:-}"
+    if [ -n "$vk_grant" ]; then
+      vk_token=$(printf %s "$vk_grant" | curl -q --silent --fail --max-time 60 --proto '=http,https' --data-binary @- "$VK_GITHUB_REFRESH_URL") || {
+        echo "gh: GitHub App refresh for $vk_lower failed; check credential health in Settings or start a new session" >&2
+        exit 78
+      }
+    else
+      eval "vk_token=\${VK_GITHUB_PAT_$vk_key:-}"
+    fi
     if [ -z "$vk_token" ]; then
       echo "gh: configured GitHub token for $vk_lower is unavailable; re-save it in Settings -> Repositories" >&2
       exit 78

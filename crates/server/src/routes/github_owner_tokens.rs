@@ -67,3 +67,26 @@ async fn remove(
     github_owner_tokens::delete(&deployment.db().pool, id).await?;
     Ok(ResponseJson(ApiResponse::success(())))
 }
+
+/// Separate from Settings: possession of a scoped encrypted launch grant is
+/// required. There is no owner-selected or unauthenticated credential lookup.
+pub fn refresh_router() -> Router<DeploymentImpl> {
+    Router::new()
+        .route("/github-app-refresh", axum::routing::post(refresh))
+        .layer(axum::extract::DefaultBodyLimit::max(8192))
+}
+async fn refresh(
+    State(deployment): State<DeploymentImpl>,
+    capability: String,
+) -> axum::response::Response {
+    use axum::{
+        http::{StatusCode, header::CACHE_CONTROL},
+        response::IntoResponse,
+    };
+    let (status, body) =
+        match services::services::github_app::refresh(&deployment.db().pool, &capability).await {
+            Ok(token) => (StatusCode::OK, token.expose().to_owned()),
+            Err(detail) => (StatusCode::UNAUTHORIZED, detail),
+        };
+    (status, [(CACHE_CONTROL, "no-store")], body).into_response()
+}

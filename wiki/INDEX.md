@@ -340,8 +340,10 @@ contributed to it.
   must never be projected into agent stdout, where vendor parsers render it as
   "Unrecognized JSON message". Coordinator classifier routing and the rule for
   new kinds (`vk/5276-debug-unrecogniz`).
-- [github-owner-token-routing.md](github-owner-token-routing.md) — One PAT per
-  GitHub owner, chosen per `gh` invocation and per Git URL
+- [github-owner-token-routing.md](github-owner-token-routing.md) — PATs or App
+  installations per GitHub owner, chosen per `gh` invocation and per Git URL.
+  App minting, per-row refresh locks, staged health and revocable command-time
+  refresh capabilities are covered under VAS-966 (`vk/f6e2-support-github-a`)
   (`vk/0f52-manage-gh-token`). Covers: machine secrets kept out of `Config` in
   a host-key-encrypted table; environment names that survive Codex's
   KEY/SECRET/TOKEN filter (hex owner encoding, `GIT_CONFIG_PARAMETERS` instead

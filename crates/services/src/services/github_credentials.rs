@@ -106,6 +106,7 @@ pub async fn resolve_for_repo(
 /// and delete, so a re-saved reference is read again on the next operation.
 pub fn invalidate_cache() {
     OP_CACHE.invalidate();
+    super::github_app::invalidate();
 }
 
 fn owners_of<'a>(urls: impl IntoIterator<Item = &'a str>) -> Vec<String> {
@@ -121,7 +122,7 @@ fn owners_of<'a>(urls: impl IntoIterator<Item = &'a str>) -> Vec<String> {
 /// inherit it), so the deployment names credential *files* for these lookups
 /// ([`server_credentials`]); they are explicit credentials, tried before the
 /// ambient fallback.
-async fn resolve_reference(reference: String) -> Result<String, EnvironmentSecretError> {
+pub(crate) async fn resolve_reference(reference: String) -> Result<String, EnvironmentSecretError> {
     let mut values = server_credentials()?;
     values.insert(RESOLVED_KEY.to_owned(), reference);
     let mut resolved = resolve_environment_secrets(values)
@@ -200,6 +201,12 @@ where
         Ok(value) => value,
         Err(error) => return OwnerCredential::Unavailable(error.to_string()),
     };
+    if let Some(app) = super::github_app::parse_config(&value) {
+        return match super::github_app::resolve(row, &app).await {
+            Ok(result) => OwnerCredential::OrgToken(result.token),
+            Err(error) => OwnerCredential::Unavailable(error.detail),
+        };
+    }
     let token = match normalize_secret_reference(&value) {
         None => value,
         Some(reference) => {
@@ -263,10 +270,14 @@ pub enum OwnerTokenStatus {
 pub enum OwnerTokenKind {
     Literal,
     Reference,
+    App,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
 pub struct OwnerTokenHealth {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub app: Option<super::github_app::AppHealth>,
     pub owner: String,
     /// `None` when the stored value cannot be decrypted.
     pub kind: Option<OwnerTokenKind>,
@@ -299,6 +310,7 @@ pub async fn health(pool: &SqlitePool) -> GitHubOwnerTokenHealth {
             return GitHubOwnerTokenHealth {
                 healthy: false,
                 owners: vec![OwnerTokenHealth {
+                    app: None,
                     owner: "*".into(),
                     kind: None,
                     status: OwnerTokenStatus::Unavailable,
@@ -320,6 +332,38 @@ pub async fn health(pool: &SqlitePool) -> GitHubOwnerTokenHealth {
     let store = load_store();
     let mut owners = Vec::with_capacity(rows.len());
     for row in &rows {
+        if let Ok(store) = &store
+            && let Ok(value) = decrypt(store, row)
+            && let Some(app) = super::github_app::parse_config(&value)
+        {
+            let result = super::github_app::check_health(row, &app).await;
+            let (evidence, detail) = match result {
+                Ok(token) => {
+                    let detail = (!token.health.missing_permissions.is_empty()).then(|| {
+                        format!(
+                            "Missing repository permissions: {}",
+                            token.health.missing_permissions.join(", ")
+                        )
+                    });
+                    (token.health, detail)
+                }
+                Err(error) => (error.health, Some(error.detail)),
+            };
+            let health = OwnerTokenHealth {
+                owner: row.owner.clone(),
+                kind: Some(OwnerTokenKind::App),
+                status: if detail.is_none() {
+                    OwnerTokenStatus::Ok
+                } else {
+                    OwnerTokenStatus::Unavailable
+                },
+                detail,
+                app: Some(evidence),
+            };
+            log_health(&health);
+            owners.push(health);
+            continue;
+        }
         let health = match &store {
             Err(error) => unavailable(&row.owner, None, error.to_string()),
             Ok(store) => {
@@ -341,6 +385,7 @@ pub async fn health(pool: &SqlitePool) -> GitHubOwnerTokenHealth {
                             ),
                         };
                         OwnerTokenHealth {
+                            app: None,
                             owner: row.owner.clone(),
                             kind,
                             status,
@@ -363,6 +408,7 @@ pub async fn health(pool: &SqlitePool) -> GitHubOwnerTokenHealth {
 
 fn unavailable(owner: &str, kind: Option<OwnerTokenKind>, reason: String) -> OwnerTokenHealth {
     OwnerTokenHealth {
+        app: None,
         owner: owner.to_owned(),
         kind,
         status: OwnerTokenStatus::Unavailable,
@@ -622,6 +668,7 @@ mod tests {
         let health = GitHubOwnerTokenHealth {
             healthy: false,
             owners: vec![OwnerTokenHealth {
+                app: None,
                 owner: "sweetgreen".into(),
                 kind: Some(OwnerTokenKind::Reference),
                 status: OwnerTokenStatus::Unavailable,
