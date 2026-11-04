@@ -40,3 +40,5 @@ pub mod remote_sync;
 pub mod repo;
 pub mod speckit;
 pub mod workspace_diff_stats;
+
+pub mod github_app;

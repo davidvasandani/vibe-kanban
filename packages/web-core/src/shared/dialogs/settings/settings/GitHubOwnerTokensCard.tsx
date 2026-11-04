@@ -9,7 +9,12 @@ import {
 import { Input } from '@vibe/ui/components/Input';
 import { Button } from '@vibe/ui/components/Button';
 import { PrimaryButton } from '@vibe/ui/components/PrimaryButton';
-import type { GitHubOwnerToken } from 'shared/types';
+import type {
+  GitHubOwnerToken,
+  AppConfig,
+  CreateGitHubOwnerTokenRequest,
+  UpdateGitHubOwnerTokenRequest,
+} from 'shared/types';
 import { cn } from '@/shared/lib/utils';
 import { SettingsCard, SettingsField } from './SettingsComponents';
 import { useSettingsMachineClient } from './SettingsHostContext';
@@ -32,6 +37,75 @@ const submittedValue = (value: string) =>
 const draftInputType = (value: string) =>
   normalizeSecretReference(value) === null ? 'password' : 'text';
 
+function AppFields({
+  app,
+  onChange,
+}: {
+  app: AppConfig | null;
+  onChange: (app: AppConfig | null) => void;
+}) {
+  return (
+    <div className="space-y-2">
+      <label className="text-sm">
+        Credential type
+        <select
+          aria-label="Credential type"
+          className="bg-secondary border border-border rounded-sm ml-2"
+          value={app ? 'app' : 'pat'}
+          onChange={(e) =>
+            onChange(
+              e.target.value === 'app'
+                ? { app_id: '', installation_id: '', private_key_reference: '' }
+                : null
+            )
+          }
+        >
+          <option value="pat">Personal access token</option>
+          <option value="app">GitHub App installation</option>
+        </select>
+      </label>
+      {app && (
+        <div className="space-y-2">
+          <Input
+            aria-label="App ID"
+            placeholder="App ID"
+            value={app.app_id}
+            onChange={(e) => onChange({ ...app, app_id: e.target.value })}
+          />
+          <Input
+            aria-label="Installation ID"
+            placeholder="Installation ID"
+            value={app.installation_id}
+            onChange={(e) =>
+              onChange({ ...app, installation_id: e.target.value })
+            }
+          />
+          <Input
+            aria-label="Private key reference"
+            placeholder="op://vault/item/private key"
+            value={app.private_key_reference}
+            onChange={(e) =>
+              onChange({
+                ...app,
+                private_key_reference: unquoteDraft(e.target.value),
+              })
+            }
+            autoComplete="off"
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+const appReady = (app: AppConfig) =>
+  /^[1-9][0-9]*$/.test(app.app_id) &&
+  /^[1-9][0-9]*$/.test(app.installation_id) &&
+  normalizeSecretReference(app.private_key_reference) !== null;
+const normalizedApp = (app: AppConfig) => ({
+  ...app,
+  private_key_reference: submittedValue(app.private_key_reference),
+});
+
 export function GitHubOwnerTokensCard() {
   const machineClient = useSettingsMachineClient();
   const queryClient = useQueryClient();
@@ -42,9 +116,12 @@ export function GitHubOwnerTokensCard() {
   const [error, setError] = useState<string | null>(null);
   const [newOwner, setNewOwner] = useState('');
   const [newValue, setNewValue] = useState('');
-  const [editing, setEditing] = useState<{ id: string; value: string } | null>(
-    null
-  );
+  const [newApp, setNewApp] = useState<AppConfig | null>(null);
+  const [editing, setEditing] = useState<{
+    id: string;
+    value: string;
+    app: AppConfig | null;
+  } | null>(null);
 
   const client = () => {
     if (!machineClient) throw new Error('Machine client is required');
@@ -61,23 +138,34 @@ export function GitHubOwnerTokensCard() {
     enabled: machineClient != null,
   });
 
+  const health = useQuery({
+    queryKey: [...queryKey, 'health'],
+    queryFn: () => client().getGitHubOwnerTokenHealth(),
+    enabled: machineClient != null,
+    staleTime: 60_000,
+  });
+
   const onError = (err: unknown) =>
     setError(err instanceof Error ? err.message : 'Request failed');
   const onSettled = () => queryClient.invalidateQueries({ queryKey });
 
   const createToken = useMutation({
-    mutationFn: (data: { owner: string; value: string }) =>
+    mutationFn: (data: CreateGitHubOwnerTokenRequest) =>
       client().createGitHubOwnerToken(data),
     onSuccess: () => {
       setNewOwner('');
       setNewValue('');
+      setNewApp(null);
     },
     onError,
     onSettled,
   });
   const updateToken = useMutation({
-    mutationFn: (data: { id: string; value: string }) =>
-      client().updateGitHubOwnerToken(data.id, { value: data.value }),
+    mutationFn: (data: UpdateGitHubOwnerTokenRequest & { id: string }) =>
+      client().updateGitHubOwnerToken(data.id, {
+        value: data.value,
+        app: data.app,
+      }),
     onSuccess: () => setEditing(null),
     onError,
     onSettled,
@@ -101,12 +189,20 @@ export function GitHubOwnerTokensCard() {
       setError(`A token for ${owner} already exists; edit it instead`);
       return;
     }
-    createToken.mutate({ owner, value: submittedValue(newValue) });
+    createToken.mutate({
+      owner,
+      value: newApp ? '' : submittedValue(newValue),
+      ...(newApp ? { app: normalizedApp(newApp) } : {}),
+    });
   };
 
   const handleStartEdit = (token: GitHubOwnerToken) => {
     setError(null);
-    setEditing({ id: token.id, value: token.reference ?? '' });
+    setEditing({
+      id: token.id,
+      value: token.reference ?? '',
+      app: token.app ?? null,
+    });
   };
 
   const handleSaveEdit = () => {
@@ -114,7 +210,8 @@ export function GitHubOwnerTokensCard() {
     setError(null);
     updateToken.mutate({
       id: editing.id,
-      value: submittedValue(editing.value),
+      value: editing.app ? '' : submittedValue(editing.value),
+      ...(editing.app ? { app: normalizedApp(editing.app) } : {}),
     });
   };
 
@@ -130,7 +227,7 @@ export function GitHubOwnerTokensCard() {
   return (
     <SettingsCard
       title="GitHub organization tokens"
-      description="One fine-grained personal access token per GitHub organization or user. Workspace sessions and Vibe Kanban itself (creating, checking, merging and updating pull requests, pushes and fetches) use the matching owner's token for gh commands (by the repository each command targets) and for git operations; other owners keep their existing authentication. Enter a token or an op://vault/item/field reference. Values are encrypted at rest; tokens are never shown again, while references stay visible. Vibe Kanban's own operations use changes immediately; running workspace sessions pick them up when they next start."
+      description="Choose a personal access token or GitHub App installation for each owner. Vibe Kanban and workspace gh/git commands use that owner's credential. App private keys stay on the coordinator and installation tokens refresh on demand. After changing credentials, start a new workspace session. Values are encrypted at rest."
     >
       {error && (
         <div className="bg-error/10 border border-error/50 rounded-sm p-3 text-error text-sm">
@@ -166,20 +263,37 @@ export function GitHubOwnerTokensCard() {
                     {token.owner}
                   </div>
                   {isEditing ? (
-                    <Input
-                      autoFocus
-                      type={draftInputType(editing.value)}
-                      placeholder="New token or op://vault/item/field"
-                      value={editing.value}
-                      onChange={(e) =>
-                        setEditing({
-                          id: token.id,
-                          value: unquoteDraft(e.target.value),
-                        })
-                      }
-                      className="mt-2"
-                      autoComplete="off"
-                    />
+                    <>
+                      <AppFields
+                        app={editing.app}
+                        onChange={(app) => setEditing({ ...editing, app })}
+                      />
+                      {!editing.app && (
+                        <Input
+                          autoFocus
+                          type={draftInputType(editing.value)}
+                          placeholder="New token or op://vault/item/field"
+                          value={editing.value}
+                          onChange={(e) =>
+                            setEditing({
+                              ...editing,
+                              id: token.id,
+                              value: unquoteDraft(e.target.value),
+                            })
+                          }
+                          className="mt-2"
+                          autoComplete="off"
+                        />
+                      )}
+                    </>
+                  ) : token.app ? (
+                    <div className="text-xs text-normal mt-1">
+                      GitHub App {token.app.app_id}, installation{' '}
+                      {token.app.installation_id}
+                      <div className="font-mono break-all">
+                        {token.app.private_key_reference}
+                      </div>
+                    </div>
                   ) : token.reference ? (
                     <div
                       className="text-xs text-normal font-mono mt-1 truncate"
@@ -192,6 +306,30 @@ export function GitHubOwnerTokensCard() {
                       ••••••••
                     </div>
                   )}
+                  {health.data?.owners
+                    .filter(
+                      (h) => h.owner.toLowerCase() === token.owner.toLowerCase()
+                    )
+                    .map((h) => (
+                      <div key={h.owner} className="text-xs mt-2">
+                        Credential health: {h.status}
+                        {h.detail && <div>{h.detail}</div>}
+                        {h.app && (
+                          <div>
+                            App reachable: {h.app.app_reachable ? 'yes' : 'no'};
+                            installation found:{' '}
+                            {h.app.installation_found ? 'yes' : 'no'}; token
+                            minted: {h.app.token_minted ? 'yes' : 'no'};
+                            permissions:{' '}
+                            {h.app.missing_permissions.length
+                              ? h.app.missing_permissions.join(', ')
+                              : h.app.token_minted
+                                ? 'present'
+                                : 'not checked'}
+                          </div>
+                        )}
+                      </div>
+                    ))}
                 </div>
                 <div className="flex items-center gap-1 shrink-0">
                   {isEditing ? (
@@ -210,7 +348,9 @@ export function GitHubOwnerTokensCard() {
                         onClick={handleSaveEdit}
                         disabled={
                           updateToken.isPending ||
-                          editing.value.trim().length === 0
+                          (editing.app
+                            ? !appReady(editing.app)
+                            : editing.value.trim().length === 0)
                         }
                       />
                     </>
@@ -249,7 +389,20 @@ export function GitHubOwnerTokensCard() {
         </div>
       )}
 
+      <Button
+        variant="ghost"
+        onClick={() => void health.refetch()}
+        disabled={health.isFetching}
+      >
+        Check credential health
+      </Button>
+      {health.error && (
+        <div className="text-error text-sm">
+          Could not check credential health.
+        </div>
+      )}
       <div className="border-t border-border pt-4 space-y-3">
+        <AppFields app={newApp} onChange={setNewApp} />
         <SettingsField label="Add organization token">
           <div className="flex flex-col gap-2 md:flex-row">
             <Input
@@ -259,14 +412,16 @@ export function GitHubOwnerTokensCard() {
               className="md:w-48 font-mono"
               autoComplete="off"
             />
-            <Input
-              type={draftInputType(newValue)}
-              placeholder="token or op://vault/item/field"
-              value={newValue}
-              onChange={(e) => setNewValue(unquoteDraft(e.target.value))}
-              className="flex-1"
-              autoComplete="off"
-            />
+            {!newApp && (
+              <Input
+                type={draftInputType(newValue)}
+                placeholder="token or op://vault/item/field"
+                value={newValue}
+                onChange={(e) => setNewValue(unquoteDraft(e.target.value))}
+                className="flex-1"
+                autoComplete="off"
+              />
+            )}
             <PrimaryButton
               variant="secondary"
               value="Add"
@@ -275,7 +430,7 @@ export function GitHubOwnerTokensCard() {
                 createToken.isPending ||
                 machineClient == null ||
                 newOwner.trim().length === 0 ||
-                newValue.trim().length === 0
+                (newApp ? !appReady(newApp) : newValue.trim().length === 0)
               }
             >
               <PlusIcon className="size-icon-xs mr-1" weight="bold" />

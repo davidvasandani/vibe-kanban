@@ -9,6 +9,7 @@ import type {
   CliToolStatus,
   CreateGitHubOwnerTokenRequest,
   GitHubOwnerToken,
+  GitHubOwnerTokenHealth,
   ReauthOverview,
   ReauthRunReport,
   Config,
@@ -114,6 +115,7 @@ export interface MachineClient {
     body?: SharedMcpTestRequest
   ) => Promise<SharedMcpAssignmentTestResult[]>;
   disconnectSharedMcp: (connectionId: string) => Promise<boolean>;
+  getGitHubOwnerTokenHealth: () => Promise<GitHubOwnerTokenHealth>;
   listGitHubOwnerTokens: () => Promise<GitHubOwnerToken[]>;
   createGitHubOwnerToken: (
     data: CreateGitHubOwnerTokenRequest
@@ -350,6 +352,15 @@ export function createMachineClient(
           target,
           `/api/mcp-gateway/connections/${encodeURIComponent(connectionId)}`,
           { method: 'DELETE' }
+        )
+      ),
+    getGitHubOwnerTokenHealth: async () =>
+      handleApiResponse<GitHubOwnerTokenHealth>(
+        await makeMachineRequest(
+          runtime,
+          target,
+          '/api/github-owner-tokens/health',
+          { cache: 'no-store' }
         )
       ),
     listGitHubOwnerTokens: async () =>

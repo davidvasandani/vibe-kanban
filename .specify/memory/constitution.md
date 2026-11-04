@@ -1434,3 +1434,13 @@ change: write plain, source-backed claims, define checkable acceptance criteria,
 reuse focused guides, keep runtime behavior unchanged, and perform verification
 from the fresh worktree. Application capabilities must be distinguished from
 optional deployment configuration. No new principle or version change is needed.
+
+## Review: vk/f6e2-support-github-a
+
+Applied `/speckit.constitution`. Existing secret isolation, owner attribution,
+fail-closed credential routing, and test-the-contract principles govern this
+feature. Installation credentials must refresh at command time for long-running
+agents, keep private keys out of agent environments, and preserve PAT behavior.
+No new merge bypass authority is introduced. Use Vibe Kanban's constitution
+and task feature directory; the workspace command's homelab prefix is a shared
+pipeline default, not a request to change another project's governance.

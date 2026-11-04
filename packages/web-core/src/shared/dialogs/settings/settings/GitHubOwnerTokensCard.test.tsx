@@ -16,6 +16,7 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const client = vi.hoisted(() => ({
   queryScopeKey: ['machine', 'local'] as const,
   listGitHubOwnerTokens: vi.fn(),
+  getGitHubOwnerTokenHealth: vi.fn(),
   createGitHubOwnerToken: vi.fn(),
   updateGitHubOwnerToken: vi.fn(),
   deleteGitHubOwnerToken: vi.fn(),
@@ -59,6 +60,10 @@ function click(text: string) {
 
 beforeEach(async () => {
   vi.clearAllMocks();
+  client.getGitHubOwnerTokenHealth.mockResolvedValue({
+    healthy: true,
+    owners: [],
+  });
   client.listGitHubOwnerTokens.mockResolvedValue([
     {
       id: 'literal',
@@ -195,4 +200,59 @@ describe('GitHubOwnerTokensCard', () => {
       expect(GITHUB_OWNER_PATTERN.test(invalid)).toBe(false);
     }
   });
+});
+
+it('creates an App using IDs and a key reference without sending a PAT', async () => {
+  const select = container.querySelector('select')!;
+  act(() => {
+    select.value = 'app';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  change(input('GitHub owner'), 'example');
+  change(input('App ID'), '123');
+  change(input('Installation ID'), '456');
+  change(input('op://vault/item/private key'), 'op://Vault/App/key');
+  click('Add');
+  await flush();
+  expect(client.createGitHubOwnerToken).toHaveBeenCalledWith({
+    owner: 'example',
+    value: '',
+    app: {
+      app_id: '123',
+      installation_id: '456',
+      private_key_reference: 'op://Vault/App/key',
+    },
+  });
+});
+
+it('shows App health stages and missing permissions', async () => {
+  client.getGitHubOwnerTokenHealth.mockResolvedValue({
+    healthy: false,
+    owners: [
+      {
+        owner: 'sweetgreen',
+        kind: 'app',
+        status: 'unavailable',
+        detail: 'Missing repository permissions: checks: read',
+        app: {
+          app_reachable: true,
+          installation_found: true,
+          token_minted: true,
+          missing_permissions: ['checks: read'],
+        },
+      },
+    ],
+  });
+  click('Check credential health');
+  for (
+    let i = 0;
+    i < 20 &&
+    !container.textContent?.includes('Missing repository permissions');
+    i++
+  )
+    await flush();
+  expect(container.textContent).toContain('App reachable: yes');
+  expect(container.textContent).toContain('installation found: yes');
+  expect(container.textContent).toContain('token minted: yes');
+  expect(container.textContent).toContain('checks: read');
 });

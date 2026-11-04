@@ -765,9 +765,12 @@ fn github_owner_token_error(
     match error {
         E::NotFound => ErrorInfo::not_found(TYPE, error.to_string()),
         E::DuplicateOwner(_) => ErrorInfo::conflict(TYPE, error.to_string()),
-        E::InvalidOwner | E::InvalidValue | E::Undecryptable(_) | E::Resolve { .. } => {
-            ErrorInfo::bad_request(TYPE, error.to_string())
-        }
+        E::InvalidOwner
+        | E::InvalidValue
+        | E::InvalidApp
+        | E::App(_)
+        | E::Undecryptable(_)
+        | E::Resolve { .. } => ErrorInfo::bad_request(TYPE, error.to_string()),
         E::KeyUnavailable => {
             ErrorInfo::with_status(StatusCode::INTERNAL_SERVER_ERROR, TYPE, error.to_string())
         }

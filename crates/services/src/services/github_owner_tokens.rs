@@ -1,10 +1,10 @@
 //! Per-owner GitHub tokens (Settings → Repositories → GitHub organization
 //! tokens).
 //!
-//! Each configured GitHub owner maps to one fine-grained PAT, stored as a
-//! host-key envelope. Literal values are write-only: the API view exposes
+//! Each configured GitHub owner maps to a PAT or App installation, stored as
+//! a host-key envelope. Literal values are write-only: the API view exposes
 //! only a 1Password reference, which is a pointer rather than a secret. At
-//! launch, values are resolved into the environment contract consumed by
+//! launch, PATs are resolved and Apps receive scoped refresh grants consumed by
 //! `utils::github_auth` on the spawning host. Errors never contain a value.
 
 use std::{collections::HashMap, future::Future};
@@ -37,6 +37,9 @@ const RESOLVED_KEY: &str = "VALUE";
 /// returned.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct GitHubOwnerToken {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub app: Option<super::github_app::AppConfig>,
     pub id: Uuid,
     pub owner: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -49,12 +52,20 @@ pub struct GitHubOwnerToken {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct CreateGitHubOwnerTokenRequest {
     pub owner: String,
+    #[serde(default)]
     pub value: String,
+    #[serde(default)]
+    #[ts(optional)]
+    pub app: Option<super::github_app::AppConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct UpdateGitHubOwnerTokenRequest {
+    #[serde(default)]
     pub value: String,
+    #[serde(default)]
+    #[ts(optional)]
+    pub app: Option<super::github_app::AppConfig>,
 }
 
 #[derive(Debug, Error)]
@@ -67,6 +78,12 @@ pub enum GitHubOwnerTokenError {
     DuplicateOwner(String),
     #[error("GitHub token must be non-empty, at most 4 KiB, and contain no NUL bytes")]
     InvalidValue,
+    #[error(
+        "GitHub App configuration requires positive decimal IDs and a 1Password private-key reference, with no PAT value"
+    )]
+    InvalidApp,
+    #[error("GitHub App credential: {0}")]
+    App(String),
     #[error("GitHub owner token not found")]
     NotFound,
     #[error("The GitHub token encryption key is unavailable; check the Vibe Kanban data directory")]
@@ -89,7 +106,11 @@ pub enum GitHubOwnerTokenError {
 /// padding; a literal token is trimmed (GitHub tokens contain no whitespace).
 fn normalize_value(value: &str) -> Result<String, GitHubOwnerTokenError> {
     let value = normalize_secret_reference(value).unwrap_or_else(|| value.trim().to_owned());
-    if value.is_empty() || value.len() > MAX_VALUE_BYTES || value.contains('\0') {
+    if value.is_empty()
+        || value.len() > MAX_VALUE_BYTES
+        || value.contains('\0')
+        || value.starts_with("vk-github-app-v1:")
+    {
         return Err(GitHubOwnerTokenError::InvalidValue);
     }
     Ok(value)
@@ -126,6 +147,7 @@ pub(crate) fn decrypt(
 
 fn view(row: GitHubOwnerTokenRow, plaintext: Option<&str>) -> GitHubOwnerToken {
     GitHubOwnerToken {
+        app: plaintext.and_then(super::github_app::parse_config),
         id: row.id,
         reference: plaintext.and_then(normalize_secret_reference),
         owner: row.owner,
@@ -172,7 +194,10 @@ async fn create_with(
     request: CreateGitHubOwnerTokenRequest,
 ) -> Result<GitHubOwnerToken, GitHubOwnerTokenError> {
     let owner = validate_owner(&request.owner)?;
-    let value = normalize_value(&request.value)?;
+    let value = match request.app {
+        Some(app) => super::github_app::encode_config(app, &request.value)?,
+        None => normalize_value(&request.value)?,
+    };
     let id = Uuid::new_v4();
     let envelope = store
         .encrypt(value.as_bytes(), &binding(id))
@@ -204,7 +229,10 @@ async fn update_with(
     id: Uuid,
     request: UpdateGitHubOwnerTokenRequest,
 ) -> Result<GitHubOwnerToken, GitHubOwnerTokenError> {
-    let value = normalize_value(&request.value)?;
+    let value = match request.app {
+        Some(app) => super::github_app::encode_config(app, &request.value)?,
+        None => normalize_value(&request.value)?,
+    };
     let envelope = store
         .encrypt(value.as_bytes(), &binding(id))
         .map_err(|_| GitHubOwnerTokenError::KeyUnavailable)?;
@@ -238,11 +266,84 @@ pub async fn launch_environment(
         return Ok(HashMap::new());
     }
     let store = load_store()?;
-    let values = rows
-        .iter()
-        .map(|row| Ok((row.owner.clone(), decrypt(&store, row)?)))
-        .collect::<Result<Vec<_>, GitHubOwnerTokenError>>()?;
-    launch_environment_with(values, org_env, resolve_environment_secrets).await
+    let mut values = Vec::new();
+    let mut app_environment = HashMap::new();
+    let mut app_owners = Vec::new();
+    for row in &rows {
+        let value = decrypt(&store, row)?;
+        if let Some(app) = super::github_app::parse_config(&value) {
+            // Resolve at launch to report configuration failures early, but never
+            // export the App key or a soon-to-expire installation token.
+            super::github_app::resolve(row, &app).await.map_err(|e| {
+                GitHubOwnerTokenError::App(format!("for {}: {}", row.owner, e.detail))
+            })?;
+            app_environment.insert(
+                utils::github_auth::refresh_env_name(&row.owner),
+                super::github_app::grant(row)?,
+            );
+            app_owners.push(row.owner.clone());
+        } else {
+            values.push((row.owner.clone(), value));
+        }
+    }
+    let mut environment =
+        launch_environment_with(values, org_env, resolve_environment_secrets).await?;
+    if !app_owners.is_empty() {
+        let mut owners = environment.remove(OWNERS_ENV).unwrap_or_default();
+        if !owners.is_empty() {
+            owners.push(',');
+        }
+        owners.push_str(&app_owners.join(","));
+        environment.insert(OWNERS_ENV.to_owned(), owners);
+        environment.extend(app_environment);
+        let base = refresh_base_url(
+            std::env::var("VIBE_BACKEND_URL").ok(),
+            std::env::var("BACKEND_PORT")
+                .or_else(|_| std::env::var("PORT"))
+                .ok(),
+            std::env::var("HOST").unwrap_or_else(|_| "127.0.0.1".into()),
+            utils::port_file::read_port_file("vibe-kanban"),
+        )
+        .await?;
+        environment.insert(
+            super::github_app::BROKER_URL_ENV.into(),
+            format!("{}/github-app-refresh", base.trim_end_matches('/')),
+        );
+    }
+    Ok(environment)
+}
+
+async fn refresh_base_url(
+    explicit: Option<String>,
+    configured_port: Option<String>,
+    host: String,
+    bound_port: impl Future<Output = std::io::Result<u16>>,
+) -> Result<String, GitHubOwnerTokenError> {
+    if let Some(base) = explicit {
+        return Ok(base);
+    }
+    let port = configured_port
+        .map(|p| p.parse::<u16>())
+        .transpose()
+        .map_err(|_| GitHubOwnerTokenError::App("Invalid coordinator port".into()))?;
+    // Zero asks TcpListener for an available port; it is never a destination.
+    let port = match port.filter(|port| *port != 0) {
+        Some(port) => port,
+        None => bound_port.await.map_err(|_| {
+            GitHubOwnerTokenError::App("Coordinator address unavailable for App refresh".into())
+        })?,
+    };
+    if port == 0 {
+        return Err(GitHubOwnerTokenError::App(
+            "Coordinator bound port is unavailable".into(),
+        ));
+    }
+    let host = match host.as_str() {
+        "0.0.0.0" => "127.0.0.1",
+        "::" | "[::]" => "[::1]",
+        other => other,
+    };
+    Ok(format!("http://{host}:{port}"))
 }
 
 async fn launch_environment_with<R, F>(
@@ -321,6 +422,7 @@ mod tests {
         CreateGitHubOwnerTokenRequest {
             owner: owner.into(),
             value: value.into(),
+            app: None,
         }
     }
 
@@ -383,6 +485,7 @@ mod tests {
             &store,
             literal.id,
             UpdateGitHubOwnerTokenRequest {
+                app: None,
                 value: "op://Vault/a/credential".into(),
             },
         )
@@ -397,7 +500,10 @@ mod tests {
                 &pool,
                 &store,
                 Uuid::new_v4(),
-                UpdateGitHubOwnerTokenRequest { value: "x".into() }
+                UpdateGitHubOwnerTokenRequest {
+                    value: "x".into(),
+                    app: None
+                }
             )
             .await,
             Err(GitHubOwnerTokenError::NotFound)
@@ -549,6 +655,88 @@ mod tests {
                 &HashMap::new(),
                 empty,
             )
+            .await
+            .is_err()
+        );
+    }
+    #[tokio::test]
+    async fn app_crud_preserves_row_identity_and_allows_pat_migration() {
+        let pool = test_pool().await;
+        let (_directory, store) = temp_store();
+        let legacy: CreateGitHubOwnerTokenRequest =
+            serde_json::from_str(r#"{"owner":"example","value":"synthetic-pat"}"#).unwrap();
+        let pat = create_with(&pool, &store, legacy).await.unwrap();
+        assert!(pat.app.is_none());
+        let app = super::super::github_app::AppConfig {
+            app_id: "1".into(),
+            installation_id: "2".into(),
+            private_key_reference: "op://Vault/App/key".into(),
+        };
+        let changed = update_with(
+            &pool,
+            &store,
+            pat.id,
+            UpdateGitHubOwnerTokenRequest {
+                value: String::new(),
+                app: Some(app.clone()),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(changed.id, pat.id);
+        assert_eq!(changed.app, Some(app));
+        assert!(changed.reference.is_none());
+        let row = GitHubOwnerTokenRow::find_by_id(&pool, pat.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!row.encrypted_value.contains("op://"));
+        let back = update_with(
+            &pool,
+            &store,
+            pat.id,
+            UpdateGitHubOwnerTokenRequest {
+                value: "synthetic-new-pat".into(),
+                app: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(back.app.is_none());
+        assert!(
+            !serde_json::to_string(&back)
+                .unwrap()
+                .contains("synthetic-new-pat")
+        );
+        assert!(normalize_value("vk-github-app-v1:{}").is_err());
+    }
+    #[tokio::test]
+    async fn refresh_uses_actual_port_for_auto_assignment_and_preserves_bound_host() {
+        for configured in [None, Some("0".into())] {
+            let base = refresh_base_url(None, configured, "0.0.0.0".into(), async { Ok(45123) })
+                .await
+                .unwrap();
+            assert_eq!(base, "http://127.0.0.1:45123");
+        }
+        let base = refresh_base_url(None, Some("3334".into()), "192.0.2.10".into(), async {
+            panic!("explicit nonzero port does not read the port file")
+        })
+        .await
+        .unwrap();
+        assert_eq!(base, "http://192.0.2.10:3334");
+        let base = refresh_base_url(
+            Some("https://coordinator.example".into()),
+            Some("0".into()),
+            "127.0.0.1".into(),
+            async { panic!("explicit base takes precedence") },
+        )
+        .await
+        .unwrap();
+        assert_eq!(base, "https://coordinator.example");
+        assert!(
+            refresh_base_url(None, Some("0".into()), "127.0.0.1".into(), async {
+                Err(std::io::Error::other("unavailable"))
+            })
             .await
             .is_err()
         );

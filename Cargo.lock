@@ -9178,6 +9178,7 @@ dependencies = [
  "ignore",
  "indicatif",
  "json-patch 2.0.0",
+ "jsonwebtoken",
  "mime_guess",
  "moka",
  "node-metrics",

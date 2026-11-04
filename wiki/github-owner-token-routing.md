@@ -2,8 +2,8 @@
 
 A workspace can mix repositories from several GitHub owners. Fine-grained PATs
 are scoped to one owner, so a single `GH_TOKEN` cannot serve such a workspace.
-Settings → Repositories → **GitHub organization tokens** stores one PAT per
-owner. The credential is then chosen per `gh` invocation and per Git URL,
+Settings → Repositories → **GitHub organization tokens** stores one PAT or
+GitHub App installation per owner. The credential is then chosen per `gh` invocation and per Git URL,
 never per session. This page records the non-obvious decisions and the
 failure modes that review turned up.
 
@@ -212,8 +212,58 @@ and `git remote get-url --push`, all under a temporary `HOME` with
 `GIT_CONFIG_NOSYSTEM=1`. Note that `git remote get-url` ignores remotes
 defined only through `-c`.
 
+## GitHub App installations and refresh (VAS-966)
+
+App entries reuse the encrypted `github_owner_tokens.encrypted_value` field.
+Legacy plaintext values remain PATs or PAT references. App values have the
+reserved `vk-github-app-v1:` prefix and carry App ID, installation ID and a
+normalised 1Password private-key reference. Raw keys are rejected. IDs are
+positive decimal strings so browser number precision cannot change them.
+The generic PAT input rejects the reserved prefix.
+
+`services/github_app.rs` resolves the key with the coordinator's existing
+1Password credential resolver, signs an RS256 JWT, verifies `/app` and the
+installation's App/owner/suspension state, then mints an installation token.
+The server's existing `github_credentials` path passes this token to all PR
+and git operations without introducing a separate routing implementation.
+
+- Cache until five minutes before GitHub's returned `expires_at`. Use a lock
+  per row; never hold the shared map lock across secret resolution or network
+  I/O. One slow owner must not block another owner's cached token.
+- Key cached entries by credential revision and invalidation generation.
+  Settings writes invalidate in-flight results. Explicit health probes force
+  a current mint while sharing the row lock with ordinary operations.
+- Report App reachability, installation lookup, minting and missing effective
+  permissions. Preserve the alert's `ok`/`rejected`/`unavailable` vocabulary.
+  Health is not evidence that every requested repository is installed.
+- Never echo GitHub error response bodies, key parser errors or secret
+  subprocess output. Curated errors preserve owner attribution.
+
+Launch-time installation tokens would expire during running sessions. App
+launches instead receive an encrypted, seven-day refresh capability in
+`VK_GITHUB_REFRESH_<HEX>`. It authorises one row and encrypted revision only.
+The coordinator's `POST /github-app-refresh` endpoint authenticates that
+capability before minting and returns the token with `Cache-Control: no-store`.
+It rechecks the row after minting; deleting or editing the entry revokes old
+capabilities. The App key never reaches the worker or agent.
+
+Both the gh shim and git credential helper fetch a token at command time,
+passing the capability on curl's stdin rather than in arguments or git config.
+Refresh failures stop authentication. Workers replace the broker URL with
+`VK_WORKER_COORDINATOR_URL`. Local launches use the actual bound port when
+`PORT=0`/`BACKEND_PORT=0` requests automatic assignment; zero is never a usable
+refresh destination. New sessions are required after credential edits or
+capability expiry. Existing PAT launch behaviour is unchanged.
+
+Minimum permissions and setup steps are in
+`docs/integrations/github-integration.mdx`. Admin merge and ruleset bypass
+changes were explicitly deferred. Live sweetgreen acceptance requires an App
+installation and a readable private-key reference; mock tests do not establish
+live repository access.
+
 ## Contributed by
 
 - vk/0f52-manage-gh-token
 - vk/8b57-use-settings-git
 - vk/7561-investigate-vibe
+- VAS-966 (`vk/f6e2-support-github-a`)

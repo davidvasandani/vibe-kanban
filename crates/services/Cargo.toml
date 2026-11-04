@@ -44,6 +44,7 @@ os_info = "3.12.0"
 reqwest = { workspace = true }
 regex = "1.11.1"
 json-patch = "2.0"
+jsonwebtoken = { version = "10.2.0", features = ["rust_crypto"] }
 backon = "1.5.1"
 thiserror = { workspace = true }
 futures = "0.3.31"

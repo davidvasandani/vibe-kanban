@@ -1,19 +1,21 @@
-# Durable wake-ups across workspace archival
+# GitHub App organization credentials
 
-## Problem and evidence
-Follow-up work must remain schedulable after merge or issue completion. The current local wake-up API rejects the local Workspace archived flag; it does not read a remote cache. Explicit edits update that same SQLite store. Remote terminal-issue archival runs on status transitions, while local PR monitoring and merge routes still call unconditional archive. Remote archive reconciliation has activity guards already, but explicit unarchive does not persist an acknowledgement of the archive trigger.
+## Problem
+Organization PAT routing works, but a configured credential may not expose check runs from GitHub Apps. Add installation credentials so PR inspection and merge checks can use Checks read permission without requiring a classic repo token. Preserve truthful partial-source reporting.
 
-The October 25 incident's exact actor cannot be proved from current source alone. Record archive provenance so subsequent incidents are attributable.
+## Contract
+- Existing PAT entries retain their serialized form and behavior. An entry can instead select GitHub App authentication with App ID, installation ID, and a private-key 1Password reference. Never persist the resolved key or minted token in settings.
+- Resolve App credentials centrally for server git and PR operations and workspace owner-routed gh/git commands. Authenticate with a short-lived signed JWT, verify the installation belongs to the configured owner, and mint installation tokens on demand. Cache by credential identity until shortly before GitHub's returned expiry, bound concurrent minting, and invalidate changed settings.
+- Long-lived agent processes must refresh credentials when commands run; a launch-time token alone is insufficient. Configured failures must fail closed with the existing attributed vk_reported error instead of falling back to another identity.
+- Settings reports separate evidence for App reachability, installation lookup, token minting, and effective required permissions. Failed stages are actionable and secret-free. Health is not proof of access to every repository.
+- Do not log keys, JWTs, tokens, subprocess secret output, or API response bodies that may contain secrets.
+- Keep get_pr/list_pr_checks aggregation semantics and merge checks intact. No new admin merge/bypass option in this task. Adding an App as a ruleset bypass actor is an external policy change and is not required for normal merging.
 
-## Required behavior
-- Every automatic archive path protects active coding turns, running pollers, and pending or dispatching wake-ups.
-- Explicit unarchive acknowledges existing archive intent; repeated reconciliation cannot undo it. A genuinely new terminal-issue transition or merge may archive again.
-- Scheduling validates time, prompt, ownership, worktree availability, and limits, then atomically persists the wake-up and reactivates an archived workspace. Scheduling is a temporary hold, not permanent dismissal of completion intent. When the last continuation finishes or is cancelled, automatic archive can resume. Activity activation and metadata synchronization must preserve unacknowledged completion intent and must not reopen the remote Done issue.
-- Store archive rule, timestamp, and trigger identity. Expose provenance through workspace APIs, MCP listing, and UI. Errors for unavailable worktrees identify archive context and recovery action.
-- Workspace agents inherit their own workspace and session identity; global external clients without that identity must supply explicit targets. Never guess the latest session.
-
-## Implementation boundaries
-Only the Vibe Kanban repository and, if required for its context propagation, its homelab deployment configuration are in scope. Preserve explicit user archive semantics, delivery admission, timer limits, and prompt durability. Centralize automatic archive admission in the local database and cover races with transactional state changes. Preserve separate remote intent and local runtime authority.
+## Setup documentation
+Document creating the App, installing it on selected organization repositories, storing its PEM key in 1Password, and switching the organization entry in Settings. Required repository permissions: Metadata read; Contents write; Pull requests write; Checks read; Commit statuses read; Actions read. Workflows write is optional for pushing workflow files. Explain expiry, rotation, health, repository selection, and PAT migration.
 
 ## Validation
-Regression coverage must include merge then scheduling, issue Done plus pending timer, unarchive against stale archive requests, running poller and active turn holds, last wake-up release, missing worktree diagnostics, exact originating-session inference, and delayed dispatch of the stored prompt. Run repository formatting and appropriate Rust/frontend verification, independent Codex review, record reusable knowledge, then open and merge a PR after checks pass.
+Cover legacy configuration, malformed IDs/references/keys, owner mismatch, missing permissions, expiry/refresh and concurrent minting, settings changes, secret redaction, and routing in server and long-running workspace commands. Verify frontend types and formatting, run focused Rust and frontend checks, and independently review the diff. Live acceptance needs an installed App/key: get_pr on sweetgreen/ai-foundry must report check_runs ok and complete true when all sources succeed; list_pr_checks must include non-Actions check runs where present; push/create/merge must retain normal behavior. Record unavailable live prerequisites explicitly, never claim mock tests prove live acceptance.
+
+## Scope
+Only Vibe Kanban source and its deployment configuration in homelab/modules/vibe-kanban-rebuild.nix if needed. No modifications to other services or organization rulesets.

@@ -38,3 +38,63 @@ Once the GitHub CLI is ready, you can create pull requests directly from a task:
 4.  Click **Create** to open the PR on GitHub.
 
 If the operation is successful, the task status will update, and a link to the new Pull Request will be available.
+
+## GitHub App organisation credentials
+
+In **Settings → Repositories → GitHub organization tokens**, you can select
+**GitHub App installation** instead of a personal access token. Existing PAT
+entries continue to work. An App installation lets the PR tools read check runs
+posted by other Apps, subject to repository access.
+
+1. Create a GitHub App in your organisation's developer settings. You do not need
+   a webhook for Vibe Kanban's credential flow.
+2. Grant these repository permissions, then install the App on only the
+   repositories that Vibe Kanban manages:
+
+   | Permission | Access |
+   | --- | --- |
+   | Metadata | Read |
+   | Contents | Read and write |
+   | Pull requests | Read and write |
+   | Checks | Read |
+   | Commit statuses | Read |
+   | Actions | Read |
+   | Workflows | Write, only for pushing `.github/workflows` changes |
+
+3. Generate an RSA private key. Store the complete multiline PEM in a 1Password
+   field that the coordinator's configured 1Password credential can read. Copy
+   the field's `op://vault/item/field` reference. Do not paste the PEM into Settings.
+4. Add or edit the organisation entry. Choose **GitHub App installation** and
+   enter the App ID, installation ID and private-key reference. The installation
+   must belong to the configured GitHub owner and App.
+5. Select **Check credential health**. Confirm that the App is reachable, the
+   installation is found, a token is minted and required permissions are present.
+6. Start a new workspace session after changing credentials. Server PR and git
+   operations use the updated entry on their next request.
+
+Vibe Kanban signs App JWTs on the coordinator and caches installation tokens
+until five minutes before GitHub's returned expiry. Workspace `gh` and git
+commands request a current token when they run. They receive an opaque refresh
+capability, never the App private key. Capabilities expire after seven days;
+start a new session to renew them. Editing or deleting the credential revokes
+existing capabilities. Workspace commands require `curl` for command-time
+refresh. Workers use their configured coordinator address.
+
+The existing owner routing still applies. Owners without a configured entry
+use their existing authentication. A configured App that cannot authenticate
+fails explicitly instead of falling back to another identity. Refresh failures
+require checking credential health or starting a new session after a settings
+change. A successful health check does not prove that the installation includes
+a particular repository. Check the App's selected repositories if a PR tool
+reports a repository access error.
+
+Private-key rotation takes effect on the next token mint. Re-save the credential
+to invalidate the cached token immediately, then start new sessions. To migrate
+back to a PAT, edit the entry and choose **Personal access token**.
+
+This feature adds no admin merge option and does not change repository rulesets.
+Normal merge protections remain in force. Do not add the App as a bypass actor
+merely to enable check-run reads.
+
+See GitHub's [installation token documentation](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-an-installation-access-token-for-a-github-app)
+and [check-run API permissions](https://docs.github.com/en/rest/checks/runs#list-check-runs-for-a-git-reference).

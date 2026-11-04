@@ -342,6 +342,8 @@ fn generate_types_content() -> String {
         services::services::config::SendMessageShortcut::decl(),
         services::services::config::AutoErrorRemediationConfig::decl(),
         services::services::config::NewIssuePipelineDefaults::decl(),
+        services::services::github_app::AppConfig::decl(),
+        services::services::github_app::AppHealth::decl(),
         services::services::github_owner_tokens::GitHubOwnerToken::decl(),
         services::services::github_owner_tokens::CreateGitHubOwnerTokenRequest::decl(),
         services::services::github_owner_tokens::UpdateGitHubOwnerTokenRequest::decl(),

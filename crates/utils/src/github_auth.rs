@@ -1,14 +1,14 @@
 //! Per-owner GitHub token routing for workspace processes.
 //!
 //! The coordinator resolves Settings → Repositories → GitHub organization
-//! tokens into [`OWNERS_ENV`] plus one [`token_env_name`] variable per owner.
+//! credentials into [`OWNERS_ENV`] plus a PAT or opaque refresh grant per owner.
 //! The host that spawns a workspace child (coordinator or cluster worker) then
 //! calls [`apply_github_routing`] immediately before spawn, which:
 //!
 //! - prepends a host-local `gh` shim directory to `PATH`, so each `gh`
-//!   invocation gets the PAT of the owner it targets; and
+//!   invocation gets the current token of the owner it targets; and
 //! - appends owner-scoped Git credential helpers through `GIT_CONFIG_PARAMETERS`, so
-//!   HTTPS Git operations under `https://github.com/<owner>/` use that PAT.
+//!   HTTPS Git operations under `https://github.com/<owner>/` use that token.
 //!
 //! With no owners configured this is a no-op. Values are read by name at
 //! runtime; no token is written to disk or into Git configuration text.
@@ -56,6 +56,11 @@ pub fn token_env_name(owner: &str) -> String {
     format!("{TOKEN_ENV_PREFIX}{hex}")
 }
 
+/// Opaque coordinator refresh grant; the name survives agent secret filters.
+pub fn refresh_env_name(owner: &str) -> String {
+    token_env_name(owner).replace("VK_GITHUB_PAT_", "VK_GITHUB_REFRESH_")
+}
+
 /// Owners named by an [`OWNERS_ENV`] value, skipping invalid entries.
 pub fn parse_owners(value: &str) -> Vec<&str> {
     value
@@ -98,6 +103,14 @@ pub fn apply_github_routing<M: EnvMap>(env: &mut M) {
     };
     if parse_owners(&owners).is_empty() {
         return;
+    }
+    if env.env_get("VK_GITHUB_REFRESH_URL").is_some()
+        && let Ok(base) = std::env::var("VK_WORKER_COORDINATOR_URL")
+    {
+        env.env_set(
+            "VK_GITHUB_REFRESH_URL".into(),
+            format!("{}/github-app-refresh", base.trim_end_matches('/')),
+        );
     }
     let shim_dir = github_auth_bin_dir();
     let shim_dir = match ensure_shim(&shim_dir) {
@@ -162,7 +175,11 @@ pub fn routing_environment(
     // would keep the count but lose the keys, and git then refuses to run.
     let mut parameters = Vec::new();
     for owner in owners {
-        let helper = credential_helper(&token_env_name(owner));
+        let helper = if lookup(&refresh_env_name(owner)).is_some() {
+            refresh_credential_helper(&refresh_env_name(owner))
+        } else {
+            credential_helper(&token_env_name(owner))
+        };
         let mut spellings = vec![owner.to_owned()];
         let lower = owner.to_ascii_lowercase();
         if lower != owner {
@@ -200,6 +217,15 @@ fn credential_helper(variable: &str) -> String {
     format!(
         "!f() {{ test \"$1\" = get || return 0; test -n \"${variable}\" || return 0; \
          printf 'username=x-access-token\\npassword=%s\\n' \"${variable}\"; }}; f"
+    )
+}
+
+fn refresh_credential_helper(variable: &str) -> String {
+    format!(
+        "!f() {{ test \"$1\" = get || return 0; \
+         vk_t=$(printf %s \"${variable}\" | curl -q --silent --fail --max-time 60 --proto '=http,https' --data-binary @- \"$VK_GITHUB_REFRESH_URL\") || {{ printf 'quit=true\\n'; return 1; }}; \
+         test -n \"$vk_t\" || {{ printf 'quit=true\\n'; return 1; }}; \
+         printf 'username=x-access-token\\npassword=%s\\n' \"$vk_t\"; }}; f"
     )
 }
 
@@ -864,5 +890,82 @@ mod tests {
         assert!(fill("https://github.com/org-b/svc.git").contains(&format!("password={TOKEN_B}")));
         assert!(fill("https://github.com/org-b-other/x.git").contains("password=existing"));
         assert!(fill("https://github.com/someone/x.git").contains("password=existing"));
+    }
+    #[test]
+    fn app_refresh_happens_per_gh_call_and_fails_closed() {
+        let fx = fixture();
+        let curl = fx.fake_dir.join("curl");
+        std::fs::write(&curl, "#!/bin/sh\nvalue=$(cat)\n[ \"$value\" = synthetic-grant ] || exit 22\nprintf %s \"$SYNTHETIC_RESPONSE\"\n").unwrap();
+        std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let name = refresh_env_name("Org-A");
+        for token in ["fresh-one", "fresh-two"] {
+            let (code, stdout, _) = fx.gh(
+                &fx.work,
+                &["pr", "view", "-R", "Org-A/repo"],
+                &[
+                    (name.as_str(), "synthetic-grant"),
+                    ("VK_GITHUB_REFRESH_URL", "http://broker/github-app-refresh"),
+                    ("SYNTHETIC_RESPONSE", token),
+                ],
+            );
+            assert_eq!(code, 0);
+            assert!(stdout.contains(token));
+            assert!(!stdout.contains(TOKEN_A));
+        }
+        let (code, stdout, stderr) = fx.gh(
+            &fx.work,
+            &["pr", "view", "-R", "Org-A/repo"],
+            &[
+                (name.as_str(), "invalid-grant"),
+                ("VK_GITHUB_REFRESH_URL", "http://broker/github-app-refresh"),
+            ],
+        );
+        assert_eq!(code, 78);
+        assert!(stdout.is_empty());
+        assert!(!stderr.contains("invalid-grant"));
+    }
+
+    #[test]
+    fn app_git_helper_refreshes_and_does_not_fall_back_on_failure() {
+        use std::io::Write;
+        let fx = fixture();
+        let curl = fx.fake_dir.join("curl");
+        std::fs::write(&curl, "#!/bin/sh\ncat >/dev/null\n[ \"$SYNTHETIC_RESPONSE\" != fail ] || exit 22\nprintf %s \"$SYNTHETIC_RESPONSE\"\n").unwrap();
+        std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!("{}:{}", fx.fake_dir.display(), system_path());
+        let grant_name = refresh_env_name("Org-A");
+        let additions = routing_environment("Org-A", None, |name| {
+            (name == grant_name).then(|| "synthetic-grant".into())
+        });
+        for response in ["first", "renewed", "fail"] {
+            let mut command = fx.command("git", &fx.work);
+            command
+                .args(["credential", "fill"])
+                .env("PATH", &path)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .envs(additions.clone())
+                .env(&grant_name, "synthetic-grant")
+                .env("VK_GITHUB_REFRESH_URL", "http://broker/github-app-refresh")
+                .env("SYNTHETIC_RESPONSE", response)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+            let mut child = command.spawn().unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(b"url=https://github.com/Org-A/repo.git\n\n")
+                .unwrap();
+            let output = child.wait_with_output().unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if response == "fail" {
+                assert!(!output.status.success());
+                assert!(!stdout.contains(TOKEN_A));
+            } else {
+                assert!(output.status.success());
+                assert!(stdout.contains(&format!("password={response}")));
+            }
+        }
     }
 }
