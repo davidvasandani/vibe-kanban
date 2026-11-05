@@ -14,12 +14,14 @@ function renderChatBox(overrides: {
   isNewSessionMode?: boolean;
   selectedSessionId?: string;
   isDraftLoading?: boolean;
+  issueSimpleId?: string;
 }) {
   const onSend = vi.fn();
   const hasSession = "selectedSessionId" in overrides;
   render(
     <SessionChatBox
       status={overrides.status ?? "idle"}
+      issueSimpleId={overrides.issueSimpleId}
       editor={{ value: overrides.value ?? "", onChange: vi.fn() }}
       isDraftLoading={overrides.isDraftLoading ?? false}
       renderEditor={() => <div data-testid="editor" />}
@@ -48,14 +50,15 @@ function renderChatBox(overrides: {
 const sendButton = () => screen.getByRole("button", { name: /(^|\.)send$/i });
 
 describe("SessionChatBox – sending the prefilled (placeholder) prompt", () => {
-  it("enables Send with an empty editor when continuing an existing session", async () => {
+  it("enables Continue with an empty editor in an existing session", async () => {
     const { onSend } = renderChatBox({ value: "", selectedSessionId: "s1" });
 
-    const btn = sendButton();
+    const btn = screen.getByRole("button", { name: "Continue" });
     expect(btn).toBeEnabled();
 
     await userEvent.click(btn);
     expect(onSend).toHaveBeenCalledTimes(1);
+    expect(onSend).toHaveBeenCalledWith(DEFAULT_CONTINUE_PROMPT);
   });
 
   it("keeps Send disabled with an empty editor in new-session mode", () => {
@@ -68,16 +71,88 @@ describe("SessionChatBox – sending the prefilled (placeholder) prompt", () => 
     expect(sendButton()).toBeDisabled();
   });
 
-  it("keeps Send disabled while a persisted draft is still loading", () => {
+  it("keeps prompt actions disabled while a persisted draft is still loading", () => {
     // Enabling it here would render a clickable button that no-ops, because
     // the resolver refuses to substitute the prompt until the draft loads.
     renderChatBox({ value: "", selectedSessionId: "s1", isDraftLoading: true });
-    expect(sendButton()).toBeDisabled();
+    for (const name of ["Continue", "What’s left", "Status"]) {
+      expect(screen.getByRole("button", { name })).toBeDisabled();
+    }
   });
 
   it("keeps Send enabled when the editor has content", () => {
     renderChatBox({ value: "do the thing", selectedSessionId: "s1" });
     expect(sendButton()).toBeEnabled();
+  });
+});
+
+describe("empty composer prompt actions", () => {
+  it.each([
+    ["Continue", "Continue working on this task"],
+    ["What’s left", "What’s left on VK-123"],
+    ["Status", "Status"],
+  ])("sends the exact %s prompt", async (label, prompt) => {
+    const { onSend } = renderChatBox({
+      value: "  ",
+      selectedSessionId: "s1",
+      issueSimpleId: "VK-123",
+    });
+    await userEvent.click(screen.getByRole("button", { name: label }));
+    expect(onSend).toHaveBeenCalledTimes(1);
+    expect(onSend).toHaveBeenCalledWith(prompt);
+    expect(
+      screen.queryByRole("button", { name: /(^|\.)send$/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen
+        .getAllByRole("button")
+        .map((button) => button.textContent)
+        .filter((label) =>
+          ["Continue", "What’s left", "Status"].includes(label ?? ""),
+        ),
+    ).toEqual(["Continue", "What’s left", "Status"]);
+  });
+
+  it("disables only the issue-specific prompt when identity is unavailable", async () => {
+    const { onSend } = renderChatBox({ selectedSessionId: "s1" });
+    expect(screen.getByRole("button", { name: "Continue" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Status" })).toBeEnabled();
+    const remaining = screen.getByRole("button", { name: "What’s left" });
+    expect(remaining).toBeDisabled();
+    await userEvent.click(remaining);
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "running",
+    "queued",
+    "sending",
+    "stopping",
+    "queue-loading",
+  ] as const)("preserves %s controls", (status) => {
+    renderChatBox({ selectedSessionId: "s1", status });
+    expect(
+      screen.queryByRole("button", { name: "Continue" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "What’s left" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Status" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("sends typed text through the ordinary callback", async () => {
+    const { onSend } = renderChatBox({
+      value: "hello",
+      selectedSessionId: "s1",
+    });
+    await userEvent.click(sendButton());
+    expect(onSend).toHaveBeenCalledTimes(1);
+    expect(onSend).toHaveBeenCalledWith();
+    expect(
+      screen.queryByRole("button", { name: "Continue" }),
+    ).not.toBeInTheDocument();
   });
 });
 

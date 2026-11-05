@@ -1444,3 +1444,9 @@ agents, keep private keys out of agent environments, and preserve PAT behavior.
 No new merge bypass authority is introduced. Use Vibe Kanban's constitution
 and task feature directory; the workspace command's homelab prefix is a shared
 pipeline default, not a request to change another project's governance.
+
+## Review: vk/bab2-button-prompts
+
+Applied `/speckit.constitution`. Existing principles II, III, IV and VI govern
+this change: test visible actions and payloads, reuse the send pipeline, keep
+issue resolution in web-core and presentation in ui. No new principle needed.
