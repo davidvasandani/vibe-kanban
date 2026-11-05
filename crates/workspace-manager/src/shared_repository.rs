@@ -49,6 +49,17 @@ pub enum AdoptOutcome {
     Skipped { reason: String },
 }
 
+/// Where one commit stands relative to another: equal, a strict ancestor
+/// (behind), a strict descendant (ahead), or neither (diverged). See
+/// [`SharedRepositoryStore::classify_against_remote`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemoteComparison {
+    Equal,
+    Behind,
+    Ahead,
+    Diverged,
+}
+
 /// Coordinator-owned Git stores on shared storage, one per repository.
 #[derive(Clone)]
 pub struct SharedRepositoryStore {
@@ -76,18 +87,64 @@ impl SharedRepositoryStore {
     /// Materialise the store for `repo` and guarantee it resolves `target_branch`.
     ///
     /// Idempotent, and cheap when the store is already good, because it runs on
-    /// every provisioning of every cluster workspace.
+    /// every provisioning of every cluster workspace. Checks `target_branch`
+    /// for staleness against `origin` and fast-forwards it when behind (see
+    /// [`Self::fast_forward_local_head`]) — this is the right behaviour for a
+    /// *base* branch, which is the only thing this method is for. A
+    /// workspace's own branch has a different invariant and must go through
+    /// [`Self::ensure_for_heal`] instead.
     pub async fn ensure(
         &self,
         repo: &Repo,
         target_branch: &str,
     ) -> Result<PathBuf, WorkspaceError> {
+        self.ensure_impl(repo, target_branch, true).await
+    }
+
+    /// Materialise the store for `repo` and guarantee it resolves a
+    /// **workspace's own branch**, ahead of [`Self::adopt`] re-linking that
+    /// workspace's worktree.
+    ///
+    /// Unlike [`Self::ensure`], this never checks the branch for staleness or
+    /// fast-forwards it. `heal_cluster_worktree`
+    /// (`crates/local-deployment/src/container.rs`) calls this to materialise
+    /// a workspace branch that may already resolve in the store from an
+    /// earlier wildcard mirror, *before* that workspace's own (not-yet-store-
+    /// registered) worktree has been adopted onto it. At that moment the
+    /// worktree's on-disk files still reflect whatever commit they were
+    /// created from; moving the branch ref to a newer or disputed commit here
+    /// — even the correct, well-intentioned "freshen the base" behaviour
+    /// `ensure` applies — would hand `adopt` a target that no longer matches
+    /// the files sitting in that worktree, and `adopt`'s `git reset -q` would
+    /// rebuild the index against it, making every file between the two
+    /// commits look locally modified or deleted. A workspace branch's
+    /// identity is "whatever commit this workspace's worktree is actually on
+    /// right now," never "the latest" — there is nothing to freshen.
+    pub async fn ensure_for_heal(
+        &self,
+        repo: &Repo,
+        branch: &str,
+    ) -> Result<PathBuf, WorkspaceError> {
+        self.ensure_impl(repo, branch, false).await
+    }
+
+    async fn ensure_impl(
+        &self,
+        repo: &Repo,
+        target_branch: &str,
+        check_base_freshness: bool,
+    ) -> Result<PathBuf, WorkspaceError> {
         let store = self.path_for(repo.id);
 
         // Cheap path first: an existing store that already holds the branch
-        // needs nothing. Proven with `cat-file -e`, not `rev-parse`.
+        // needs nothing but a freshness check. Proven with `cat-file -e`, not
+        // `rev-parse`.
         if Self::store_resolves(&store, target_branch)? {
-            Self::ensure_origin_fetch_refspec(&GitCli::new(), &store)?;
+            let cli = GitCli::new();
+            Self::ensure_origin_fetch_refspec(&cli, &store)?;
+            if check_base_freshness {
+                Self::fast_forward_local_head(&cli, &store, &repo.name, target_branch)?;
+            }
             debug!(
                 repo = %repo.name,
                 store = %store.display(),
@@ -617,14 +674,249 @@ impl SharedRepositoryStore {
     /// the current one. Since `origin/main` is the default target branch, that
     /// would be the common case, not the corner.
     ///
-    /// A local head still short-circuits, exactly as before this change. That
-    /// carries its own staleness for a local target branch, which is pre-existing
-    /// behaviour and deliberately left alone here.
+    /// A local head still short-circuits here, exactly as before this change —
+    /// but the caller follows this with [`Self::fast_forward_local_head`],
+    /// which closes the staleness gap this comment used to describe: a local
+    /// target branch is checked against `origin` and fast-forwarded (or the
+    /// provisioning refused on divergence) before being served.
     fn store_resolves(store: &Path, branch: &str) -> Result<bool, WorkspaceError> {
         if !Self::is_store(store)? {
             return Ok(false);
         }
         Self::local_branch_commit_present(&GitCli::new(), store, branch)
+    }
+
+    /// Bring a local head that `store_resolves` just accepted up to date with
+    /// `origin` before it is used as a new workspace's base — or refuse
+    /// outright when the two have diverged.
+    ///
+    /// A **remote-tracking** target branch (`origin/main`) is never served
+    /// from a stale copy because [`Self::store_resolves`] does not accept one
+    /// as a reason to skip the mirror; this closes the matching gap for a
+    /// **local** one (`main`), which otherwise short-circuits forever once it
+    /// first resolves, silently freezing every later workspace at whatever
+    /// commit the first one captured (the regression this function exists to
+    /// fix — see the VAS-981/VAS-982 incident notes).
+    ///
+    /// The store's own `origin` remote (copied from the registered checkout's
+    /// remotes by [`Self::configure`], and pointed at the real forge rather
+    /// than at the checkout) is fetched directly — not mirrored from the
+    /// checkout — because the checkout's own local heads are just as capable
+    /// of being stale and are not this function's authority. Fetching lands
+    /// in `refs/remotes/origin/<branch>`, never touching `refs/heads/<branch>`
+    /// directly, so a local head that has diverged (holds commits `origin`
+    /// does not) is detected before anything is overwritten rather than
+    /// clobbered by a force-fetch.
+    ///
+    /// Best-effort when `origin` cannot be reached at all (unreachable forge,
+    /// expired credentials): a store that can already serve the branch must
+    /// not be blocked on a freshness check that can only move it forward.
+    /// Divergence, once it *can* be observed, is not best-effort — silently
+    /// branching from a diverged base either strands the new workspace on
+    /// dead history or, if `origin` has moved past it, nets it out against
+    /// months of work, which is the exact failure this function exists to
+    /// prevent.
+    ///
+    /// Refuses to touch a branch any worktree in the store already has
+    /// checked out. `ensure` is not only called with a *base* branch: `heal_cluster_worktree`
+    /// (`crates/local-deployment/src/container.rs`) calls it with a
+    /// workspace's own `vk/…` branch to repair pre-store worktrees, and that
+    /// branch is exactly the shape expected to legitimately run ahead of
+    /// whatever was last pushed (unpushed agent commits). Force-moving
+    /// `refs/heads/<branch>` while a worktree has it checked out would also
+    /// repeat the exact hazard `git fetch` itself refuses to cause elsewhere
+    /// in this file (`refusing to fetch into branch '<b>' checked out at
+    /// <path>`) — the ref would move without the worktree's index or files
+    /// following it. A target (base) branch is never checked out by a
+    /// worktree in the store (workspace branches are always named
+    /// `vk/…`), so this guard is a no-op for the case this function exists
+    /// to fix.
+    fn fast_forward_local_head(
+        cli: &GitCli,
+        store: &Path,
+        repo_name: &str,
+        branch: &str,
+    ) -> Result<(), WorkspaceError> {
+        if Self::branch_is_checked_out(cli, store, branch)? {
+            return Ok(());
+        }
+
+        let Ok(origin_url) = cli.get_remote_url(store, "origin") else {
+            // A local-only registered repo: nothing upstream to be stale
+            // relative to.
+            return Ok(());
+        };
+
+        let tracking_ref = format!("refs/remotes/origin/{branch}");
+        let refspec = format!("+refs/heads/{branch}:{tracking_ref}");
+        if let Err(e) = cli.fetch_with_refspec(store, &origin_url, &refspec) {
+            warn!(
+                repo = %repo_name,
+                branch,
+                "could not check '{branch}' against origin before branching a workspace from it; \
+                 serving it as-is: {e}"
+            );
+            return Ok(());
+        }
+
+        let remote_tip = cli.resolve_commit(store, &tracking_ref).map_err(|e| {
+            WorkspaceError::PartialCreation(format!("could not query the store: {e}"))
+        })?;
+        let Some(remote_tip) = remote_tip else {
+            // `branch` does not exist on origin under this name (deleted
+            // upstream, or local-only). Nothing to compare against.
+            return Ok(());
+        };
+
+        let local_ref = format!("refs/heads/{branch}");
+        let local_tip = cli.resolve_commit(store, &local_ref).map_err(|e| {
+            WorkspaceError::PartialCreation(format!("could not query the store: {e}"))
+        })?;
+        let Some(local_tip) = local_tip else {
+            // `store_resolves` already proved this ref exists.
+            return Ok(());
+        };
+
+        match Self::classify_against_remote(cli, store, branch, &local_tip, &remote_tip)? {
+            // Already at least as fresh as what we fetched (including a
+            // concurrent caller's fast-forward landing before we even read
+            // `local_tip` — the exact ordering `is_ancestor(local_tip,
+            // remote_tip)` alone could not tell apart from divergence).
+            RemoteComparison::Equal | RemoteComparison::Ahead => return Ok(()),
+            RemoteComparison::Diverged => {
+                return Err(Self::diverged_base_branch_error(
+                    repo_name,
+                    branch,
+                    &local_tip,
+                    &remote_tip,
+                ));
+            }
+            RemoteComparison::Behind => {}
+        }
+
+        info!(
+            repo = %repo_name,
+            branch,
+            from = %local_tip,
+            to = %remote_tip,
+            "local base branch was behind origin; fast-forwarding the shared store before \
+             branching a new workspace from it"
+        );
+        // Compare-and-swap, not a bare 2-arg update: the cheap path takes no
+        // lock, so a concurrent provisioning of another workspace on the same
+        // branch can race this one. Passing `local_tip` as the expected old
+        // value makes `update-ref` itself refuse a write whose premise (the
+        // ref is still at the commit this call just read) no longer holds,
+        // rather than risk clobbering a racing call's *newer* fast-forward
+        // with this call's older one.
+        if cli
+            .git(store, ["update-ref", &local_ref, &remote_tip, &local_tip])
+            .is_ok()
+        {
+            return Ok(());
+        }
+
+        // The CAS lost: a peer changed the ref between our read and our
+        // write. Re-read and classify again, exactly as above, against
+        // whatever is there now. One retry is enough: the "nothing else
+        // writes a target branch's local head in this store" invariant that
+        // justified skipping an old-value check in `publish_and_fetch`'s
+        // wildcard mirror holds here too, so a second CAS failure would mean
+        // a third peer just did the same thing, not an unbounded storm —
+        // enough to stop immediately trailing the slowest of a small batch of
+        // concurrent provisionings, not to chase a storm indefinitely.
+        let current = cli.resolve_commit(store, &local_ref).map_err(|e| {
+            WorkspaceError::PartialCreation(format!("could not query the store: {e}"))
+        })?;
+        let Some(current) = current else {
+            return Ok(());
+        };
+        match Self::classify_against_remote(cli, store, branch, &current, &remote_tip)? {
+            RemoteComparison::Equal | RemoteComparison::Ahead => {
+                debug!(
+                    repo = %repo_name,
+                    branch,
+                    "local base branch fast-forward lost a race, but the winner's write is at \
+                     least as fresh as ours; nothing to do"
+                );
+                Ok(())
+            }
+            RemoteComparison::Diverged => Err(Self::diverged_base_branch_error(
+                repo_name,
+                branch,
+                &current,
+                &remote_tip,
+            )),
+            RemoteComparison::Behind => {
+                if let Err(e) = cli.git(store, ["update-ref", &local_ref, &remote_tip, &current]) {
+                    debug!(
+                        repo = %repo_name,
+                        branch,
+                        "local base branch fast-forward lost a second race with a concurrent \
+                         update; leaving the winner's write in place rather than retrying \
+                         further: {e}"
+                    );
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Where `local` stands relative to `remote`: equal, a strict ancestor
+    /// (behind), a strict descendant (ahead — already at least as fresh, not
+    /// a reason to touch anything), or neither (diverged — holds a commit the
+    /// other does not). Used both for the initial freshness check and for the
+    /// CAS retry's re-read, which must apply exactly the same classification
+    /// rather than a narrower one that cannot distinguish "ahead" from
+    /// "diverged" (the gap that let a local branch already fresher than this
+    /// call's own fetch be misreported as diverged).
+    fn classify_against_remote(
+        cli: &GitCli,
+        store: &Path,
+        branch: &str,
+        local: &str,
+        remote: &str,
+    ) -> Result<RemoteComparison, WorkspaceError> {
+        if local == remote {
+            return Ok(RemoteComparison::Equal);
+        }
+        let compare = |a: &str, b: &str| {
+            cli.is_ancestor(store, a, b).map_err(|e| {
+                WorkspaceError::PartialCreation(format!(
+                    "could not compare '{branch}' to origin: {e}"
+                ))
+            })
+        };
+        if compare(local, remote)? {
+            return Ok(RemoteComparison::Behind);
+        }
+        if compare(remote, local)? {
+            return Ok(RemoteComparison::Ahead);
+        }
+        Ok(RemoteComparison::Diverged)
+    }
+
+    /// Build the error for a local base branch that holds a commit `origin`
+    /// does not — shared by the initial freshness check and the CAS retry's
+    /// own divergence check, which can observe this against a different pair
+    /// of commits than the first one did.
+    fn diverged_base_branch_error(
+        repo_name: &str,
+        branch: &str,
+        local_tip: &str,
+        remote_tip: &str,
+    ) -> WorkspaceError {
+        WorkspaceError::SharedStore {
+            repo_name: repo_name.to_string(),
+            branch: branch.to_string(),
+            detail: format!(
+                "local '{branch}' ({local_tip}) has diverged from origin/{branch} \
+                 ({remote_tip}) in the shared repository store: it holds a commit origin \
+                 does not, so a new workspace cannot be branched from it without either \
+                 stranding the workspace on dead history or silently reverting work already \
+                 on origin. Fast-forward or reset '{branch}' to match origin, then retry."
+            ),
+        }
     }
 
     /// A directory is a store only if it holds an object database. An empty or
@@ -701,6 +993,24 @@ impl SharedRepositoryStore {
     ) -> Result<bool, WorkspaceError> {
         Ok(Self::resolved_branch_ref(cli, store, branch)?
             .is_some_and(|reference| reference.starts_with("refs/heads/")))
+    }
+
+    /// Whether any worktree in the store has `branch` checked out, elsewhere
+    /// or not. Unlike [`Self::branch_checked_out_elsewhere`] this draws no
+    /// exclusion around a specific worktree path — it is for a caller with no
+    /// worktree of its own in hand, such as [`Self::fast_forward_local_head`],
+    /// which must not move a ref out from under *any* live checkout.
+    fn branch_is_checked_out(
+        cli: &GitCli,
+        store: &Path,
+        branch: &str,
+    ) -> Result<bool, WorkspaceError> {
+        let entries = cli.list_worktrees(store).map_err(|e| {
+            WorkspaceError::PartialCreation(format!("could not list worktrees of the store: {e}"))
+        })?;
+        Ok(entries
+            .iter()
+            .any(|entry| entry.branch.as_deref() == Some(branch)))
     }
 
     /// A branch may be checked out by at most one worktree. Adopting a branch
@@ -1632,6 +1942,43 @@ mod tests {
         );
     }
 
+    /// A local branch that is a strict *descendant* of the remote commit this
+    /// call happened to fetch (a concurrent caller already fast-forwarded it
+    /// past that point) must read as ahead, not diverged — the earlier
+    /// version of this check only asked `is_ancestor(local, remote)`, which is
+    /// equally false for "ahead" and "diverged" and could not tell them
+    /// apart, misreporting an already-fresher-than-necessary local branch as
+    /// diverged and failing workspace creation that should have succeeded.
+    #[test]
+    fn classify_against_remote_distinguishes_ahead_from_diverged() {
+        let fixture = TempDir::new().unwrap();
+        let repo = fixture.path().join("repo");
+        seed_repo(&repo);
+        let older = cli().resolve_commit(&repo, "HEAD").unwrap().unwrap();
+        fs::write(repo.join("more.txt"), "more\n").unwrap();
+        cli().add_all(&repo).unwrap();
+        cli()
+            .commit(&repo, "advance past what this call fetched")
+            .unwrap();
+        let newer = cli().resolve_commit(&repo, "HEAD").unwrap().unwrap();
+
+        assert_eq!(
+            SharedRepositoryStore::classify_against_remote(&cli(), &repo, "main", &newer, &older)
+                .unwrap(),
+            RemoteComparison::Ahead
+        );
+        assert_eq!(
+            SharedRepositoryStore::classify_against_remote(&cli(), &repo, "main", &older, &newer)
+                .unwrap(),
+            RemoteComparison::Behind
+        );
+        assert_eq!(
+            SharedRepositoryStore::classify_against_remote(&cli(), &repo, "main", &older, &older)
+                .unwrap(),
+            RemoteComparison::Equal
+        );
+    }
+
     /// A branch that exists nowhere must still fail — and say which repository
     /// and which branch, because that failure is shown to the user.
     #[tokio::test]
@@ -1661,6 +2008,381 @@ mod tests {
         let rendered = error.to_string();
         assert!(rendered.contains("repo"), "{rendered}");
         assert!(rendered.contains("origin/no-such-branch"), "{rendered}");
+    }
+
+    /// The regression this task exists to fix: a workspace requesting the
+    /// *local* form of a default branch (`main`, as opposed to the picker's
+    /// own default `origin/main`) must not be served whatever commit the
+    /// shared store happened to capture on its first provisioning. A second
+    /// `ensure` call, after origin has moved on, must fast-forward the
+    /// store's local head to origin's tip rather than silently freezing it.
+    #[tokio::test]
+    async fn ensure_fast_forwards_a_stale_local_target_branch_to_origin() {
+        let fixture = TempDir::new().unwrap();
+        let shared_root = fixture.path().join("shared");
+        let checkout = fixture.path().join("srv-src").join("repo");
+        let upstream = fixture.path().join("forge").join("repo");
+        fs::create_dir_all(&shared_root).unwrap();
+        fs::create_dir_all(checkout.parent().unwrap()).unwrap();
+        fs::create_dir_all(upstream.parent().unwrap()).unwrap();
+
+        seed_repo(&checkout);
+        let base_commit = cli().resolve_commit(&checkout, "HEAD").unwrap().unwrap();
+
+        // The real forge: starts identical to the checkout, then moves on
+        // without the checkout (or anything downstream of it) ever seeing it
+        // — exactly like a merge landing on GitHub that nobody has pulled.
+        cli()
+            .git(
+                fixture.path(),
+                [
+                    "clone",
+                    checkout.to_str().unwrap(),
+                    upstream.to_str().unwrap(),
+                ],
+            )
+            .unwrap();
+        cli()
+            .set_config(&upstream, "user.email", "test@vibekanban.invalid")
+            .unwrap();
+        cli()
+            .set_config(&upstream, "user.name", "Vibe Kanban Test")
+            .unwrap();
+        fs::write(upstream.join("merged-on-github.txt"), "new work\n").unwrap();
+        cli().add_all(&upstream).unwrap();
+        cli().commit(&upstream, "merged on the forge").unwrap();
+        let upstream_tip = cli().resolve_commit(&upstream, "HEAD").unwrap().unwrap();
+        assert_ne!(base_commit, upstream_tip);
+
+        // The registered checkout's `origin` names the real forge, same as
+        // production; the checkout's own local `main` is never advanced.
+        cli()
+            .set_remote_url(&checkout, "origin", &upstream.to_string_lossy())
+            .unwrap();
+
+        let repo = repo_record("repo", &checkout);
+        let store_handle = store_with_locks(&shared_root).await;
+
+        // First provisioning: the store is cloned from the checkout and
+        // necessarily captures `main` at the checkout's (stale) tip.
+        let store = store_handle.ensure(&repo, "main").await.unwrap();
+        assert_eq!(
+            cli()
+                .resolve_commit(&store, "refs/heads/main")
+                .unwrap()
+                .unwrap(),
+            base_commit,
+            "the first workspace's base is whatever the checkout had at clone time"
+        );
+
+        // A later workspace, same target branch, after origin has moved on.
+        let store_again = store_handle.ensure(&repo, "main").await.unwrap();
+        assert_eq!(store_again, store, "the same store must be reused");
+        assert_eq!(
+            cli()
+                .resolve_commit(&store, "refs/heads/main")
+                .unwrap()
+                .unwrap(),
+            upstream_tip,
+            "a stale local base branch must be fast-forwarded to origin's tip before \
+             a later workspace branches from it"
+        );
+    }
+
+    /// A local base branch that has gained commits origin does not know about
+    /// (a vk-side merge that moved it independently, in the incident this
+    /// guards against) must refuse rather than silently branch new workspaces
+    /// from dead history or discard the local-only commits by force-resetting
+    /// to origin.
+    #[tokio::test]
+    async fn ensure_refuses_a_diverged_local_target_branch() {
+        let fixture = TempDir::new().unwrap();
+        let shared_root = fixture.path().join("shared");
+        let checkout = fixture.path().join("srv-src").join("repo");
+        let upstream = fixture.path().join("forge").join("repo");
+        fs::create_dir_all(&shared_root).unwrap();
+        fs::create_dir_all(checkout.parent().unwrap()).unwrap();
+        fs::create_dir_all(upstream.parent().unwrap()).unwrap();
+
+        seed_repo(&checkout);
+
+        cli()
+            .git(
+                fixture.path(),
+                [
+                    "clone",
+                    checkout.to_str().unwrap(),
+                    upstream.to_str().unwrap(),
+                ],
+            )
+            .unwrap();
+        cli()
+            .set_config(&upstream, "user.email", "test@vibekanban.invalid")
+            .unwrap();
+        cli()
+            .set_config(&upstream, "user.name", "Vibe Kanban Test")
+            .unwrap();
+        fs::write(upstream.join("merged-on-github.txt"), "new work\n").unwrap();
+        cli().add_all(&upstream).unwrap();
+        cli().commit(&upstream, "merged on the forge").unwrap();
+
+        cli()
+            .set_remote_url(&checkout, "origin", &upstream.to_string_lossy())
+            .unwrap();
+
+        let repo = repo_record("repo", &checkout);
+        let store_handle = store_with_locks(&shared_root).await;
+        let store = store_handle.ensure(&repo, "main").await.unwrap();
+
+        // A commit that exists only in the store's `main`, reachable from
+        // nowhere origin holds — standing in for a vk-side merge that moved
+        // the shared clone's local ref independently of the forge.
+        let scratch = fixture.path().join("scratch");
+        cli()
+            .git(
+                fixture.path(),
+                ["clone", store.to_str().unwrap(), scratch.to_str().unwrap()],
+            )
+            .unwrap();
+        cli()
+            .set_config(&scratch, "user.email", "test@vibekanban.invalid")
+            .unwrap();
+        cli()
+            .set_config(&scratch, "user.name", "Vibe Kanban Test")
+            .unwrap();
+        fs::write(scratch.join("local-only.txt"), "only in the shared store\n").unwrap();
+        cli().add_all(&scratch).unwrap();
+        cli()
+            .commit(&scratch, "local-only divergent commit")
+            .unwrap();
+        let diverged = cli().resolve_commit(&scratch, "HEAD").unwrap().unwrap();
+        // Push the new commit's objects into the (bare) store along with the
+        // ref update — a local `update-ref` alone would point `main` at an
+        // object the store does not hold.
+        cli()
+            .push(&scratch, &store.to_string_lossy(), "main", true)
+            .unwrap();
+
+        let error = store_handle
+            .ensure(&repo, "main")
+            .await
+            .expect_err("a diverged local base branch must not be served silently");
+
+        match &error {
+            WorkspaceError::SharedStore {
+                repo_name,
+                branch,
+                detail,
+            } => {
+                assert_eq!(repo_name, "repo");
+                assert_eq!(branch, "main");
+                assert!(detail.contains("diverged"), "{detail}");
+            }
+            other => panic!("expected SharedStore, got {other:?}"),
+        }
+        assert_eq!(
+            cli()
+                .resolve_commit(&store, "refs/heads/main")
+                .unwrap()
+                .unwrap(),
+            diverged,
+            "a refused fast-forward must leave the local head untouched"
+        );
+    }
+
+    /// `ensure` is not only called with a base branch: `heal_cluster_worktree`
+    /// calls it with a workspace's own `vk/…` branch to repair pre-store
+    /// worktrees. That branch can be checked out by a live worktree in the
+    /// store, and even if it was also pushed upstream for a PR, moving its
+    /// ref out from under the checkout would desync the worktree's index and
+    /// files from `HEAD` — the freshness check must refuse to touch it.
+    #[tokio::test]
+    async fn ensure_never_moves_a_checked_out_branchs_ref() {
+        let fixture = TempDir::new().unwrap();
+        let shared_root = fixture.path().join("shared");
+        let checkout = fixture.path().join("srv-src").join("repo");
+        let forge = fixture.path().join("forge").join("repo");
+        fs::create_dir_all(&shared_root).unwrap();
+        fs::create_dir_all(checkout.parent().unwrap()).unwrap();
+        fs::create_dir_all(forge.parent().unwrap()).unwrap();
+
+        seed_repo(&checkout);
+        cli()
+            .git(
+                fixture.path(),
+                ["clone", checkout.to_str().unwrap(), forge.to_str().unwrap()],
+            )
+            .unwrap();
+        cli()
+            .set_config(&forge, "user.email", "test@vibekanban.invalid")
+            .unwrap();
+        cli()
+            .set_config(&forge, "user.name", "Vibe Kanban Test")
+            .unwrap();
+        cli()
+            .set_remote_url(&checkout, "origin", &forge.to_string_lossy())
+            .unwrap();
+
+        let repo = repo_record("repo", &checkout);
+        let store_handle = store_with_locks(&shared_root).await;
+        let store = store_handle.ensure(&repo, "main").await.unwrap();
+
+        // A live workspace: its own branch, checked out in a worktree of the
+        // store, standing in for an in-progress agent turn.
+        git::GitService::new()
+            .create_branch(&store, "vk/work", "main")
+            .unwrap();
+        let worktree = shared_root.join("workspaces").join("ws-1").join("repo");
+        fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+        cli()
+            .worktree_add(&store, &worktree, "vk/work", false)
+            .unwrap();
+        let checked_out_tip = cli()
+            .resolve_commit(&store, "refs/heads/vk/work")
+            .unwrap()
+            .unwrap();
+
+        // The branch was also pushed upstream for a PR, and has since moved
+        // further on the forge — exactly the shape that would otherwise be
+        // fast-forwarded.
+        cli()
+            .push(&store, &forge.to_string_lossy(), "vk/work", false)
+            .unwrap();
+        let scratch = fixture.path().join("scratch");
+        cli()
+            .git(
+                fixture.path(),
+                ["clone", forge.to_str().unwrap(), scratch.to_str().unwrap()],
+            )
+            .unwrap();
+        cli()
+            .set_config(&scratch, "user.email", "test@vibekanban.invalid")
+            .unwrap();
+        cli()
+            .set_config(&scratch, "user.name", "Vibe Kanban Test")
+            .unwrap();
+        cli().git(&scratch, ["checkout", "vk/work"]).unwrap();
+        fs::write(scratch.join("merged-on-github.txt"), "ahead on the forge\n").unwrap();
+        cli().add_all(&scratch).unwrap();
+        cli()
+            .commit(&scratch, "advance vk/work on the forge")
+            .unwrap();
+        cli()
+            .push(&scratch, &forge.to_string_lossy(), "vk/work", false)
+            .unwrap();
+
+        // `heal_cluster_worktree`'s call shape: `ensure` with the workspace's
+        // own branch. Must not error, and must not move the ref.
+        store_handle.ensure(&repo, "vk/work").await.unwrap();
+
+        assert_eq!(
+            cli()
+                .resolve_commit(&store, "refs/heads/vk/work")
+                .unwrap()
+                .unwrap(),
+            checked_out_tip,
+            "a branch checked out by a live worktree must never be moved, \
+             even when origin has advanced past it"
+        );
+        assert!(
+            !worktree.join("merged-on-github.txt").exists(),
+            "the live worktree's files must be untouched"
+        );
+    }
+
+    /// `heal_cluster_worktree` calls `ensure_for_heal` *before* `adopt`
+    /// re-links the workspace's (still coordinator-local) worktree — at that
+    /// point the branch can already resolve in the store (mirrored in by an
+    /// earlier wildcard fetch) without any worktree in the store holding it
+    /// checked out yet, so the `branch_is_checked_out` guard alone would not
+    /// have caught this. `ensure_for_heal` must still never freshen it: the
+    /// not-yet-adopted worktree's on-disk files are pinned to the commit they
+    /// were created from, and `adopt`'s `git reset -q` would rebuild the
+    /// index against whatever the branch points to now.
+    #[tokio::test]
+    async fn ensure_for_heal_never_checks_freshness() {
+        let fixture = TempDir::new().unwrap();
+        let shared_root = fixture.path().join("shared");
+        let checkout = fixture.path().join("srv-src").join("repo");
+        let forge = fixture.path().join("forge").join("repo");
+        fs::create_dir_all(&shared_root).unwrap();
+        fs::create_dir_all(checkout.parent().unwrap()).unwrap();
+        fs::create_dir_all(forge.parent().unwrap()).unwrap();
+
+        seed_repo(&checkout);
+        cli()
+            .git(
+                fixture.path(),
+                ["clone", checkout.to_str().unwrap(), forge.to_str().unwrap()],
+            )
+            .unwrap();
+        cli()
+            .set_config(&forge, "user.email", "test@vibekanban.invalid")
+            .unwrap();
+        cli()
+            .set_config(&forge, "user.name", "Vibe Kanban Test")
+            .unwrap();
+        cli()
+            .set_remote_url(&checkout, "origin", &forge.to_string_lossy())
+            .unwrap();
+
+        let repo = repo_record("repo", &checkout);
+        let store_handle = store_with_locks(&shared_root).await;
+        let store = store_handle.ensure(&repo, "main").await.unwrap();
+
+        // The workspace branch exists in the store (e.g. mirrored in by an
+        // earlier wildcard fetch) but nothing there has it checked out yet —
+        // the worktree is still the pre-adoption, coordinator-local one.
+        git::GitService::new()
+            .create_branch(&store, "vk/work", "main")
+            .unwrap();
+        let pinned_tip = cli()
+            .resolve_commit(&store, "refs/heads/vk/work")
+            .unwrap()
+            .unwrap();
+
+        // Pushed upstream and advanced further, as if a PR had been opened
+        // and merged — exactly the shape `ensure` would fast-forward.
+        cli()
+            .push(&store, &forge.to_string_lossy(), "vk/work", false)
+            .unwrap();
+        let scratch = fixture.path().join("scratch");
+        cli()
+            .git(
+                fixture.path(),
+                ["clone", forge.to_str().unwrap(), scratch.to_str().unwrap()],
+            )
+            .unwrap();
+        cli()
+            .set_config(&scratch, "user.email", "test@vibekanban.invalid")
+            .unwrap();
+        cli()
+            .set_config(&scratch, "user.name", "Vibe Kanban Test")
+            .unwrap();
+        cli().git(&scratch, ["checkout", "vk/work"]).unwrap();
+        fs::write(scratch.join("merged-on-github.txt"), "ahead on the forge\n").unwrap();
+        cli().add_all(&scratch).unwrap();
+        cli()
+            .commit(&scratch, "advance vk/work on the forge")
+            .unwrap();
+        cli()
+            .push(&scratch, &forge.to_string_lossy(), "vk/work", false)
+            .unwrap();
+
+        store_handle
+            .ensure_for_heal(&repo, "vk/work")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            cli()
+                .resolve_commit(&store, "refs/heads/vk/work")
+                .unwrap()
+                .unwrap(),
+            pinned_tip,
+            "ensure_for_heal must never move a workspace branch, even when it is not \
+             yet checked out by any worktree in the store"
+        );
     }
 
     fn unreachable_locks() -> RepositoryAdminLockManager {

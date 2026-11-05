@@ -887,6 +887,31 @@ impl GitCli {
         out
     }
 
+    /// Whether `ancestor` is reachable from `descendant` — i.e. moving a ref at
+    /// `ancestor` to `descendant` would be a fast-forward, discarding nothing.
+    ///
+    /// `merge-base --is-ancestor` exits 1 for "no" and 0 for "yes"; this crate's
+    /// `git` wrapper reports a non-zero exit as `CommandFailed` regardless of
+    /// which, so (as with [`Self::commit_exists`]) that case reads as `false`
+    /// rather than an error. Callers must pass revisions already known to
+    /// resolve in `repo_path` — this cannot distinguish "not an ancestor" from
+    /// "no such revision".
+    pub fn is_ancestor(
+        &self,
+        repo_path: &Path,
+        ancestor: &str,
+        descendant: &str,
+    ) -> Result<bool, GitCliError> {
+        match self.git(
+            repo_path,
+            ["merge-base", "--is-ancestor", ancestor, descendant],
+        ) {
+            Ok(_) => Ok(true),
+            Err(GitCliError::CommandFailed(_)) => Ok(false),
+            Err(err) => Err(err),
+        }
+    }
+
     /// Return the merge base commit sha of two refs in the given worktree.
     /// If `git merge-base --fork-point` fails, falls back to regular `merge-base`.
     pub fn merge_base(
