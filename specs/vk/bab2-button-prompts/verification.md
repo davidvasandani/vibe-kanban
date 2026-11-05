@@ -6,5 +6,6 @@
 - SessionChatBox rendered tests: 21 passed. The first full remote suite passed its other 13 files (80 tests); all five failures were the unsupported matcher, corrected in the focused rerun.
 - Independent codex review --uncommitted: no actionable defects.
 - Repository-wide lint reached Rust checks, where vendored OpenSSL failed to compile because openssl/opensslconf.h was missing. No Rust files changed.
-- Backend check also attempted separately; result recorded below when complete.
+- pnpm run backend:check: passed for both the root Rust workspace and crates/remote.
+- GitHub frontend-checks passed on implementation commit bdb7cc90 (PR #393).
 - No live browser or deployed-service test performed.
