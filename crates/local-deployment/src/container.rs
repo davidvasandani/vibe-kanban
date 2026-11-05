@@ -1868,8 +1868,11 @@ impl LocalContainerService {
         // The store must hold the workspace's branch before anything is
         // re-pointed at it, or adoption would refuse — correctly, but for a
         // reason we can fix here by fetching from the checkout that still has
-        // it.
-        if let Err(e) = store.ensure(&input.repo, branch).await {
+        // it. `ensure_for_heal`, not `ensure`: this worktree has not been
+        // adopted yet, so its on-disk files are still whatever commit it was
+        // created from — the branch must be materialised exactly as it is,
+        // never freshened against origin ahead of `adopt` re-linking onto it.
+        if let Err(e) = store.ensure_for_heal(&input.repo, branch).await {
             tracing::warn!(
                 repo = %input.repo.name,
                 "could not prepare the shared store while healing {}: {e}",

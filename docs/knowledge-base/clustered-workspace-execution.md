@@ -374,6 +374,64 @@ repair reports success. Whenever a predicate is widened, re-check every caller
 that pairs it with a write: the guard and the mutation must agree on what
 "present" means.
 
+## A local head is not evidence of freshness either, once it is also a workspace's own branch (VAS-982)
+
+The cheap-path guard above correctly excludes a remote-tracking ref from "the
+store already has it," but for a long time said nothing about a **local**
+head's own staleness — a repository with a configured `default_target_branch`
+of a bare name (`main`, not `origin/main`), or a user picking the local entry
+from the branch picker, produces exactly that shape. Once such a branch
+resolves once, `ensure`'s cheap path took no action beyond a best-effort push
+*back* to the registered checkout — it never pulled from anywhere — so the
+store's local copy was frozen at whatever commit the *first* workspace's
+provisioning captured, for the store's entire lifetime. This shipped a
+workspace 1,680 commits behind its requested base against sg-monorepo.
+
+The fix (`SharedRepositoryStore::fast_forward_local_head`) fetches the single
+branch from the store's own `origin` remote (already pointed at the real
+forge by `configure`, not mirrored from the checkout — the checkout's own
+local heads are just as capable of being stale) into
+`refs/remotes/origin/<branch>`, never touching `refs/heads/<branch>` directly
+until the relationship between the two is known, then fast-forwards when
+behind or refuses workspace creation when diverged.
+
+Two things made this harder than the remote-tracking fix, both reached only
+by reading every caller of `ensure`, not just the one adding the new base-
+branch case:
+
+- **`ensure` is also called with a workspace's own branch, not a base
+  branch.** `heal_cluster_worktree` calls it with `workspace.branch` to
+  materialise a `vk/…` branch — which can be checked out live, and is
+  expected to legitimately run ahead of whatever was last pushed — ahead of
+  `adopt` re-linking a pre-store worktree onto it. Freshening or
+  divergence-refusing *that* branch risks moving its ref out from under
+  on-disk files still pinned to an older commit, which `adopt`'s `git reset
+  -q` would then rebuild the index against, reading as the same "every file
+  looks modified or deleted" symptom the section above describes for a
+  different reason. The fix is a second entry point,
+  `ensure_for_heal`, that never checks freshness — not a guard inferred from
+  branch-name shape, since nothing distinguishes a base branch from a
+  workspace branch by name alone, and not solely a "is it checked out"
+  check, since a workspace's branch can already resolve in the store from an
+  earlier wildcard mirror *before* its (still coordinator-local) worktree is
+  adopted, i.e. before the store's own `git worktree list` would show it
+  checked out at all. Both the explicit split and the checked-out guard are
+  kept, as two independent layers.
+- **A freshness check that fetches, then compares, then writes has a race
+  window, and the two ends of that window must be classified identically.**
+  The cheap path takes no lock. A `local` branch relative to a freshly
+  fetched `remote` tip is one of four things — equal, a strict ancestor
+  (behind), a strict descendant (ahead — a concurrent caller already
+  advanced it further than what *this* call fetched), or neither
+  (diverged) — and only the narrowest of those four readings
+  (`is_ancestor(local, remote)`) was checked at first, which cannot tell
+  "ahead" apart from "diverged": a local branch already fresher than this
+  call's own fetch would misreport as diverged and fail workspace creation
+  that should have succeeded. Both the initial check and a compare-and-swap
+  `update-ref`'s retry-after-contention path must run the same four-way
+  classification, because the retry path observes a *different* "current"
+  value and is exactly as exposed to the same ambiguity as the first check.
+
 ## A recovery fetch that cannot succeed is worse than none
 
 Sending `+refs/heads/origin/main:refs/heads/origin/main` to a forge is a
