@@ -1630,6 +1630,89 @@ fn list_remotes_reports_configured_urls_not_rewritten_ones() {
 }
 
 #[test]
+fn fetch_remote_branch_lands_a_local_branch_check_branch_exists_finds() {
+    // A branch pushed to the remote by someone else, never fetched into this
+    // checkout, must become usable under its own bare name after
+    // `fetch_remote_branch` — the exact scenario `add_repository` hits when a
+    // workspace targets a branch that only exists on the remote.
+    let temp_dir = TempDir::new().unwrap();
+    let remote_path = temp_dir.path().join("remote.git");
+    Repository::init_bare(&remote_path).expect("init bare remote");
+    let remote_url = remote_path.to_str().expect("remote path str");
+
+    let seed_path = temp_dir.path().join("seed");
+    let service = GitService::new();
+    service
+        .initialize_repo_with_main_branch(&seed_path)
+        .expect("init seed repo");
+    let seed_repo = Repository::open(&seed_path).expect("open seed repo");
+    configure_user(&seed_repo);
+    seed_repo.remote("origin", remote_url).expect("add remote");
+    push_ref(&seed_repo, "refs/heads/main", "refs/heads/main");
+    Repository::open_bare(&remote_path)
+        .expect("open bare remote")
+        .set_head("refs/heads/main")
+        .expect("set remote HEAD");
+
+    // This checkout only ever sees `main`.
+    let local_path = temp_dir.path().join("local");
+    Repository::clone(remote_url, &local_path).expect("clone local");
+
+    // Someone else creates and pushes a branch the local checkout never
+    // fetches.
+    let other_path = temp_dir.path().join("other");
+    let other_repo = Repository::clone(remote_url, &other_path).expect("clone other");
+    configure_user(&other_repo);
+    checkout_branch(&other_repo, "main");
+    create_branch_from_head(&other_repo, "feature/remote-only");
+    checkout_branch(&other_repo, "feature/remote-only");
+    write_file(&other_path, "feature.txt", "only on the remote\n");
+    commit_all(&other_repo, "remote-only commit");
+    push_ref(
+        &other_repo,
+        "refs/heads/feature/remote-only",
+        "refs/heads/feature/remote-only",
+    );
+
+    assert!(
+        !service
+            .check_branch_exists(&local_path, "feature/remote-only")
+            .unwrap(),
+        "branch must not be visible locally before fetching"
+    );
+
+    let remote = service.get_default_remote(&local_path).unwrap();
+    assert!(
+        service
+            .check_remote_branch_exists(
+                &local_path,
+                &remote.url,
+                "feature/remote-only",
+                &GitHubCredentials::default(),
+            )
+            .unwrap(),
+        "branch must be visible on the remote"
+    );
+
+    service
+        .fetch_remote_branch(
+            &local_path,
+            &remote.url,
+            "feature/remote-only",
+            &GitHubCredentials::default(),
+        )
+        .expect("fetch_remote_branch should succeed");
+
+    assert!(
+        service
+            .check_branch_exists(&local_path, "feature/remote-only")
+            .unwrap(),
+        "branch must resolve under its bare name immediately after fetch_remote_branch, \
+         the same name callers re-check and the same name `git worktree add` resolves"
+    );
+}
+
+#[test]
 fn list_remotes_expands_aliases_that_name_no_repository() {
     let temp_dir = TempDir::new().unwrap();
     let repo_path = temp_dir.path().join("repo");

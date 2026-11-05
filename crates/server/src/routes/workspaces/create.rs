@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use axum::{Json, extract::State, response::Json as ResponseJson};
 use chrono::Utc;
 use db::models::{
+    repo::Repo,
     requests::{
         CreateAndStartWorkspaceRequest, CreateAndStartWorkspaceResponse, CreateWorkspaceApiRequest,
         LinkedIssueInfo, WorkspaceRepoInput,
@@ -13,7 +14,7 @@ use db::models::{
 };
 use deployment::Deployment;
 use executors::profile::ExecutorConfig;
-use services::services::container::ContainerService;
+use services::services::{container::ContainerService, github_credentials};
 use utils::response::ApiResponse;
 use uuid::Uuid;
 
@@ -330,8 +331,17 @@ async fn run_create_and_start_workspace(
         .await?;
 
     for repo in &repos {
+        let repo_row = Repo::find_by_id(&deployment.db().pool, repo.repo_id)
+            .await?
+            .ok_or(db::models::repo::RepoError::NotFound)?;
+        let credentials = github_credentials::resolve_for_repo(
+            &deployment.db().pool,
+            deployment.git(),
+            &repo_row.path,
+        )
+        .await;
         managed_workspace
-            .add_repository(repo, deployment.git())
+            .add_repository(repo, deployment.git(), &credentials)
             .await
             .map_err(ApiError::from)?;
     }
@@ -611,12 +621,11 @@ pub async fn create_and_start_workspace(
                     workspace_id,
                     error
                 );
-                let _ = fail_creation_with_retry(
-                    &background_deployment,
-                    workspace_id,
-                    "Workspace creation could not start. Create a new workspace to try again.",
-                )
-                .await;
+                let message = format!(
+                    "Workspace creation could not start: {error}. Create a new workspace to try again."
+                );
+                let _ =
+                    fail_creation_with_retry(&background_deployment, workspace_id, &message).await;
                 return;
             }
         }
@@ -657,9 +666,9 @@ pub async fn create_and_start_workspace(
             }
             Err(error) => {
                 tracing::error!("Workspace creation {} failed: {}", workspace_id, error);
-                let message = "Workspace creation failed. Create a new workspace to try again.";
+                let message = error.to_string();
                 if let Err(status_error) =
-                    fail_creation_with_retry(&background_deployment, workspace_id, message).await
+                    fail_creation_with_retry(&background_deployment, workspace_id, &message).await
                 {
                     tracing::error!(
                         "Failed to record workspace creation {} failure: {}",

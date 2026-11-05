@@ -11,7 +11,7 @@ use db::{
         workspace_repo::{CreateWorkspaceRepo, RepoWithTargetBranch, WorkspaceRepo},
     },
 };
-use git::{GitService, GitServiceError};
+use git::{GitHubCredentials, GitService, GitServiceError};
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -245,16 +245,37 @@ impl ManagedWorkspace {
         &mut self,
         repo_ref: &WorkspaceRepoInput,
         git: &GitService,
+        credentials: &GitHubCredentials,
     ) -> Result<(), WorkspaceError> {
         let repo = Repo::find_by_id(&self.db.pool, repo_ref.repo_id)
             .await?
             .ok_or(RepoError::NotFound)?;
 
         if !git.check_branch_exists(&repo.path, &repo_ref.target_branch)? {
-            return Err(WorkspaceError::BranchNotFound {
-                repo_name: repo.name,
-                branch: repo_ref.target_branch.clone(),
-            });
+            // The branch may exist on the remote without ever having been
+            // fetched into this checkout (e.g. a PR branch nobody has started
+            // a workspace from yet). Try a targeted fetch before giving up.
+            let remote = git.get_default_remote(&repo.path)?;
+            if git.check_remote_branch_exists(
+                &repo.path,
+                &remote.url,
+                &repo_ref.target_branch,
+                credentials,
+            )? {
+                git.fetch_remote_branch(
+                    &repo.path,
+                    &remote.url,
+                    &repo_ref.target_branch,
+                    credentials,
+                )?;
+            }
+
+            if !git.check_branch_exists(&repo.path, &repo_ref.target_branch)? {
+                return Err(WorkspaceError::BranchNotFound {
+                    repo_name: repo.name,
+                    branch: repo_ref.target_branch.clone(),
+                });
+            }
         }
 
         if WorkspaceRepo::find_by_workspace_and_repo_id(

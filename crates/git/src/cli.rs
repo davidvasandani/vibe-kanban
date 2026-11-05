@@ -1165,6 +1165,12 @@ impl GitCli {
         let git = resolve_executable_path_blocking("git").ok_or(GitCliError::NotAvailable)?;
         let mut cmd = Command::new(&git);
         cmd.arg("-C").arg(repo_path);
+        // A repository's own hooks (e.g. a tool's postinstall writing lefthook
+        // shims into the shared checkout's common git dir) must never be able
+        // to break vk's own git plumbing. Every command run through here is vk
+        // administering a worktree on the user's behalf, not an interactive
+        // user session, so hooks never need to run.
+        cmd.arg("-c").arg("core.hooksPath=/dev/null");
 
         if let Some(envs) = envs {
             for (k, v) in envs {
