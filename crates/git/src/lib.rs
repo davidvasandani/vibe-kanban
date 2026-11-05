@@ -1508,6 +1508,31 @@ impl GitService {
             .map_err(GitServiceError::from)
     }
 
+    /// Fetch a single branch from `remote_url`, creating (or updating) the
+    /// local remote-tracking ref `refs/remotes/<remote_name>/<branch_name>`.
+    ///
+    /// Unlike `fetch_branch_from_remote`, this does not require the branch to
+    /// already have a local `Reference` — it is for a branch that exists on
+    /// the remote but has never been fetched into this checkout at all.
+    pub fn fetch_remote_branch(
+        &self,
+        repo_path: &Path,
+        remote_url: &str,
+        remote_name: &str,
+        branch_name: &str,
+        credentials: &GitHubCredentials,
+    ) -> Result<(), GitServiceError> {
+        let git_cli = GitCli::new();
+        let refspec = format!("+refs/heads/{branch_name}:refs/remotes/{remote_name}/{branch_name}");
+        if let Err(e) =
+            git_cli.fetch_with_refspec_with(repo_path, remote_url, &refspec, credentials)
+        {
+            tracing::error!("Fetch branch '{}' from remote failed: {}", branch_name, e);
+            return Err(e.into());
+        }
+        Ok(())
+    }
+
     pub fn resolve_remote_for_branch(
         &self,
         repo_path: &Path,

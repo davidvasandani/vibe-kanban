@@ -611,12 +611,11 @@ pub async fn create_and_start_workspace(
                     workspace_id,
                     error
                 );
-                let _ = fail_creation_with_retry(
-                    &background_deployment,
-                    workspace_id,
-                    "Workspace creation could not start. Create a new workspace to try again.",
-                )
-                .await;
+                let message = format!(
+                    "Workspace creation could not start: {error}. Create a new workspace to try again."
+                );
+                let _ =
+                    fail_creation_with_retry(&background_deployment, workspace_id, &message).await;
                 return;
             }
         }
@@ -657,9 +656,9 @@ pub async fn create_and_start_workspace(
             }
             Err(error) => {
                 tracing::error!("Workspace creation {} failed: {}", workspace_id, error);
-                let message = "Workspace creation failed. Create a new workspace to try again.";
+                let message = error.to_string();
                 if let Err(status_error) =
-                    fail_creation_with_retry(&background_deployment, workspace_id, message).await
+                    fail_creation_with_retry(&background_deployment, workspace_id, &message).await
                 {
                     tracing::error!(
                         "Failed to record workspace creation {} failure: {}",

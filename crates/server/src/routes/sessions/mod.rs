@@ -15,7 +15,7 @@ use db::models::{
     requests::UpdateSession,
     scratch::{Scratch, ScratchType},
     session::{CreateSession, Session, SessionError},
-    workspace::{Workspace, WorkspaceError},
+    workspace::{Workspace, WorkspaceCreationStatus, WorkspaceError},
     workspace_repo::WorkspaceRepo,
 };
 use deployment::Deployment;
@@ -104,11 +104,31 @@ pub async fn create_session(
     let pool = &deployment.db().pool;
 
     // Verify workspace exists
-    let _workspace = Workspace::find_by_id(pool, payload.workspace_id)
+    let workspace = Workspace::find_by_id(pool, payload.workspace_id)
         .await?
         .ok_or(ApiError::Workspace(WorkspaceError::ValidationError(
             "Workspace not found".to_string(),
         )))?;
+
+    // A workspace whose worktree/first session never finished materializing
+    // must not silently accept another session: that session would reference
+    // a container that doesn't exist, failing confusingly much later.
+    match workspace.creation_status {
+        WorkspaceCreationStatus::Ready => {}
+        WorkspaceCreationStatus::Failed => {
+            let detail = workspace
+                .creation_error
+                .unwrap_or_else(|| "no error was recorded".to_string());
+            return Err(ApiError::Workspace(WorkspaceError::ValidationError(
+                format!("Workspace creation failed: {detail}"),
+            )));
+        }
+        WorkspaceCreationStatus::Queued | WorkspaceCreationStatus::Running => {
+            return Err(ApiError::Workspace(WorkspaceError::ValidationError(
+                "Workspace is still being created; retry shortly".to_string(),
+            )));
+        }
+    }
 
     let session = Session::create(
         pool,
