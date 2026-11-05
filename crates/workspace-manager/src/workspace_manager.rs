@@ -245,6 +245,7 @@ impl ManagedWorkspace {
         &mut self,
         repo_ref: &WorkspaceRepoInput,
         git: &GitService,
+        credentials: &GitHubCredentials,
     ) -> Result<(), WorkspaceError> {
         let repo = Repo::find_by_id(&self.db.pool, repo_ref.repo_id)
             .await?
@@ -254,23 +255,18 @@ impl ManagedWorkspace {
             // The branch may exist on the remote without ever having been
             // fetched into this checkout (e.g. a PR branch nobody has started
             // a workspace from yet). Try a targeted fetch before giving up.
-            // The server's existing fallback credentials are sufficient here:
-            // this repo is already registered and fetchable, so whatever
-            // authenticates its normal operations authenticates this fetch.
-            let credentials = GitHubCredentials::default();
             let remote = git.get_default_remote(&repo.path)?;
             if git.check_remote_branch_exists(
                 &repo.path,
                 &remote.url,
                 &repo_ref.target_branch,
-                &credentials,
+                credentials,
             )? {
                 git.fetch_remote_branch(
                     &repo.path,
                     &remote.url,
-                    &remote.name,
                     &repo_ref.target_branch,
-                    &credentials,
+                    credentials,
                 )?;
             }
 

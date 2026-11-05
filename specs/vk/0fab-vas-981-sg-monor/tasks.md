@@ -42,8 +42,26 @@
       T001-T005) — all passing (git: 56, workspace-manager: 31, server
       workspaces/sessions: 57); plus `cargo check --workspace` as a final
       full-workspace sanity pass
-- [ ] T010 Independent review via the `codex-review` skill (depends on
-      T006-T009); address confirmed findings and re-verify
+- [x] T010 Independent review via `codex exec review --base origin/main`
+      (depends on T006-T009). Found two real bugs in the fetch-on-miss fix:
+      - **[P1]** the fetch landed a remote-tracking ref
+        (`refs/remotes/origin/<branch>`) but the re-check (and
+        `git worktree add`) resolves the bare branch name against
+        `refs/heads/`, so creation still failed even after a successful
+        fetch. Fixed: `fetch_remote_branch` now fetches directly into
+        `refs/heads/<branch>` (a real local branch), landing exactly where
+        callers re-check.
+      - **[P2]** the new fetch used `GitHubCredentials::default()`
+        unconditionally, bypassing a repo's configured GitHub org token.
+        Fixed: `add_repository` now takes `credentials: &GitHubCredentials`
+        as a parameter; both call sites (`create.rs`, `repos.rs`) resolve it
+        via the existing `github_credentials::resolve_for_repo`, matching
+        the pattern already used in `pr.rs`.
+      Added a regression test
+      (`crates/git/tests/git_ops_safety.rs::fetch_remote_branch_lands_a_local_branch_check_branch_exists_finds`)
+      that fails against the pre-fix refspec and passes after — closing the
+      Principle II test-coverage gap from `/speckit.analyze` for this path.
+      Re-ran T006-T009 after both fixes: clean.
 
 <!--
 T001/T002 are independent files within the same crate (parallel-safe).

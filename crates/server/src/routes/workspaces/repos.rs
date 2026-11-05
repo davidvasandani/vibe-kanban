@@ -1,12 +1,13 @@
 use axum::{Extension, Json, Router, extract::State, response::Json as ResponseJson, routing::get};
 use db::models::{
+    repo::{Repo, RepoError},
     requests::WorkspaceRepoInput,
     workspace::{Workspace, WorkspaceError},
     workspace_repo::{RepoWithTargetBranch, WorkspaceRepo},
 };
 use deployment::Deployment;
 use serde::{Deserialize, Serialize};
-use services::services::container::ContainerService;
+use services::services::{container::ContainerService, github_credentials};
 use ts_rs::TS;
 use utils::response::ApiResponse;
 use uuid::Uuid;
@@ -55,8 +56,18 @@ pub async fn add_workspace_repo(
         target_branch: payload.target_branch,
     };
 
+    let repo_row = Repo::find_by_id(&deployment.db().pool, repo_input.repo_id)
+        .await?
+        .ok_or(RepoError::NotFound)?;
+    let credentials = github_credentials::resolve_for_repo(
+        &deployment.db().pool,
+        deployment.git(),
+        &repo_row.path,
+    )
+    .await;
+
     managed_workspace
-        .add_repository(&repo_input, deployment.git())
+        .add_repository(&repo_input, deployment.git(), &credentials)
         .await
         .map_err(ApiError::from)?;
 
