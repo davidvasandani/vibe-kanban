@@ -402,3 +402,5 @@ contributed to it.
 - **Overdue wakeups / standalone startup** (`vk/d5c5-scheduled-wakeup`): [Durable session wake-ups](durable-session-wakeups.md#standalone-startup-must-use-the-shared-initializer) — production must use shared initialization; zero-attempt pending records can indicate absent dispatcher wiring.
 
 - [readme-product-guide.md](readme-product-guide.md) — Product documentation evidence boundaries: source builds versus collaboration services, matching MCP binaries, Compose data lifetime, optional capabilities and deployment ownership (`vk/f960-update-readme`).
+
+- [session-composer-prompts.md](session-composer-prompts.md) — Empty-composer Continue, What’s left and Status actions; explicit prompt submission, draft guards, readable linked issue identity and responsive footer (`vk/bab2-button-prompts`).
