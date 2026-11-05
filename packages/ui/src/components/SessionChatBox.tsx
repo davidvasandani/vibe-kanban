@@ -87,7 +87,7 @@ export type ExecutionStatus =
   | 'edit';
 
 interface ActionsProps {
-  onSend: () => void;
+  onSend: (message?: string) => void;
   onQueue: () => void;
   onCancelQueue: () => void;
   onStop: () => void;
@@ -199,6 +199,7 @@ export interface SessionChatBoxEditorRenderProps<
 
 interface SessionChatBoxProps<TExecutor extends string = string> {
   status: ExecutionStatus;
+  issueSimpleId?: string;
   editor: EditorProps;
   /**
    * Whether a persisted draft is still loading into the editor. While true the
@@ -275,6 +276,7 @@ function defaultFormatSessionDate(createdAt: string | Date) {
  */
 export function SessionChatBox<TExecutor extends string = string>({
   status,
+  issueSimpleId,
   editor,
   isDraftLoading = false,
   renderEditor,
@@ -346,13 +348,7 @@ export function SessionChatBox<TExecutor extends string = string>({
     editor.value.trim().length > 0 || (reviewComments?.count ?? 0) > 0;
   const canSend =
     hasContent && !['sending', 'stopping', 'queue-loading'].includes(status);
-  // With an empty editor in an existing session, the Send button submits the
-  // default continue prompt advertised by the placeholder. Button only:
-  // keyboard shortcuts still require typed content to avoid accidental sends.
-  // Requires a selected session so the placeholder-mode chat box (no session
-  // yet, no-op actions) keeps its disabled Send button, and a fully-loaded
-  // draft so the button never appears enabled while it would no-op (the
-  // resolver refuses to substitute the prompt until the draft has loaded).
+  // Prompt buttons require a restored draft and an existing session.
   const canSendContinue =
     !hasContent &&
     status === 'idle' &&
@@ -585,10 +581,41 @@ export function SessionChatBox<TExecutor extends string = string>({
 
     switch (status) {
       case 'idle':
+        if (
+          !hasContent &&
+          !session.isNewSessionMode &&
+          session.selectedSessionId
+        ) {
+          return (
+            <div className="flex flex-wrap justify-end gap-half">
+              <PrimaryButton
+                onClick={() => actions.onSend(DEFAULT_CONTINUE_PROMPT)}
+                disabled={!canSendContinue}
+                value="Continue"
+                className="px-half"
+              />
+              <PrimaryButton
+                onClick={() => {
+                  if (issueSimpleId)
+                    actions.onSend(`What’s left on ${issueSimpleId}`);
+                }}
+                disabled={!canSendContinue || !issueSimpleId}
+                value="What’s left"
+                className="px-half"
+              />
+              <PrimaryButton
+                onClick={() => actions.onSend('Status')}
+                disabled={!canSendContinue}
+                value="Status"
+                className="px-half"
+              />
+            </div>
+          );
+        }
         return (
           <PrimaryButton
-            onClick={actions.onSend}
-            disabled={!canSend && !canSendContinue}
+            onClick={() => actions.onSend()}
+            disabled={!canSend}
             value={t('conversation.actions.send')}
           />
         );

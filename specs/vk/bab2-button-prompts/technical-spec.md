@@ -1,0 +1,4 @@
+# Button prompts
+Replace the task conversation composer send action when its text is empty with three ordered actions: Continue, What’s left, Status. Submit exactly `Continue working on this task`, `What’s left on ${vkissueid}` (using the linked issue identifier), and `Status` respectively through the existing submission lifecycle. Nonempty text retains the normal send behavior. Preserve attachments, submission guards, queue/running semantics and error handling. If no issue is linked, disable the issue-specific action rather than inventing an ID. Whitespace counts as empty. Scope is Vibe Kanban frontend only.
+
+Validate exact payloads, empty/nonempty transitions, missing issue, running/submitting guards and responsive layout. Review independently before committing knowledge and opening/merging a PR.

@@ -13,6 +13,7 @@ import { AgentIcon } from '@/shared/components/AgentIcon';
 import { useHostId } from '@/shared/providers/HostIdProvider';
 import { workspaceSessionKeys } from '@/shared/hooks/workspaceSessionKeys';
 import { useWorkspaceExecution } from '@/shared/hooks/useWorkspaceExecution';
+import { useWorkspaceIssueComments } from '@/shared/hooks/useWorkspaceIssueComments';
 import { useWorkspaceRepo } from '@/shared/hooks/useWorkspaceRepo';
 import { useUserSystem } from '@/shared/hooks/useUserSystem';
 import { useIsRealMobile } from '@/shared/hooks/useIsMobile';
@@ -216,6 +217,8 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
     mode === 'existing-session' ? props.onStartNewSession : undefined;
 
   const sessionId = session?.id;
+  const { data: workspaceIssueComments } =
+    useWorkspaceIssueComments(workspaceId);
   const mcpRefresh = useMcpRefresh(workspaceId, sessionId);
   const refreshMcpStatus = mcpRefresh.refreshStatus;
   const queryClient = useQueryClient();
@@ -772,44 +775,52 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
   const { start: startRecovery, dismiss: dismissRecovery } = serverRecovery;
   startRecoveryRef.current = startRecovery;
 
-  const handleSend = useCallback(async () => {
-    // Sending with an empty editor in an existing session submits the
-    // default continue prompt advertised by the placeholder.
-    const message = resolveSessionSendMessage({
-      message: localMessage,
-      hasReviewComments: Boolean(reviewMarkdown),
-      isNewSessionMode,
-      isDraftLoaded: hasInitialValue && !isScratchLoading,
-    });
-    const { prompt, isSlashCommand } = buildAgentPrompt(message, [
+  const handleSend = useCallback(
+    async (explicitPrompt?: string) => {
+      if (
+        explicitPrompt !== undefined &&
+        (!hasInitialValue || isScratchLoading)
+      )
+        return;
+      // Sending with an empty editor in an existing session submits the
+      // default continue prompt advertised by the placeholder.
+      const message = resolveSessionSendMessage({
+        message: explicitPrompt ?? localMessage,
+        hasReviewComments: Boolean(reviewMarkdown),
+        isNewSessionMode,
+        isDraftLoaded: hasInitialValue && !isScratchLoading,
+      });
+      const { prompt, isSlashCommand } = buildAgentPrompt(message, [
+        reviewMarkdown,
+      ]);
+
+      onScrollToBottom('auto');
+
+      // A new send supersedes any recovery still waiting on an older one.
+      dismissRecovery();
+      const cleanup = {
+        clearsComposer: true,
+        isSlashCommand,
+        composerText: localMessage,
+      };
+      sendCleanupRef.current = cleanup;
+      const success = await send(prompt);
+      if (success) {
+        await completeSuccessfulSend(cleanup);
+      }
+    },
+    [
+      onScrollToBottom,
+      send,
+      localMessage,
       reviewMarkdown,
-    ]);
-
-    onScrollToBottom('auto');
-
-    // A new send supersedes any recovery still waiting on an older one.
-    dismissRecovery();
-    const cleanup = {
-      clearsComposer: true,
-      isSlashCommand,
-      composerText: localMessage,
-    };
-    sendCleanupRef.current = cleanup;
-    const success = await send(prompt);
-    if (success) {
-      await completeSuccessfulSend(cleanup);
-    }
-  }, [
-    onScrollToBottom,
-    send,
-    localMessage,
-    reviewMarkdown,
-    isNewSessionMode,
-    hasInitialValue,
-    isScratchLoading,
-    completeSuccessfulSend,
-    dismissRecovery,
-  ]);
+      isNewSessionMode,
+      hasInitialValue,
+      isScratchLoading,
+      completeSuccessfulSend,
+      dismissRecovery,
+    ]
+  );
 
   // Interrupted-run resume affordance: the latest coding-agent process in
   // this session was stopped by a server restart and can be resumed.
@@ -1461,6 +1472,7 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
   return (
     <SessionChatBox<BaseCodingAgent>
       status={status}
+      issueSimpleId={workspaceIssueComments?.issue?.simple_id}
       onViewCode={disableViewCode ? undefined : handleViewCode}
       onOpenWorkspace={
         showOpenWorkspaceButton && workspaceId ? handleOpenWorkspace : undefined

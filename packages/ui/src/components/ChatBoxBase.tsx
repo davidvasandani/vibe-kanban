@@ -174,7 +174,7 @@ export function ChatBoxBase({
         <div
           data-testid="chat-box-footer"
           className={cn(
-            'flex items-end justify-between gap-base',
+            'flex flex-wrap items-end justify-between gap-base',
             fillHeight && 'shrink-0'
           )}
         >
@@ -182,7 +182,9 @@ export function ChatBoxBase({
             {modelSelector}
             {footerLeft}
           </Toolbar>
-          <div className="flex shrink-0 gap-base">{footerRight}</div>
+          <div className="ml-auto flex max-w-full flex-wrap gap-base">
+            {footerRight}
+          </div>
         </div>
       </div>
     </div>
