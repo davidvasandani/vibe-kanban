@@ -32,7 +32,6 @@ use api_types::{
     CreateIssueCommentRequest, IssueComment, ListIssueWorkspacesResponse,
     Workspace as RemoteWorkspace,
 };
-use axum::{Extension, Json, extract::State};
 use chrono::{DateTime, Utc};
 use db::models::{
     execution_process::{ExecutionProcess, ExecutionProcessRunReason, ExecutionProcessStatus},
@@ -59,7 +58,7 @@ use services::services::{
     remote_client::RemoteClientError,
 };
 use sqlx::SqlitePool;
-use tokio::sync::{Mutex, broadcast::error::RecvError};
+use tokio::sync::broadcast::error::RecvError;
 use ts_rs::TS;
 use uuid::Uuid;
 
@@ -442,22 +441,23 @@ impl DeliveryBackend for DeploymentBackend {
             let executor_config = latest_executor_config(pool, &session).await?;
             // The same path as a typed follow-up and MCP `run_session_prompt`:
             // executor checks, container, cleanup action and activation.
-            let response = crate::routes::sessions::follow_up(
-                Extension(session),
-                State(self.deployment.clone()),
-                Json(CreateFollowUpAttempt {
+            let response = crate::routes::sessions::follow_up_now(
+                session,
+                self.deployment.clone(),
+                CreateFollowUpAttempt {
                     prompt,
                     executor_config,
                     retry_process_id: None,
                     force_when_dirty: None,
                     perform_git_reset: None,
-                }),
+                },
             )
             .await
             .map_err(|error| error.to_string())?;
             response
                 .0
                 .into_data()
+                .and_then(|result| result.into_execution())
                 .map(|process| process.id)
                 .ok_or_else(|| "follow-up returned no execution".to_string())
         })
@@ -475,7 +475,6 @@ enum EarlierAttempt {
 pub struct IssueCommentDispatcher<B: DeliveryBackend> {
     pool: SqlitePool,
     backend: B,
-    session_locks: StdMutex<HashMap<Uuid, Arc<Mutex<()>>>>,
     /// Turns that ended before this instant are boundaries: it starts as
     /// this dispatcher's creation and moves to the end of startup
     /// reconciliation (orphan cleanup marks interrupted turns without
@@ -495,18 +494,8 @@ impl<B: DeliveryBackend> IssueCommentDispatcher<B> {
         Self {
             pool,
             backend,
-            session_locks: StdMutex::new(HashMap::new()),
             reconciled_at: StdMutex::new(Utc::now()),
         }
-    }
-
-    fn session_lock(&self, session_id: Uuid) -> Arc<Mutex<()>> {
-        self.session_locks
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .entry(session_id)
-            .or_default()
-            .clone()
     }
 
     async fn boundary_confirmed(
@@ -989,15 +978,21 @@ impl<B: DeliveryBackend> IssueCommentDispatcher<B> {
 
     /// Deliver what is pending for one session, if it is at a turn boundary.
     async fn dispatch_session(&self, session_id: Uuid) -> Result<(), sqlx::Error> {
+        services::services::container::with_session_admission(
+            session_id,
+            self.dispatch_session_admitted(session_id),
+        )
+        .await
+    }
+
+    async fn dispatch_session_admitted(&self, session_id: Uuid) -> Result<(), sqlx::Error> {
         // Held until the turn has started. This is deliberately different from
         // the usual claim-then-release (constitution XII): the row claim keeps
-        // one row from being delivered twice, but only this per-session lock
+        // one row from being delivered twice, but only shared session admission
         // stops a second batch from seeing "not running" in the gap before the
         // first batch's execution row exists, which would start a competing
         // turn. It is per session, and every awaited remote call has a client
         // timeout, so other sessions are never blocked.
-        let lock = self.session_lock(session_id);
-        let _guard = lock.lock().await;
         let now = Utc::now();
 
         let due: Vec<IssueCommentDelivery> =

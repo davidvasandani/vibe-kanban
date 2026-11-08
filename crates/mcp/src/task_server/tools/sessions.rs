@@ -1,5 +1,5 @@
 use db::models::{
-    execution_process::{ExecutionProcess, ExecutionProcessStatus},
+    execution_process::{ExecutionProcess, ExecutionProcessStatus, FollowUpResult},
     session::Session,
 };
 use rmcp::{
@@ -99,7 +99,8 @@ struct ExecutorConfigPayload {
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 struct RunCodingAgentInSessionResponse {
     session_id: String,
-    execution_id: String,
+    queued: bool,
+    execution_id: Option<String>,
     execution: serde_json::Value,
 }
 
@@ -650,12 +651,20 @@ impl McpServer {
         };
 
         let url = self.url(&format!("/api/sessions/{session_id}/follow-up"));
-        let execution_process: ExecutionProcess =
+        let execution_process: FollowUpResult =
             match self.send_json(self.client.post(&url).json(&payload)).await {
                 Ok(value) => value,
                 Err(error_result) => return Ok(Self::tool_error(error_result)),
             };
 
+        let Some(execution_process) = execution_process.into_execution() else {
+            return Self::success(&RunCodingAgentInSessionResponse {
+                session_id: session_id.to_string(),
+                queued: true,
+                execution_id: None,
+                execution: serde_json::Value::Null,
+            });
+        };
         let execution_id = execution_process.id.to_string();
         let execution = match Self::serialize_execution_process(&execution_process) {
             Ok(value) => value,
@@ -664,7 +673,8 @@ impl McpServer {
 
         Self::success(&RunCodingAgentInSessionResponse {
             session_id: session_id.to_string(),
-            execution_id,
+            queued: false,
+            execution_id: Some(execution_id),
             execution,
         })
     }

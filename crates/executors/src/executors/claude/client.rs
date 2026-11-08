@@ -22,6 +22,9 @@ use crate::{
 
 const EXIT_PLAN_MODE_NAME: &str = "ExitPlanMode";
 const ASK_USER_QUESTION_NAME: &str = "AskUserQuestion";
+pub const DENY_PEER_CALLBACK_ID: &str = "DENY_PEER_CALLBACK_ID";
+pub const PEER_DENY_REASON: &str = "Native ListAgents/SendMessage discovery is node-wide and is disabled for Vibe Kanban. An unexpected agent in this same worktree is an execution collision to report, not a teammate. Do not guess a recipient from cwd-based names. Your stable VK identity is VK_AGENT_NAME (workspace and session UUIDs); use explicitly targeted Vibe Kanban delivery only when authorized.";
+
 pub const AUTO_APPROVE_CALLBACK_ID: &str = "AUTO_APPROVE_CALLBACK_ID";
 pub const STOP_GIT_CHECK_CALLBACK_ID: &str = "STOP_GIT_CHECK_CALLBACK_ID";
 /// PreToolUse callback id used to deny `ScheduleWakeup` calls (VAS-283).
@@ -799,6 +802,12 @@ impl ClaudeAgentClient {
         // occurred in — instead of the auto-approve branch turning it into an
         // "allow" that lets the agent park its turn on a wake-up that never
         // fires.
+        if callback_id == DENY_PEER_CALLBACK_ID {
+            return Ok(serde_json::json!({"hookSpecificOutput": {
+                "hookEventName": "PreToolUse", "permissionDecision": "deny",
+                "permissionDecisionReason": PEER_DENY_REASON
+            }}));
+        }
         if callback_id == DENY_SCHEDULE_WAKEUP_CALLBACK_ID {
             return Ok(schedule_wakeup_deny_response());
         }
@@ -935,6 +944,18 @@ mod tests {
             "tool_name": "Bash",
             "tool_input": tool_input,
         })
+    }
+
+    #[tokio::test]
+    async fn peer_delivery_denied_even_in_bypass_mode() {
+        for client in [auto_approve_client(), approval_client()] {
+            for tool in ["ListAgents", "ListPeers", "SendMessage"] {
+                let response = client.on_hook_callback(DENY_PEER_CALLBACK_ID.into(),
+                    serde_json::json!({"tool_name":tool,"tool_input":{"to":"unrelated-workspace","message":"hello"}}), None).await.unwrap();
+                assert_eq!(permission_decision(&response), Some("deny"));
+                assert!(response.to_string().contains("execution collision"));
+            }
+        }
     }
 
     #[tokio::test]

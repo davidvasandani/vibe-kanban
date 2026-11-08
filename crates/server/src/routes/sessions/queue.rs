@@ -249,16 +249,16 @@ async fn queue_mcp_restart_impl(
                     .container()
                     .reap_warm_process_for_mcp_restart(deferred_session.id)
                     .await;
-                if super::follow_up(
-                    Extension(deferred_session.clone()),
-                    State(deferred_deployment.clone()),
-                    Json(super::CreateFollowUpAttempt {
+                if super::follow_up_now(
+                    deferred_session.clone(),
+                    deferred_deployment.clone(),
+                    super::CreateFollowUpAttempt {
                         prompt: queued.data.message,
                         executor_config: queued.data.executor_config,
                         retry_process_id: None,
                         force_when_dirty: None,
                         perform_git_reset: None,
-                    }),
+                    },
                 )
                 .await
                 .is_err()
@@ -278,16 +278,16 @@ async fn queue_mcp_restart_impl(
             .container()
             .reap_warm_process_for_mcp_restart(session.id)
             .await;
-        let _ = super::follow_up(
-            Extension(session.clone()),
-            State(deployment.clone()),
-            Json(super::CreateFollowUpAttempt {
+        let _ = super::follow_up_now(
+            session.clone(),
+            deployment.clone(),
+            super::CreateFollowUpAttempt {
                 prompt: queued.data.message,
                 executor_config: queued.data.executor_config,
                 retry_process_id: None,
                 force_when_dirty: None,
                 perform_git_reset: None,
-            }),
+            },
         )
         .await?;
         QueueMcpRestartResult::Started
@@ -515,6 +515,42 @@ async fn queue_message(
     State(deployment): State<DeploymentImpl>,
     Json(payload): Json<QueueMessageRequest>,
 ) -> Result<ResponseJson<ApiResponse<QueueStatus>>, ApiError> {
+    services::services::container::with_session_admission(
+        session.id,
+        queue_message_admitted(session, deployment, payload),
+    )
+    .await
+}
+
+async fn queue_message_admitted(
+    session: Session,
+    deployment: DeploymentImpl,
+    payload: QueueMessageRequest,
+) -> Result<ResponseJson<ApiResponse<QueueStatus>>, ApiError> {
+    if !ExecutionProcess::has_running_non_persistent_for_session(&deployment.db().pool, session.id)
+        .await?
+        && !deployment
+            .container()
+            .session_turn_unsettled(session.id)
+            .await?
+        && !deployment
+            .queued_message_service()
+            .is_workspace_mcp_restart(session.id)
+    {
+        let _ = super::follow_up(
+            Extension(session),
+            State(deployment),
+            Json(super::CreateFollowUpAttempt {
+                prompt: payload.message,
+                executor_config: payload.executor_config,
+                retry_process_id: None,
+                force_when_dirty: None,
+                perform_git_reset: None,
+            }),
+        )
+        .await?;
+        return Ok(ResponseJson(ApiResponse::success(QueueStatus::Empty)));
+    }
     let workspace_restart = deployment
         .queued_message_service()
         .is_workspace_mcp_restart(session.id);

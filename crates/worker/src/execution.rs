@@ -79,6 +79,11 @@ fn executor_config_for_action(action: &WorkerAction) -> Option<&ExecutorConfig> 
 pub enum ExecutionError {
     #[error("execution {execution_id} was already dispatched with a different request digest")]
     DigestConflict { execution_id: Uuid },
+    #[error("session {session_id} already owns live execution {execution_id}")]
+    SessionBusy {
+        session_id: Uuid,
+        execution_id: Uuid,
+    },
     #[error("execution action is invalid: {0}")]
     InvalidAction(#[from] serde_json::Error),
     #[error("execution action program must not be empty")]
@@ -134,6 +139,8 @@ pub struct ExecutionSupervisor {
 }
 
 pub struct WorkerJob {
+    coding_session_id: Option<Uuid>,
+    spawn_pending: AtomicBool,
     execution_id: Uuid,
     worker_job_id: Uuid,
     workspace_id: Uuid,
@@ -444,6 +451,8 @@ impl ExecutionSupervisor {
             supervisor.jobs.write().await.insert(
                 summary.execution_id,
                 Arc::new(WorkerJob {
+                    coding_session_id: None,
+                    spawn_pending: AtomicBool::new(false),
                     execution_id: summary.execution_id,
                     worker_job_id: summary.worker_job_id,
                     workspace_id: summary.workspace_id,
@@ -530,6 +539,22 @@ impl ExecutionSupervisor {
         )?;
         let repo_context_directory = working_directory.clone();
         let mut action: WorkerAction = serde_json::from_value(dispatch.action.clone())?;
+        let coding_session_id = (executor_config_for_action(&action).is_some()
+            || dispatch.run_reason == "codingagent")
+            .then_some(dispatch.session_id);
+        if let Some(session_id) = coding_session_id {
+            for existing in jobs.values() {
+                if existing.coding_session_id == Some(session_id)
+                    && (existing.spawn_pending.load(Ordering::Acquire)
+                        || existing.blocks_session_admission())
+                {
+                    return Err(ExecutionError::SessionBusy {
+                        session_id,
+                        execution_id: existing.execution_id,
+                    });
+                }
+            }
+        }
         // Resolve malformed Codex profiles before acceptance without echoing values.
         let codex_config = executor_config_for_action(&action)
             .filter(|config| config.executor == BaseCodingAgent::Codex)
@@ -646,6 +671,8 @@ impl ExecutionSupervisor {
         let mut journal = EventJournal::new(dispatch.execution_id, self.journal_capacity)?;
         journal.append(SystemTime::now(), ExecutionEventPayload::Accepted)?;
         let job = Arc::new(WorkerJob {
+            coding_session_id,
+            spawn_pending: AtomicBool::new(true),
             execution_id: dispatch.execution_id,
             worker_job_id,
             workspace_id: dispatch.workspace_id,
@@ -669,19 +696,33 @@ impl ExecutionSupervisor {
         drop(jobs);
         job.persist().await;
 
-        tokio::spawn(run_job(
-            job.clone(),
-            action,
-            (working_directory, repo_context_directory),
-            dispatch.environment,
-            executor_profile,
-            prepared_mcp,
-            JobLimits {
-                timeout_seconds: dispatch.timeout_seconds,
-                job_cgroup: self.job_cgroup.clone(),
-                startup_stall,
-            },
-        ));
+        let running_job = job.clone();
+        let limits = JobLimits {
+            timeout_seconds: dispatch.timeout_seconds,
+            job_cgroup: self.job_cgroup.clone(),
+            startup_stall,
+        };
+        tokio::spawn(async move {
+            // Covers cancellation while spawn is pending, even if the protocol
+            // state has already become terminal. Child liveness is checked too.
+            struct RunGuard(Arc<WorkerJob>);
+            impl Drop for RunGuard {
+                fn drop(&mut self) {
+                    self.0.spawn_pending.store(false, Ordering::Release);
+                }
+            }
+            let _guard = RunGuard(running_job.clone());
+            run_job(
+                running_job,
+                action,
+                (working_directory, repo_context_directory),
+                dispatch.environment,
+                executor_profile,
+                prepared_mcp,
+                limits,
+            )
+            .await;
+        });
         Ok(DispatchAccepted {
             execution_id: dispatch.execution_id,
             worker_job_id,
@@ -1186,6 +1227,24 @@ impl ExecutionSupervisor {
 }
 
 impl WorkerJob {
+    // Called while dispatch owns the jobs map. Never wait on a child being
+    // killed/reaped: uncertain liveness must reject only this session.
+    fn blocks_session_admission(&self) -> bool {
+        let Ok(state) = self.state.try_read() else {
+            return true;
+        };
+        if !state.is_terminal() {
+            return true;
+        }
+        let Ok(mut child) = self.child.try_lock() else {
+            return true;
+        };
+        match child.as_mut() {
+            Some(child) => !matches!(child.try_wait(), Ok(Some(_))),
+            None => false,
+        }
+    }
+
     async fn is_active_for_drain(&self) -> bool {
         if !self.state.read().await.is_terminal() {
             return true;
@@ -1387,6 +1446,7 @@ async fn run_job(
         job.leader_pid
             .store(leader_pid.unwrap_or_default(), Ordering::Release);
         *job.state.write().await = JobState::Running;
+        job.spawn_pending.store(false, Ordering::Release);
     }
     job.persist().await;
     let _execution_cgroup = leader_pid.map(|pid| {
@@ -1902,6 +1962,79 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[tokio::test]
+    async fn coding_session_admission_rejects_duplicate_but_preserves_replay_and_other_sessions() {
+        let (_temp, supervisor, workspace) = fixture();
+        let mut first = dispatch(&workspace, "initial", "sleep 60");
+        first.run_reason = "codingagent".into();
+        first.timeout_seconds = Some(60);
+        let accepted = supervisor.dispatch(first.clone()).await.unwrap();
+        let replay = supervisor.dispatch(first.clone()).await.unwrap();
+        assert_eq!(accepted.worker_job_id, replay.worker_job_id);
+        let mut second = first.clone();
+        second.execution_id = Uuid::new_v4();
+        second.request_digest = "follow-up".into();
+        assert!(matches!(
+            supervisor.dispatch(second.clone()).await,
+            Err(ExecutionError::SessionBusy { .. })
+        ));
+        // An unrelated session can run on this worker.
+        let mut unrelated = second.clone();
+        unrelated.execution_id = Uuid::new_v4();
+        unrelated.session_id = Uuid::new_v4();
+        unrelated.action = json!({"program":"/bin/sh","args":["-c","exit 0"]});
+        supervisor.dispatch(unrelated.clone()).await.unwrap();
+        wait_terminal(&supervisor, unrelated.execution_id).await;
+        let job = supervisor
+            .jobs
+            .read()
+            .await
+            .get(&first.execution_id)
+            .unwrap()
+            .clone();
+        // A terminal protocol state alone must not free a still-live child.
+        for _ in 0..100 {
+            if job.child.lock().await.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(job.child.lock().await.is_some());
+        *job.state.write().await = JobState::Failed;
+        assert!(matches!(
+            supervisor.dispatch(second.clone()).await,
+            Err(ExecutionError::SessionBusy { .. })
+        ));
+        // A stuck reap must not hold up unrelated worker operations.
+        let child_guard = job.child.lock().await;
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), supervisor.dispatch(second.clone()))
+                .await
+                .unwrap(),
+            Err(ExecutionError::SessionBusy { .. })
+        ));
+        let mut third = unrelated.clone();
+        third.execution_id = Uuid::new_v4();
+        third.session_id = Uuid::new_v4();
+        tokio::time::timeout(Duration::from_secs(1), supervisor.dispatch(third.clone()))
+            .await
+            .unwrap()
+            .unwrap();
+        drop(child_guard);
+        wait_terminal(&supervisor, third.execution_id).await;
+        stop_child(&job).await;
+        // Pending spawn also owns the session, even after cancellation.
+        job.spawn_pending.store(true, Ordering::Release);
+        assert!(matches!(
+            supervisor.dispatch(second.clone()).await,
+            Err(ExecutionError::SessionBusy { .. })
+        ));
+        job.spawn_pending.store(false, Ordering::Release);
+        second.action = json!({"program":"/bin/sh","args":["-c","exit 0"]});
+        supervisor.dispatch(second.clone()).await.unwrap();
+        wait_terminal(&supervisor, second.execution_id).await;
+    }
 
     fn codex_request(workspace: &Path, kind: &str, offset: &str) -> ExecutionDispatch {
         let mut request = dispatch(workspace, "codex-fixture", "unused");
@@ -2595,6 +2728,8 @@ mod tests {
         let control = Arc::new(RefreshFixture::default());
         let agent: CodingAgent = serde_json::from_value(json!({"CODEX": {}})).unwrap();
         let job = Arc::new(WorkerJob {
+            coding_session_id: None,
+            spawn_pending: AtomicBool::new(false),
             execution_id,
             worker_job_id: Uuid::new_v4(),
             workspace_id: Uuid::new_v4(),
@@ -3250,6 +3385,8 @@ mod tests {
     async fn a_stalled_spawn_is_reported_but_never_published_as_terminal() {
         let execution_id = Uuid::new_v4();
         let job = Arc::new(WorkerJob {
+            coding_session_id: None,
+            spawn_pending: AtomicBool::new(false),
             execution_id,
             worker_job_id: Uuid::new_v4(),
             workspace_id: Uuid::new_v4(),

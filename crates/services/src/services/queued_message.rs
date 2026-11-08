@@ -80,6 +80,24 @@ impl QueuedMessageService {
         queued
     }
 
+    /// Direct submissions must not silently replace an already accepted prompt.
+    /// The explicit queue-edit endpoint retains `queue_message` replacement.
+    pub fn queue_message_if_empty(&self, session_id: Uuid, data: DraftFollowUpData) -> bool {
+        let Entry::Vacant(entry) = self.queue.entry(session_id) else {
+            return false;
+        };
+        entry.insert(QueuedMessage {
+            session_id,
+            data,
+            queued_at: Utc::now(),
+            restart_agent: false,
+            restart_reservation: None,
+            remove_on_reservation_cancel: false,
+        });
+        self.restart_resolution.notify_waiters();
+        true
+    }
+
     pub fn reserve_mcp_restart(&self, session_id: Uuid, data: DraftFollowUpData) -> Uuid {
         let reservation = Uuid::new_v4();
         let queued_at = match self.queue.entry(session_id) {
@@ -324,5 +342,31 @@ impl QueuedMessageService {
 impl Default for QueuedMessageService {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use executors::{executors::BaseCodingAgent, profile::ExecutorConfig};
+
+    use super::*;
+
+    #[test]
+    fn admission_preserves_an_already_accepted_follow_up() {
+        let queue = QueuedMessageService::new();
+        let session = Uuid::new_v4();
+        let data = |message: &str| DraftFollowUpData {
+            message: message.into(),
+            executor_config: ExecutorConfig::new(BaseCodingAgent::ClaudeCode),
+        };
+        assert!(queue.queue_message_if_empty(session, data("first")));
+        assert!(!queue.queue_message_if_empty(session, data("second")));
+        assert_eq!(queue.take_queued(session).unwrap().data.message, "first");
+        assert!(queue.queue_message_if_empty(session, data("second")));
+        queue.queue_message(session, data("explicit edit"));
+        assert_eq!(
+            queue.take_queued(session).unwrap().data.message,
+            "explicit edit"
+        );
     }
 }

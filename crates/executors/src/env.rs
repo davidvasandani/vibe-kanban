@@ -9,6 +9,11 @@ use crate::{
     profile::{ExecutorConfig, ExecutorConfigs, ExecutorProfile},
 };
 
+/// Stable identity across turns, independent of cwd, PID and CLI transcript ID.
+pub fn vk_agent_name(workspace_id: uuid::Uuid, session_id: uuid::Uuid) -> String {
+    format!("vk/{workspace_id}/{session_id}")
+}
+
 /// Repository context for executor operations
 #[derive(Debug, Clone, Default)]
 pub struct RepoContext {
@@ -518,5 +523,26 @@ mod tests {
             panic!("resolved the wrong executor");
         };
         assert_eq!(claude.model.as_deref(), Some("a-specific-model"));
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    #[test]
+    fn vk_identity_uses_full_workspace_and_session_ids() {
+        let workspace = uuid::Uuid::from_u128(1);
+        let session = uuid::Uuid::from_u128(2);
+        assert_eq!(
+            super::vk_agent_name(workspace, session),
+            "vk/00000000-0000-0000-0000-000000000001/00000000-0000-0000-0000-000000000002"
+        );
+        assert_ne!(
+            super::vk_agent_name(workspace, session),
+            super::vk_agent_name(workspace, uuid::Uuid::from_u128(3))
+        );
+        assert_ne!(
+            super::vk_agent_name(workspace, session),
+            super::vk_agent_name(uuid::Uuid::from_u128(4), session)
+        );
     }
 }

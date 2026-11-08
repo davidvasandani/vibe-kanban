@@ -34,6 +34,7 @@ const SPURIOUS_RESULT_FALLBACK: Duration = Duration::from_secs(30);
 #[derive(Clone)]
 pub struct ProtocolPeer {
     stdin: Arc<Mutex<Box<dyn AsyncWrite + Send + Unpin>>>,
+    _peer_settings: Option<Arc<tempfile::NamedTempFile>>,
 }
 
 impl ProtocolPeer {
@@ -42,8 +43,10 @@ impl ProtocolPeer {
         stdout: ChildStdout,
         client: Arc<ClaudeAgentClient>,
         cancel: CancellationToken,
+        peer_settings: tempfile::NamedTempFile,
     ) -> Self {
-        let peer = Self::with_writer(stdin);
+        let mut peer = Self::with_writer(stdin);
+        peer._peer_settings = Some(Arc::new(peer_settings));
 
         let reader_peer = peer.clone();
         tokio::spawn(async move {
@@ -58,6 +61,7 @@ impl ProtocolPeer {
     fn with_writer(stdin: impl AsyncWrite + Send + Unpin + 'static) -> Self {
         Self {
             stdin: Arc::new(Mutex::new(Box::new(stdin))),
+            _peer_settings: None,
         }
     }
 

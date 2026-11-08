@@ -10,6 +10,11 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const mocks = vi.hoisted(() => ({
   followUp: vi.fn(),
   createSession: vi.fn(),
+  invalidateQueries: vi.fn(),
+}));
+
+vi.mock('@tanstack/react-query', () => ({
+  useQueryClient: () => ({ invalidateQueries: mocks.invalidateQueries }),
 }));
 
 vi.mock('@/shared/lib/api', () => ({
@@ -44,6 +49,7 @@ describe('useSessionSend', () => {
   beforeEach(() => {
     mocks.followUp.mockReset();
     mocks.createSession.mockReset();
+    mocks.invalidateQueries.mockReset();
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
@@ -81,6 +87,31 @@ describe('useSessionSend', () => {
     );
     expect(onFollowUpAccepted).toHaveBeenCalledOnce();
     expect(onFollowUpAccepted).toHaveBeenCalledWith(acceptedProcess);
+  });
+
+  it('accepts a queued follow-up without inventing an execution', async () => {
+    mocks.followUp.mockResolvedValue(null);
+    const onFollowUpAccepted = vi.fn();
+    act(() =>
+      root.render(
+        <Harness
+          sessionId="session"
+          workspaceId="workspace"
+          isNewSessionMode={false}
+          executorConfig={executorConfig}
+          onFollowUpAccepted={onFollowUpAccepted}
+        />
+      )
+    );
+    let success = false;
+    await act(async () => {
+      success = await sendHook.send('correction');
+    });
+    expect(success).toBe(true);
+    expect(onFollowUpAccepted).not.toHaveBeenCalled();
+    expect(mocks.invalidateQueries).toHaveBeenCalledWith({
+      queryKey: ['queue-status', 'session'],
+    });
   });
 
   it('does not reconcile a failed follow-up', async () => {

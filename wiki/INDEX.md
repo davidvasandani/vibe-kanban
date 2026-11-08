@@ -122,7 +122,7 @@ contributed to it.
   validation, and host-first PATH propagation across local and clustered
   workspace process boundaries.
 - [claude-missing-transcript-fallback.md](claude-missing-transcript-fallback.md) — When Claude's private transcript is gone, a follow-up starts a visible fresh session instead of failing forever with `No conversation found`. Covers the fail-open probe across all `projects/*` folders (vendor scope verified on 2.1.281), resolving from the execution env, the stderr notice channel (IX) and why history is never seeded (`vk/9f5d-no-conversation`).
-- [agent-process-lifecycle.md](agent-process-lifecycle.md) — How a coding-agent
+- [agent-process-lifecycle.md](agent-process-lifecycle.md) — How a coding-agent Session admission/finalization, worker live-child exclusion, Claude native peer isolation and stable VK identity (`vk/0890-investigate-a-fo`).
   turn ends at the process level: the one-turn-one-`ExecutionProcess` identity
   chain, the implicit app-server marker (`exit_signal: Some` vs `None`, distinct
   from `is_persistent()`), why process liveness is turn evidence only for

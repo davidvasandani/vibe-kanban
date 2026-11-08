@@ -110,6 +110,7 @@ fn generate_types_content() -> String {
         services::services::cluster::ClusterMetricsSnapshot::decl(),
         db::models::session::Session::decl(),
         db::models::execution_process::ExecutionProcess::decl(),
+        db::models::execution_process::FollowUpResult::decl(),
         db::models::execution_process::ExecutionProcessStatus::decl(),
         db::models::execution_process::ExecutionProcessRunReason::decl(),
         db::models::execution_worker_job::ExecutionWorkerJob::decl(),

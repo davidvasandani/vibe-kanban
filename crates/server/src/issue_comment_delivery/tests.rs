@@ -1100,7 +1100,7 @@ async fn edits_and_deletions_follow_snapshot_semantics() {
 async fn agents_cannot_resume_themselves_or_loop_forever() {
     let fx = Fixture::new().await;
     let (workspace_a, session_a) = fx.linked_workspace().await;
-    insert_turn(
+    let origin_turn = insert_turn(
         &fx.pool,
         session_a,
         "work",
@@ -1131,14 +1131,7 @@ async fn agents_cannot_resume_themselves_or_loop_forever() {
     // A chain of agent-started turns is cut at the hop limit.
     let (_, session_b) = fx.linked_workspace().await;
     fx.waiting(session_b).await;
-    let origin_turn = insert_turn(
-        &fx.pool,
-        session_a,
-        "hop",
-        ExecutionProcessStatus::Running,
-        None,
-    )
-    .await;
+    // The same live origin turn participates in the hop chain.
     sqlx::query(
         "UPDATE issue_comment_deliveries SET execution_process_id = ?, hop_count = 2 WHERE id = ?",
     )

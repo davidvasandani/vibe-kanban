@@ -1,4 +1,4 @@
-import type { ArchiveIntent } from 'shared/types';
+import type { FollowUpResult, ArchiveIntent } from 'shared/types';
 import type { WakeupSummary } from 'shared/types';
 // Import all necessary types from shared types
 
@@ -427,12 +427,13 @@ export const sessionsApi = {
   followUp: async (
     sessionId: string,
     data: CreateFollowUpAttempt
-  ): Promise<ExecutionProcess> => {
+  ): Promise<ExecutionProcess | null> => {
     const response = await makeRequest(`/api/sessions/${sessionId}/follow-up`, {
       method: 'POST',
       body: JSON.stringify(data),
     });
-    return handleApiResponse<ExecutionProcess>(response);
+    const result = await handleApiResponse<FollowUpResult>(response);
+    return 'queued' in result ? null : result;
   },
 
   startReview: async (
