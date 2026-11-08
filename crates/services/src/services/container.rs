@@ -3043,16 +3043,17 @@ mod tests {
     async fn child_task_does_not_inherit_session_admission() {
         use super::with_session_admission;
         let session = Uuid::new_v4();
-        let child = with_session_admission(session, async {
-            let child =
+        let mut child = None;
+        with_session_admission(session, async {
+            let handle =
                 tokio::spawn(async move { with_session_admission(session, async { 7 }).await });
             tokio::task::yield_now().await;
-            assert!(!child.is_finished());
-            child
+            assert!(!handle.is_finished());
+            child = Some(handle);
         })
         .await;
         assert_eq!(
-            tokio::time::timeout(Duration::from_secs(1), child)
+            tokio::time::timeout(Duration::from_secs(1), child.unwrap())
                 .await
                 .unwrap()
                 .unwrap(),
