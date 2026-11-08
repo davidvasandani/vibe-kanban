@@ -266,6 +266,59 @@ the stored `base_url` + password. Codex (stdio JSON-RPC; turn end currently
 *breaks the reader loop*) and ACP (connection dropped after the turn-end
 `cancel`) need their transports kept alive across turns.
 
+## Session admission and finalization
+
+`with_session_admission` is shared by initial startup, direct/UI/MCP follow-ups,
+comment delivery, and exit-monitor finalization. Initial startup acquires it
+before publishing the session row. A task-local scope allows nested lifecycle
+continuations; spawned tasks acquire their own guard. Acquire session admission
+before the workspace execution gate. During exclusive workspace restart, only
+persistent-helper replay bypasses session admission; coding launches cannot.
+
+A terminal database row does not mean the worktree is free. Remote monitors can
+publish terminal state before entering finalization. Admission checks all
+nonpersistent execution monitors, including setup and cleanup, and finalizers
+remove their monitor handle under admission before handing ownership back.
+Standalone parallel setup can outlive coding; both monitor paths drain accepted
+follow-ups after the remaining setup/finalization work ends.
+
+The direct follow-up route previously had no busy check at all: UI queueing was
+a separate endpoint and MCP called the direct route. The incident therefore did
+not require a narrow startup race. A busy direct follow-up now returns
+`{"queued":true}`; it rejects an occupied queue slot instead of overwriting
+accepted work. The explicit queue-edit endpoint still replaces the queued text.
+History-reset retries reject busy sessions. Durable comment delivery uses
+`follow_up_now`, so queue acceptance is never mistaken for an execution receipt.
+
+SQLite INSERT/UPDATE triggers reject a second running coding execution without
+rewriting legacy duplicates. Worker admission independently tracks spawn-pending
+ownership and child liveness; terminal state alone cannot release a session.
+Execution-ID replay remains idempotent. Under the worker-wide jobs lock, use
+nonblocking child/state lock attempts and treat uncertainty as busy: waiting
+there can freeze unrelated sessions behind a stuck reap.
+
+## Claude native peers and stable identity
+
+VK names Claude processes `vk/<full workspace UUID>/<full session UUID>` through
+`VK_AGENT_NAME`, `--name`, and `CLAUDE_CODE_SESSION_NAME`. Execution IDs, cwd
+basenames, PID counters, and short UUID prefixes are not session identities.
+
+For the pinned Claude Code 2.1.281, VK disables native `ListAgents` / `ListPeers`
+and `SendMessage` through both CLI exclusions and deny hooks, including bypass
+mode. A private temporary settings file forces `crossSessionInbound=refuse`,
+preserving profile settings without putting their contents on argv. It stays
+alive with the protocol reader. Invalid settings fail closed. The binary can
+fall back from long runtime socket paths to a shared `/tmp` directory, so a
+per-workspace TMPDIR alone is not reliable isolation.
+
+Prompt guidance treats an unexpected same-worktree peer as a lifecycle bug and
+forbids guessing that another session is a restarted teammate. Native peer
+messaging is disabled; explicitly authorized VK delivery remains separately
+addressed and attributed. When upgrading Claude, recheck the setting and native
+tool names. Unit tests and a native SDK initialization smoke test validate the
+configured policy and CLI acceptance; they do not prove a deployed two-peer
+message delivery test.
+
 ## Contributed by
 
 - vk/5de6-background-jobs
@@ -276,3 +329,5 @@ the stored `base_url` + password. Codex (stdio JSON-RPC; turn end currently
 - vk/869c-vk-background-po
 - vk/7655-turn-ends-aren-t
 - vk/80c1-tasks-should-sur
+
+- vk/0890-investigate-a-fo

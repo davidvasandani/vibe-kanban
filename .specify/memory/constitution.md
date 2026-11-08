@@ -1483,3 +1483,13 @@ pipeline default, not a request to change another project's governance.
 Applied `/speckit.constitution`. Existing principles II, III, IV and VI govern
 this change: test visible actions and payloads, reuse the send pipeline, keep
 issue resolution in web-core and presentation in ui. No new principle needed.
+
+## Review: vk/0890-investigate-a-fo
+
+Applied `/speckit.constitution`. II, VI, IX, XII and LVII require tested
+session ownership, reuse of existing admission/queue machinery, truthful
+process lifetime, and explicitly targeted communication. A starting coding
+turn owns its session before asynchronous launch completes. Neither a terminal
+DB status nor an empty queue alone proves its process has been reaped. Peer
+names must not confer authority to message an unrelated workspace. No new
+principle is required.

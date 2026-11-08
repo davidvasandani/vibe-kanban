@@ -1,13 +1,12 @@
-# Prior knowledge: GitHub App organization credentials
+# Prior knowledge: session execution exclusivity
 
-Read-only search of vibe-kanban/wiki, especially github-owner-token-routing.md and 1password-reference-resolution.md, found:
+Read-only search of vibe-kanban/wiki found relevant lifecycle, worker hardening, issue comment delivery, and durable wake-up pages.
 
-- Machine credentials live in github_owner_tokens, not Config, because /api/info exposes Config. Secrets use row-bound encryption and write-only literals; references may be returned.
-- services/github_credentials resolves server git and PR credentials per request; utils/github_credentials applies them to a single command. Configured failures refuse execution. Never Debug a Command with credentials.
-- Workspace gh routing and git credential helpers live in utils/github_auth. Worker and terminal boundaries also apply routing. Launch-time environment tokens currently have no refresh mechanism, so installation expiry requires a command-time resolver.
-- Owner routing must preserve argument parsing, GitHub host isolation, case variants, URL rewriting, inherited header resets, and fail-closed behavior.
-- The 1Password resolver supports organization-selected Connect then service-account fallback. Server lookups use credential files because deployment removes ambient secrets. Cache generation prevents in-flight lookups from restoring invalidated entries.
-- Health uses the same resolver and logs transitions only. Existing deployment monitors depend on the health status vocabulary.
-- 1Password errors must be classified without echoing stderr or reference names. PEM keys require a multiline-safe path; existing environment-value validation must be inspected before reuse.
+- agent-process-lifecycle.md: execution IDs own children and exit monitors. Turn liveness differs from process liveness. Cleanup and queue handoffs occur after DB completion. Warm reuse must preserve ownership across handoff and teardown.
+- issue-comment-delivery.md explicitly records that user follow-ups are not serialized with dispatcher admission or other follow-ups. Durable session_turn_boundaries prevent comment dispatch during finalization; checking only Running rows misses queue handoff gaps.
+- durable-session-wakeups.md: timers reuse comment dispatcher session locks and durable delivery records, with user-queue priority. Preserve their existing admission and launch-evidence semantics.
+- worker-execution-hardening.md: worker execution and coordinator reconciliation are separate authorities. Inspect current guards before adding another lifecycle owner.
 
-These findings refine SPEC.md and the implementation plan. Admin bypass remains deferred. Live acceptance requires provisioned App credentials; no unrelated service or ruleset edits are authorized.
+Implications: centralize admission across callers, reserve before asynchronous startup, and independently guard worker process lifetime. Do not use a startup grace period, infer idle from an empty queue, or release a process guard merely because a DB row becomes terminal. Keep warm-server reuse and automatic continuations compatible.
+
+Source task: vk/0890-investigate-a-fo (workspace 089057cb-ac81-44f3-969e-4aafdbfbdfb4).

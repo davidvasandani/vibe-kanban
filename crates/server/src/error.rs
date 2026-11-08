@@ -177,6 +177,7 @@ impl From<WorktreeError> for ApiError {
 impl From<ContainerError> for ApiError {
     fn from(err: ContainerError) -> Self {
         match err {
+            error @ ContainerError::SessionBusy(_) => ApiError::Conflict(error.to_string()),
             ContainerError::GitServiceError(e) => ApiError::GitService(e),
             ContainerError::Workspace(e) => ApiError::Workspace(e),
             ContainerError::Session(e) => ApiError::Session(e),

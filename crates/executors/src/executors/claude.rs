@@ -34,7 +34,7 @@ use workspace_utils::{
 use self::{
     client::{
         AUTO_APPROVE_CALLBACK_ID, ClaudeAgentClient, DENY_BACKGROUND_AGENT_CALLBACK_ID,
-        DENY_BACKGROUND_BASH_CALLBACK_ID, DENY_SCHEDULE_WAKEUP_CALLBACK_ID,
+        DENY_BACKGROUND_BASH_CALLBACK_ID, DENY_PEER_CALLBACK_ID, DENY_SCHEDULE_WAKEUP_CALLBACK_ID,
         STOP_GIT_CHECK_CALLBACK_ID,
     },
     protocol::ProtocolPeer,
@@ -288,6 +288,57 @@ fn project_mcp_suppression_args(
     ])
 }
 
+/// Enforce the verified 2.1.281 receive-side opt-out while preserving profile
+/// settings. Keep file contents out of argv and never rewrite user settings.
+fn peer_isolation_settings(
+    args: &mut Vec<String>,
+    cwd: &Path,
+) -> Result<tempfile::NamedTempFile, ExecutorError> {
+    use std::io::Write;
+    let invalid = || {
+        ExecutorError::Io(std::io::Error::other(
+            "Cannot apply VK peer isolation: Claude --settings must be a readable JSON object",
+        ))
+    };
+    let mut settings = serde_json::Map::new();
+    let mut retained = Vec::new();
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        let value = if arg == "--settings" {
+            Some(iter.next().ok_or_else(invalid)?.as_str())
+        } else {
+            arg.strip_prefix("--settings=")
+        };
+        if let Some(value) = value {
+            let raw = if value.trim_start().starts_with('{') {
+                value.to_owned()
+            } else {
+                std::fs::read_to_string(cwd.join(value)).map_err(|_| invalid())?
+            };
+            let parsed = jsonc_parser::parse_to_serde_value(&raw, &Default::default())
+                .map_err(|_| invalid())?
+                .ok_or_else(invalid)?;
+            // The CLI uses the last --settings argument.
+            settings = parsed.as_object().ok_or_else(invalid)?.clone();
+        } else {
+            retained.push(arg.clone());
+        }
+    }
+    settings.insert("crossSessionInbound".into(), serde_json::json!("refuse"));
+    let mut file = tempfile::NamedTempFile::new()?;
+    file.write_all(
+        serde_json::to_string(&settings)
+            .map_err(|_| invalid())?
+            .as_bytes(),
+    )?;
+    retained.extend([
+        "--settings".into(),
+        file.path().to_string_lossy().into_owned(),
+    ]);
+    *args = retained;
+    Ok(file)
+}
+
 /// Route keys of the deployment-routed servers present in the launched
 /// agent's user-scope config (`$HOME/.claude.json`, with the execution's
 /// scoped `HOME` when it has one).
@@ -508,6 +559,11 @@ const BACKGROUND_POLLER_TOOLS: &[&str] = &[
 /// Anchored regex matching exactly the `Bash` tool for PreToolUse hooks. The
 /// hook fires on every `Bash` call; the callback denies only the ones that ask
 /// for a background spawn.
+// Verified in the 2.1.281 native artifact: ListPeers aliases ListAgents;
+// SendMessage is the canonical wire name. See this task's research.md.
+const PEER_TOOLS: &[&str] = &["ListAgents", "ListPeers", "SendMessage"];
+const PEER_MATCHER: &str = "^(ListAgents|ListPeers|SendMessage)$";
+
 const BACKGROUND_BASH_MATCHER: &str = "^Bash$";
 
 /// Builds a PreToolUse catch-all matcher (a negative lookahead) that excludes
@@ -523,6 +579,7 @@ fn catch_all_matcher_excluding(mode_specific: &[&str]) -> String {
         .copied()
         .chain(std::iter::once(SCHEDULE_WAKEUP_TOOL))
         .chain(BACKGROUND_POLLER_TOOLS.iter().copied())
+        .chain(PEER_TOOLS.iter().copied())
         .collect::<Vec<_>>()
         .join("|");
     format!("^(?!({excluded})$).*")
@@ -592,6 +649,7 @@ impl ClaudeCode {
         // PreToolUse deny hook in `get_hooks` is the belt-and-suspenders that
         // returns an actionable error if the CLI still surfaces the tool.
         builder = builder.extend_params([format!("--disallowedTools={SCHEDULE_WAKEUP_TOOL}")]);
+        builder = builder.extend_params([format!("--disallowedTools={}", PEER_TOOLS.join(","))]);
         // Same treatment, same reasoning, for the harness's in-turn
         // background-poller tooling: VK reaps the turn's process group at turn
         // end, so a poller driven from inside the turn cannot outlive it. Note
@@ -663,6 +721,10 @@ impl ClaudeCode {
                 "PreToolUse".to_string(),
                 serde_json::json!([
                     {
+                        "matcher": PEER_MATCHER,
+                        "hookCallbackIds": [DENY_PEER_CALLBACK_ID],
+                    },
+                    {
                         "matcher": SCHEDULE_WAKEUP_MATCHER,
                         "hookCallbackIds": [DENY_SCHEDULE_WAKEUP_CALLBACK_ID],
                     },
@@ -688,6 +750,10 @@ impl ClaudeCode {
             hooks.insert(
                 "PreToolUse".to_string(),
                 serde_json::json!([
+                    {
+                        "matcher": PEER_MATCHER,
+                        "hookCallbackIds": [DENY_PEER_CALLBACK_ID],
+                    },
                     {
                         "matcher": SCHEDULE_WAKEUP_MATCHER,
                         "hookCallbackIds": [DENY_SCHEDULE_WAKEUP_CALLBACK_ID],
@@ -717,6 +783,10 @@ impl ClaudeCode {
             hooks.insert(
                 "PreToolUse".to_string(),
                 serde_json::json!([
+                    {
+                        "matcher": PEER_MATCHER,
+                        "hookCallbackIds": [DENY_PEER_CALLBACK_ID],
+                    },
                     {
                         "matcher": SCHEDULE_WAKEUP_MATCHER,
                         "hookCallbackIds": [DENY_SCHEDULE_WAKEUP_CALLBACK_ID],
@@ -1163,7 +1233,15 @@ impl ClaudeCode {
         }) {
             args.extend(extra);
         }
-        let combined_prompt = self.append_prompt.combine_prompt(prompt);
+        let peer_settings = peer_isolation_settings(&mut args, current_dir)?;
+        if let Some(name) = env.get("VK_AGENT_NAME") {
+            args.extend(["--name".into(), name.clone()]);
+        }
+        let combined_prompt = format!(
+            "[Vibe Kanban] {}\n\n{}",
+            client::PEER_DENY_REASON,
+            self.append_prompt.combine_prompt(prompt)
+        );
 
         let mut command = Command::new(program_path);
         command
@@ -1188,6 +1266,12 @@ impl ClaudeCode {
         env.clone()
             .with_profile(&self.cmd)
             .apply_to_command(&mut command);
+
+        // The pinned native registry reads this before publishing peer metadata.
+        // Use VK's authoritative context, not a profile's inherited peer name.
+        if let Some(name) = env.get("VK_AGENT_NAME") {
+            command.env("CLAUDE_CODE_SESSION_NAME", name);
+        }
 
         // Remove ANTHROPIC_API_KEY if disable_api_key is enabled
         if self.disable_api_key.unwrap_or(false) {
@@ -1233,8 +1317,13 @@ impl ClaudeCode {
                 cancel_for_task.clone(),
                 mcp_inventory,
             );
-            let protocol_peer =
-                ProtocolPeer::spawn(child_stdin, child_stdout, client.clone(), cancel_for_task);
+            let protocol_peer = ProtocolPeer::spawn(
+                child_stdin,
+                child_stdout,
+                client.clone(),
+                cancel_for_task,
+                peer_settings,
+            );
 
             // Initialize control protocol
             if let Err(e) = protocol_peer.initialize(hooks).await {
@@ -3916,6 +4005,66 @@ mod tests {
             .expect("catch-all matcher shape")
             .split('|')
             .collect()
+    }
+
+    #[tokio::test]
+    async fn native_peer_tools_denied_in_every_mode() {
+        for claude in [
+            claude_with(None, None),
+            claude_with(Some(true), None),
+            claude_with(None, Some(true)),
+        ] {
+            let hooks = claude.get_hooks(false).unwrap();
+            assert_eq!(
+                matchers_for_callback(&hooks, DENY_PEER_CALLBACK_ID),
+                vec![PEER_MATCHER]
+            );
+            let args = claude
+                .build_command_builder()
+                .await
+                .unwrap()
+                .params
+                .unwrap();
+            assert!(
+                args.contains(&"--disallowedTools=ListAgents,ListPeers,SendMessage".to_string())
+            );
+            for callback in [AUTO_APPROVE_CALLBACK_ID, "tool_approval"] {
+                for matcher in matchers_for_callback(&hooks, callback) {
+                    if matcher.starts_with("^(?!") {
+                        for name in PEER_TOOLS {
+                            assert!(catch_all_excluded_names(&matcher).contains(name));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn peer_settings_refuse_inbound_and_preserve_private_profile_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("profile.json");
+        let original = r#"{// comment
+            "crossSessionInbound":"accept","env":{"FIXTURE":"private-value"},"disabledMcpjsonServers":["duplicate"]}"#;
+        std::fs::write(&source, original).unwrap();
+        let mut args = vec!["--settings=profile.json".into(), "--verbose".into()];
+        let settings = peer_isolation_settings(&mut args, dir.path()).unwrap();
+        let value: serde_json::Value = serde_json::from_reader(settings.reopen().unwrap()).unwrap();
+        assert_eq!(value["crossSessionInbound"], "refuse");
+        assert_eq!(value["env"]["FIXTURE"], "private-value");
+        assert_eq!(value["disabledMcpjsonServers"][0], "duplicate");
+        assert_eq!(std::fs::read_to_string(source).unwrap(), original);
+        assert!(!args.join(" ").contains("private-value"));
+        assert!(args.contains(&"--verbose".to_string()));
+        let path = settings.path().to_owned();
+        drop(settings);
+        assert!(!path.exists());
+        for input in ["missing.json", "[]", "{broken"] {
+            assert!(
+                peer_isolation_settings(&mut vec!["--settings".into(), input.into()], dir.path())
+                    .is_err()
+            );
+        }
     }
 
     // VAS-283: every permission mode must deny ScheduleWakeup via a dedicated

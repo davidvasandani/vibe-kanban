@@ -135,7 +135,8 @@ contributed to it.
   (and why the idle sweep must not clone child handles), generation-conditional
   reap, the env gate, the Codex/ACP Phase-3 decisions, and why cleanup-skip early
   finalization must dispatch queued follow-ups before setting its finalized
-  guard.
+  guard. Session admission/finalization, worker live-child exclusion, Claude
+  native peer isolation and stable VK identity (`vk/0890-investigate-a-fo`).
 - [vk-pollers.md](vk-pollers.md) — Replacing each agent CLI's in-turn background
   poller with a VK-owned one: why a poller is deliberately a background helper
   (migration-free `Option<PollerSpec>`, one shared concurrency budget), why

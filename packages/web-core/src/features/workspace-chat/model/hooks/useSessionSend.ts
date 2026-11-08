@@ -1,4 +1,5 @@
 import { useCallback, useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import type { ExecutionProcess, ExecutorConfig } from 'shared/types';
 import { sessionsApi } from '@/shared/lib/api';
 import { useCreateSession } from './useCreateSession';
@@ -53,6 +54,7 @@ export function useSessionSend({
   onFollowUpAccepted,
   onFollowUpFailed,
 }: UseSessionSendOptions): UseSessionSendResult {
+  const queryClient = useQueryClient();
   const { mutateAsync: createSession, isPending: isCreatingSession } =
     useCreateSession();
   const [isSendingFollowUp, setIsSendingFollowUp] = useState(false);
@@ -102,7 +104,11 @@ export function useSessionSend({
             force_when_dirty: null,
             perform_git_reset: null,
           });
-          onFollowUpAccepted?.(process);
+          if (process) onFollowUpAccepted?.(process);
+          else
+            void queryClient.invalidateQueries({
+              queryKey: ['queue-status', sessionId],
+            });
           return true;
         } catch (e: unknown) {
           const err = e as { message?: string };
@@ -123,6 +129,7 @@ export function useSessionSend({
       executorConfig,
       onFollowUpAccepted,
       onFollowUpFailed,
+      queryClient,
     ]
   );
 

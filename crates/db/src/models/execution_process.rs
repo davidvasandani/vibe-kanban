@@ -36,6 +36,25 @@ pub enum ExecutionProcessError {
     ValidationError(String),
 }
 
+/// A follow-up either starts a process or is accepted by the session queue.
+/// Keep the existing process wire shape for started turns; never return a
+/// successful null payload (MCP treats that as missing data).
+#[derive(Debug, Serialize, Deserialize, TS)]
+#[serde(untagged)]
+pub enum FollowUpResult {
+    Started(Box<ExecutionProcess>),
+    Queued { queued: bool },
+}
+
+impl FollowUpResult {
+    pub fn into_execution(self) -> Option<ExecutionProcess> {
+        match self {
+            Self::Started(process) => Some(*process),
+            Self::Queued { .. } => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Type, Serialize, Deserialize, PartialEq, TS)]
 #[sqlx(type_name = "execution_process_status", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
@@ -355,6 +374,33 @@ impl ExecutionProcess {
         .bind(marker)
         .fetch_all(pool)
         .await
+    }
+
+    /// Include terminal executions: their monitors may still own finalization.
+    pub async fn non_persistent_ids_for_session(
+        pool: &SqlitePool,
+        session_id: Uuid,
+    ) -> Result<Vec<Uuid>, sqlx::Error> {
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM execution_processes WHERE session_id = ? \
+             AND run_reason NOT IN ('devserver', 'backgroundhelper')",
+        )
+        .bind(session_id)
+        .fetch_all(pool)
+        .await
+    }
+
+    pub async fn has_running_non_persistent_for_session(
+        pool: &SqlitePool,
+        session_id: Uuid,
+    ) -> Result<bool, sqlx::Error> {
+        Ok(Self::find_by_session_id(pool, session_id, true)
+            .await?
+            .iter()
+            .any(|process| {
+                process.status == ExecutionProcessStatus::Running
+                    && !process.run_reason.is_persistent()
+            }))
     }
 
     /// Check if there's a running coding agent process for a session
@@ -1039,5 +1085,103 @@ mod tests {
         assert!(!ExecutionProcessRunReason::CleanupScript.is_persistent());
         assert!(!ExecutionProcessRunReason::ArchiveScript.is_persistent());
         assert!(!ExecutionProcessRunReason::CodingAgent.is_persistent());
+    }
+}
+
+#[cfg(test)]
+mod session_exclusivity_tests {
+    use super::FollowUpResult;
+
+    #[test]
+    fn queued_follow_up_is_a_non_null_success_payload() {
+        let response: utils::response::ApiResponse<FollowUpResult> = serde_json::from_value(
+            serde_json::json!({"success":true,"data":{"queued":true},"error_data":null,"message":null}),
+        ).unwrap();
+        assert!(matches!(
+            response.into_data(),
+            Some(FollowUpResult::Queued { queued: true })
+        ));
+    }
+
+    #[tokio::test]
+    async fn monitor_candidates_include_terminal_setup_and_cleanup() {
+        use uuid::Uuid;
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::raw_sql("CREATE TABLE execution_processes (id BLOB, session_id BLOB, run_reason TEXT, status TEXT);").execute(&pool).await.unwrap();
+        let session = Uuid::new_v4();
+        let mut expected = Vec::new();
+        for reason in [
+            "codingagent",
+            "setupscript",
+            "cleanupscript",
+            "backgroundhelper",
+            "devserver",
+        ] {
+            let id = Uuid::new_v4();
+            sqlx::query("INSERT INTO execution_processes VALUES (?, ?, ?, 'completed')")
+                .bind(id)
+                .bind(session)
+                .bind(reason)
+                .execute(&pool)
+                .await
+                .unwrap();
+            if !matches!(reason, "backgroundhelper" | "devserver") {
+                expected.push(id);
+            }
+        }
+        assert_eq!(
+            super::ExecutionProcess::non_persistent_ids_for_session(&pool, session)
+                .await
+                .unwrap(),
+            expected
+        );
+        assert!(
+            super::ExecutionProcess::non_persistent_ids_for_session(&pool, Uuid::new_v4())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn database_admission_serializes_connections_and_guards_reactivation() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(2)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE execution_processes (id TEXT PRIMARY KEY, session_id TEXT, run_reason TEXT, status TEXT)").execute(&pool).await.unwrap();
+        sqlx::raw_sql(include_str!(
+            "../../migrations/20261108000000_session_coding_exclusivity.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let insert = |id: &'static str| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query("INSERT INTO execution_processes VALUES (?, 'session', 'codingagent', 'running')").bind(id).execute(&pool).await
+            }
+        };
+        let (a, b) = tokio::join!(insert("initial"), insert("follow-up"));
+        assert_ne!(a.is_ok(), b.is_ok());
+        sqlx::query("INSERT INTO execution_processes VALUES ('finished', 'session', 'codingagent', 'completed'), ('helper', 'session', 'backgroundhelper', 'running'), ('other', 'other-session', 'codingagent', 'running')").execute(&pool).await.unwrap();
+        assert!(
+            sqlx::query("UPDATE execution_processes SET status = 'running' WHERE id = 'finished'")
+                .execute(&pool)
+                .await
+                .is_err()
+        );
+        assert!(
+            sqlx::query("UPDATE execution_processes SET session_id = 'session' WHERE id = 'other'")
+                .execute(&pool)
+                .await
+                .is_err()
+        );
+        sqlx::query("UPDATE execution_processes SET status = 'completed' WHERE session_id = 'session' AND run_reason = 'codingagent'").execute(&pool).await.unwrap();
+        sqlx::query("UPDATE execution_processes SET status = 'running' WHERE id = 'finished'")
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 }

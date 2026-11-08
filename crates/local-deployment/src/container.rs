@@ -2663,6 +2663,7 @@ impl LocalContainerService {
                 }
             }
 
+            services::services::container::with_session_admission(session_id, async {
             // Park a cleanly-finished warm app-server into the registry *now*,
             // before finalization runs `try_start_next_action` / queued
             // follow-ups — so an immediately chained follow-up reuses the warm
@@ -2888,39 +2889,7 @@ impl LocalContainerService {
                     }
                 }
 
-                // When a parallel setup script finishes and no coding agent is running,
-                // consume any queued message that was stuck waiting
-                if matches!(
-                    ctx.execution_process.run_reason,
-                    ExecutionProcessRunReason::SetupScript
-                ) && !container.should_finalize(&ctx)
-                {
-                    let has_running_agent = ExecutionProcess::has_running_coding_agent_for_session(
-                        &db.pool,
-                        ctx.session.id,
-                    )
-                    .await
-                    .unwrap_or(true);
-
-                    if !has_running_agent
-                        && let Some(queued_msg) =
-                            container.queued_message_service.take_queued(ctx.session.id)
-                    {
-                        tracing::info!(
-                            "Parallel setup script finished with queued message for session {}, starting follow-up",
-                            ctx.session.id
-                        );
-
-                        if !container
-                            .start_queued_follow_up_message(&ctx, &queued_msg)
-                            .await
-                        {
-                            tracing::error!(
-                                "Failed to start queued follow-up from setup script completion"
-                            );
-                        }
-                    }
-                }
+                container.drain_after_parallel_setup(&ctx).await;
 
                 // Fire analytics event when CodingAgent execution has finished
                 if config.read().await.analytics_enabled
@@ -3022,6 +2991,8 @@ impl LocalContainerService {
             {
                 controls.remove(&session_id);
             }
+            container.exit_monitor_handles.write().await.remove(&exec_id);
+            }).await;
         })
     }
 
@@ -3881,51 +3852,108 @@ impl LocalContainerService {
             tracing::warn!(%execution_id, "Could not load remote execution context for finalization");
             return;
         };
-        if ctx.execution_process.status == ExecutionProcessStatus::Completed {
-            if let Err(error) = self.try_commit_changes(&ctx).await {
-                tracing::error!(%execution_id, "Remote execution commit failed: {error}");
-            }
-            if let Err(error) = self.try_start_next_action(&ctx).await {
-                tracing::error!(%execution_id, "Remote execution next action failed: {error}");
-            }
-        }
-        let mut started_queued_follow_up = false;
-        if self.should_finalize(&ctx) {
-            self.queued_message_service
-                .wait_for_restart_resolution(ctx.session.id)
-                .await;
-            if let Some(queued_msg) = self.queued_message_service.take_queued(ctx.session.id) {
-                let should_execute_queued = (queued_msg.restart_agent
-                    && (ctx.execution_process.status == ExecutionProcessStatus::Failed
-                        || (ctx.execution_process.status == ExecutionProcessStatus::Killed
-                            && self
-                                .queued_message_service
-                                .is_workspace_mcp_restart(ctx.session.id))))
-                    || !matches!(
-                        ctx.execution_process.status,
-                        ExecutionProcessStatus::Failed
-                            | ExecutionProcessStatus::Killed
-                            | ExecutionProcessStatus::Interrupted
-                            | ExecutionProcessStatus::Indeterminate
-                    );
-                if should_execute_queued {
-                    started_queued_follow_up =
-                        self.start_queued_follow_up_message(&ctx, &queued_msg).await;
-                    if !started_queued_follow_up && queued_msg.restart_agent {
-                        self.clear_mcp_restart_tracking(ctx.session.id).await;
-                    }
-                } else if queued_msg.restart_agent {
-                    self.clear_mcp_restart_tracking(ctx.session.id).await;
+        services::services::container::with_session_admission(ctx.session.id, async {
+            if ctx.execution_process.status == ExecutionProcessStatus::Completed {
+                if let Err(error) = self.try_commit_changes(&ctx).await {
+                    tracing::error!(%execution_id, "Remote execution commit failed: {error}");
+                }
+                if let Err(error) = self.try_start_next_action(&ctx).await {
+                    tracing::error!(%execution_id, "Remote execution next action failed: {error}");
                 }
             }
+            let mut started_queued_follow_up = false;
+            if self.should_finalize(&ctx) {
+                self.queued_message_service
+                    .wait_for_restart_resolution(ctx.session.id)
+                    .await;
+                if let Some(queued_msg) = self.queued_message_service.take_queued(ctx.session.id) {
+                    let should_execute_queued = (queued_msg.restart_agent
+                        && (ctx.execution_process.status == ExecutionProcessStatus::Failed
+                            || (ctx.execution_process.status == ExecutionProcessStatus::Killed
+                                && self
+                                    .queued_message_service
+                                    .is_workspace_mcp_restart(ctx.session.id))))
+                        || !matches!(
+                            ctx.execution_process.status,
+                            ExecutionProcessStatus::Failed
+                                | ExecutionProcessStatus::Killed
+                                | ExecutionProcessStatus::Interrupted
+                                | ExecutionProcessStatus::Indeterminate
+                        );
+                    if should_execute_queued {
+                        started_queued_follow_up =
+                            self.start_queued_follow_up_message(&ctx, &queued_msg).await;
+                        if !started_queued_follow_up && queued_msg.restart_agent {
+                            self.clear_mcp_restart_tracking(ctx.session.id).await;
+                        }
+                    } else if queued_msg.restart_agent {
+                        self.clear_mcp_restart_tracking(ctx.session.id).await;
+                    }
+                }
+            }
+            if self.should_finalize(&ctx) && !started_queued_follow_up {
+                self.finalize_task(&ctx).await;
+            }
+            self.drain_after_parallel_setup(&ctx).await;
+            // Remote processes edit the shared worktree from a worker; invalidate
+            // the coordinator's cached bulk diff stats for this workspace.
+            WORKSPACE_DIFF_STATS.invalidate(ctx.workspace.id);
+            self.update_after_head_commits(execution_id).await;
+            // Publish settled ownership before releasing admission. Dropping
+            // this task's handle detaches it; the remaining tail only closes logs.
+            self.exit_monitor_handles
+                .write()
+                .await
+                .remove(&execution_id);
+        })
+        .await;
+    }
+
+    /// Standalone parallel setup can outlive the coding turn. It must hand off
+    /// a prompt accepted while setup was the session's remaining busy work.
+    /// Both monitor paths call this while holding session admission.
+    async fn drain_after_parallel_setup(&self, ctx: &ExecutionContext) {
+        if ctx.execution_process.run_reason != ExecutionProcessRunReason::SetupScript
+            || self.should_finalize(ctx)
+            || ExecutionProcess::has_running_non_persistent_for_session(
+                &self.db.pool,
+                ctx.session.id,
+            )
+            .await
+            .unwrap_or(true)
+        {
+            return;
         }
-        if self.should_finalize(&ctx) && !started_queued_follow_up {
-            self.finalize_task(&ctx).await;
+        // A terminal row can precede its remote monitor's admission. Let that
+        // monitor perform commit/cleanup and own the queue handoff first.
+        let pending =
+            match ExecutionProcess::non_persistent_ids_for_session(&self.db.pool, ctx.session.id)
+                .await
+            {
+                Ok(ids) => ids,
+                Err(_) => return,
+            };
+        {
+            let monitors = self.exit_monitor_handles.read().await;
+            if pending.iter().any(|id| {
+                *id != ctx.execution_process.id
+                    && monitors.get(id).is_some_and(|handle| !handle.is_finished())
+            }) {
+                return;
+            }
         }
-        // Remote processes edit the shared worktree from a worker; invalidate
-        // the coordinator's cached bulk diff stats for this workspace.
-        WORKSPACE_DIFF_STATS.invalidate(ctx.workspace.id);
-        self.update_after_head_commits(execution_id).await;
+        self.queued_message_service
+            .wait_for_restart_resolution(ctx.session.id)
+            .await;
+        if let Some(queued) = self.queued_message_service.take_queued(ctx.session.id) {
+            if self.start_queued_follow_up_message(ctx, &queued).await {
+                return;
+            }
+            if queued.restart_agent {
+                self.clear_mcp_restart_tracking(ctx.session.id).await;
+            }
+            tracing::error!(session_id = %ctx.session.id, "Parallel setup follow-up failed to start");
+        }
     }
 
     /// Create a live diff log stream for ongoing attempts for WebSocket
@@ -5123,6 +5151,10 @@ impl ContainerService for LocalContainerService {
         environment.extend(workspace_go_environment(Path::new(&workspace_path), None));
         environment.insert("VK_WORKSPACE_ID".into(), workspace.id.to_string());
         environment.insert(
+            "VK_AGENT_NAME".into(),
+            executors::env::vk_agent_name(workspace.id, execution_process.session_id),
+        );
+        environment.insert(
             "VK_SESSION_ID".into(),
             execution_process.session_id.to_string(),
         );
@@ -5434,12 +5466,46 @@ impl ContainerService for LocalContainerService {
         Ok(())
     }
 
+    async fn session_turn_unsettled(&self, session_id: Uuid) -> Result<bool, ContainerError> {
+        // A remote monitor publishes terminal state before entering admission.
+        // Include setup and cleanup: their commit/next-action handoff owns the
+        // same worktree. Finalizers remove their monitor handles under
+        // admission, before releasing ownership of the queue handoff.
+        let ids =
+            ExecutionProcess::non_persistent_ids_for_session(&self.db.pool, session_id).await?;
+        let monitors = self.exit_monitor_handles.read().await;
+        Ok(ids
+            .iter()
+            .any(|id| monitors.get(id).is_some_and(|handle| !handle.is_finished())))
+    }
+
     async fn start_execution_inner(
         &self,
         workspace: &Workspace,
         execution_process: &ExecutionProcess,
         executor_action: &ExecutorAction,
     ) -> Result<(), ContainerError> {
+        if executor_action.base_executor().is_some() {
+            let children: Vec<_> = self
+                .child_store
+                .read()
+                .await
+                .iter()
+                .map(|(id, child)| (*id, child.clone()))
+                .collect();
+            for (id, child) in children {
+                if id == execution_process.id {
+                    continue;
+                }
+                if let Some(previous) = ExecutionProcess::find_by_id(&self.db.pool, id).await?
+                    && previous.session_id == execution_process.session_id
+                    && previous.run_reason == ExecutionProcessRunReason::CodingAgent
+                    && !matches!(child.write().await.try_wait(), Ok(Some(_)))
+                {
+                    return Err(ContainerError::SessionBusy(execution_process.session_id));
+                }
+            }
+        }
         // Get the worktree path
         let container_ref = workspace
             .container_ref
@@ -5504,6 +5570,10 @@ impl ContainerService for LocalContainerService {
         // Always inject workspace/session context (wins over any org var above).
         env.insert("VK_WORKSPACE_ID", workspace.id.to_string());
         env.insert("VK_SESSION_ID", execution_process.session_id.to_string());
+        env.insert(
+            "VK_AGENT_NAME",
+            executors::env::vk_agent_name(workspace.id, execution_process.session_id),
+        );
         env.insert("VK_WORKSPACE_BRANCH", &workspace.branch);
 
         // Expose app-installed CLI tools (services::cli_tools) to agents.

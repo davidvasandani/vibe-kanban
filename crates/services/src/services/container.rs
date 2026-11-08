@@ -81,6 +81,31 @@ use crate::services::{
     notification::NotificationService,
 };
 
+static SESSION_ADMISSION: LazyLock<DashMap<Uuid, Arc<Mutex<()>>>> = LazyLock::new(DashMap::new);
+
+tokio::task_local! { static ADMITTED_SESSION: Uuid; }
+
+/// Serialize admission and finalization, including their nested continuation
+/// calls. Tokio task-local scope is not inherited by spawned tasks: only this
+/// task may reuse the lock, and a child launch always acquires its own guard.
+pub async fn with_session_admission<F: std::future::Future>(
+    session_id: Uuid,
+    future: F,
+) -> F::Output {
+    if ADMITTED_SESSION
+        .try_with(|id| *id == session_id)
+        .unwrap_or(false)
+    {
+        return future.await;
+    }
+    let lock = SESSION_ADMISSION
+        .entry(session_id)
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone();
+    let _guard = lock.lock_owned().await;
+    ADMITTED_SESSION.scope(session_id, future).await
+}
+
 static WORKSPACE_EXECUTION_GATES: LazyLock<DashMap<Uuid, Arc<RwLock<()>>>> =
     LazyLock::new(DashMap::new);
 
@@ -592,6 +617,8 @@ fn executor_config_for_auto_resume(action: &ExecutorAction) -> Option<ExecutorCo
 
 #[derive(Debug, Error)]
 pub enum ContainerError {
+    #[error("Session {0} already has an active coding execution")]
+    SessionBusy(Uuid),
     #[error(transparent)]
     EnvironmentSecret(#[from] super::environment_secrets::EnvironmentSecretError),
     #[error(transparent)]
@@ -2381,80 +2408,92 @@ pub trait ContainerService {
             .await?
             .ok_or(SqlxError::RowNotFound)?;
 
-        // Create a session for this workspace
-        let session = Session::create(
-            &self.db().pool,
-            &CreateSession {
-                executor: Some(executor_config.executor.to_string()),
-                name: None,
-            },
-            Uuid::new_v4(),
-            workspace.id,
-        )
-        .await?;
+        // Reserve before publishing the session row: a follow-up can discover
+        // it immediately, including while parallel setup is still starting.
+        let session_id = Uuid::new_v4();
+        with_session_admission(session_id, async {
+            let session = Session::create(
+                &self.db().pool,
+                &CreateSession {
+                    executor: Some(executor_config.executor.to_string()),
+                    name: None,
+                },
+                session_id,
+                workspace.id,
+            )
+            .await?;
 
-        let repos_with_setup: Vec<_> = repos.iter().filter(|r| r.setup_script.is_some()).collect();
+            let repos_with_setup: Vec<_> =
+                repos.iter().filter(|r| r.setup_script.is_some()).collect();
 
-        let all_parallel = repos_with_setup.iter().all(|r| r.parallel_setup_script);
+            let all_parallel = repos_with_setup.iter().all(|r| r.parallel_setup_script);
 
-        let cleanup_action = self.cleanup_actions_for_repos(&repos);
+            let cleanup_action = self.cleanup_actions_for_repos(&repos);
 
-        let working_dir = session
-            .agent_working_dir
-            .as_ref()
-            .filter(|dir| !dir.is_empty())
-            .cloned();
+            let working_dir = session
+                .agent_working_dir
+                .as_ref()
+                .filter(|dir| !dir.is_empty())
+                .cloned();
 
-        // Several projects can share a single repository (e.g. different
-        // services in a homelab monorepo). When this workspace targets a
-        // subdirectory of a shared repo, tell the agent which one it is on.
-        let prompt = scope_initial_prompt_to_working_dir(prompt, &repos);
+            // Several projects can share a single repository (e.g. different
+            // services in a homelab monorepo). When this workspace targets a
+            // subdirectory of a shared repo, tell the agent which one it is on.
+            let prompt = scope_initial_prompt_to_working_dir(prompt, &repos);
 
-        let coding_action = ExecutorAction::new(
-            ExecutorActionType::CodingAgentInitialRequest(CodingAgentInitialRequest {
-                prompt,
-                executor_config: executor_config.clone(),
-                working_dir,
-            }),
-            cleanup_action.map(Box::new),
-        );
+            let coding_action = ExecutorAction::new(
+                ExecutorActionType::CodingAgentInitialRequest(CodingAgentInitialRequest {
+                    prompt,
+                    executor_config: executor_config.clone(),
+                    working_dir,
+                }),
+                cleanup_action.map(Box::new),
+            );
 
-        let execution_process = if all_parallel {
-            // All parallel: start each setup independently, then start coding agent
-            for repo in &repos_with_setup {
-                if let Some(action) = Self::setup_action_for_repo(repo)
-                    && let Err(e) = self
-                        .start_execution(
-                            &workspace,
-                            &session,
-                            &action,
-                            &ExecutionProcessRunReason::SetupScript,
-                        )
-                        .await
-                {
-                    tracing::warn!(?e, "Failed to start setup script in parallel mode");
+            let execution_process = if all_parallel {
+                // All parallel: start each setup independently, then start coding agent
+                for repo in &repos_with_setup {
+                    if let Some(action) = Self::setup_action_for_repo(repo)
+                        && let Err(e) = self
+                            .start_execution(
+                                &workspace,
+                                &session,
+                                &action,
+                                &ExecutionProcessRunReason::SetupScript,
+                            )
+                            .await
+                    {
+                        tracing::warn!(?e, "Failed to start setup script in parallel mode");
+                    }
                 }
-            }
-            self.start_execution(
-                &workspace,
-                &session,
-                &coding_action,
-                &ExecutionProcessRunReason::CodingAgent,
-            )
-            .await?
-        } else {
-            // Any sequential: chain ALL setups → coding agent via next_action
-            let main_action = Self::build_sequential_setup_chain(&repos_with_setup, coding_action);
-            self.start_execution(
-                &workspace,
-                &session,
-                &main_action,
-                &ExecutionProcessRunReason::SetupScript,
-            )
-            .await?
-        };
+                self.start_execution(
+                    &workspace,
+                    &session,
+                    &coding_action,
+                    &ExecutionProcessRunReason::CodingAgent,
+                )
+                .await?
+            } else {
+                // Any sequential: chain ALL setups → coding agent via next_action
+                let main_action =
+                    Self::build_sequential_setup_chain(&repos_with_setup, coding_action);
+                self.start_execution(
+                    &workspace,
+                    &session,
+                    &main_action,
+                    &ExecutionProcessRunReason::SetupScript,
+                )
+                .await?
+            };
 
-        Ok(execution_process)
+            Ok(execution_process)
+        })
+        .await
+    }
+
+    /// True during the terminal-row/queue-handoff gap owned by an exit monitor.
+    async fn session_turn_unsettled(&self, _session_id: Uuid) -> Result<bool, ContainerError> {
+        Ok(false)
     }
 
     async fn start_execution(
@@ -2486,20 +2525,23 @@ pub trait ContainerService {
         run_reason: &ExecutionProcessRunReason,
         execution_process_id: Uuid,
     ) -> Result<ExecutionProcess, ContainerError> {
-        let _launch_guard = workspace_execution_gate(workspace.id)
-            .try_read_owned()
-            .map_err(|_| {
-                ContainerError::Other(anyhow!(
-                    "Workspace execution start rejected while its process group is restarting"
-                ))
-            })?;
-        self.start_execution_with_id_during_workspace_restart(
-            workspace,
-            session,
-            executor_action,
-            run_reason,
-            execution_process_id,
-        )
+        with_session_admission(session.id, async {
+            let _launch_guard = workspace_execution_gate(workspace.id)
+                .try_read_owned()
+                .map_err(|_| {
+                    ContainerError::Other(anyhow!(
+                        "Workspace execution start rejected while its process group is restarting"
+                    ))
+                })?;
+            self.start_execution_with_id_during_workspace_restart(
+                workspace,
+                session,
+                executor_action,
+                run_reason,
+                execution_process_id,
+            )
+            .await
+        })
         .await
     }
 
@@ -2512,7 +2554,15 @@ pub trait ContainerService {
         executor_action: &ExecutorAction,
         run_reason: &ExecutionProcessRunReason,
     ) -> Result<ExecutionProcess, ContainerError> {
-        self.start_execution_with_id_during_workspace_restart(
+        // Workspace restart only replays persistent helpers. They do not own
+        // a coding turn and must not wait on its admission while holding the
+        // exclusive workspace gate.
+        if !run_reason.is_persistent() {
+            return Err(ContainerError::Other(anyhow!(
+                "Workspace restart may only replay persistent executions"
+            )));
+        }
+        self.start_execution_admitted(
             workspace,
             session,
             executor_action,
@@ -2532,14 +2582,17 @@ pub trait ContainerService {
         executor_action: &ExecutorAction,
         run_reason: &ExecutionProcessRunReason,
     ) -> Result<ExecutionProcess, ContainerError> {
-        let _launch_guard = workspace_execution_gate(workspace.id).read_owned().await;
-        self.start_execution_with_id_during_workspace_restart(
-            workspace,
-            session,
-            executor_action,
-            run_reason,
-            Uuid::new_v4(),
-        )
+        with_session_admission(session.id, async {
+            let _launch_guard = workspace_execution_gate(workspace.id).read_owned().await;
+            self.start_execution_with_id_during_workspace_restart(
+                workspace,
+                session,
+                executor_action,
+                run_reason,
+                Uuid::new_v4(),
+            )
+            .await
+        })
         .await
     }
 
@@ -2551,6 +2604,34 @@ pub trait ContainerService {
         run_reason: &ExecutionProcessRunReason,
         execution_process_id: Uuid,
     ) -> Result<ExecutionProcess, ContainerError> {
+        with_session_admission(
+            session.id,
+            self.start_execution_admitted(
+                workspace,
+                session,
+                executor_action,
+                run_reason,
+                execution_process_id,
+            ),
+        )
+        .await
+    }
+
+    /// Internal launch after the caller has serialized its queue/start decision.
+    async fn start_execution_admitted(
+        &self,
+        workspace: &Workspace,
+        session: &Session,
+        executor_action: &ExecutorAction,
+        run_reason: &ExecutionProcessRunReason,
+        execution_process_id: Uuid,
+    ) -> Result<ExecutionProcess, ContainerError> {
+        if *run_reason == ExecutionProcessRunReason::CodingAgent
+            && ExecutionProcess::has_running_coding_agent_for_session(&self.db().pool, session.id)
+                .await?
+        {
+            return Err(ContainerError::SessionBusy(session.id));
+        }
         // Create new execution process record
         // Capture current HEAD per repository as the "before" commit for this execution
         let repositories =
@@ -2857,6 +2938,128 @@ mod tests {
         reset_would_discard_uncommitted_work, scope_initial_prompt_to_working_dir,
         workspace_execution_gate,
     };
+
+    #[tokio::test(start_paused = true)]
+    async fn session_admission_serializes_follow_up_nine_seconds_into_startup() {
+        use db::models::scratch::DraftFollowUpData;
+        use executors::{executors::BaseCodingAgent, profile::ExecutorConfig};
+
+        use super::with_session_admission;
+        use crate::services::queued_message::QueuedMessageService;
+        let session = Uuid::new_v4();
+        let running = Arc::new(AtomicBool::new(false));
+        let queue = QueuedMessageService::new();
+        let startup_entered = Arc::new(Semaphore::new(0));
+        let release_startup = Arc::new(Semaphore::new(0));
+        let initial = tokio::spawn({
+            let running = running.clone();
+            let entered = startup_entered.clone();
+            let release = release_startup.clone();
+            async move {
+                with_session_admission(session, async {
+                    entered.add_permits(1);
+                    release.acquire().await.unwrap().forget();
+                    assert!(!running.swap(true, Ordering::SeqCst));
+                })
+                .await
+            }
+        });
+        startup_entered.acquire().await.unwrap().forget();
+        tokio::time::advance(Duration::from_secs(9)).await;
+        let follow_up = tokio::spawn({
+            let running = running.clone();
+            let queue = queue.clone();
+            async move {
+                with_session_admission(session, async {
+                    assert!(
+                        running.load(Ordering::SeqCst),
+                        "follow-up must not observe idle during startup"
+                    );
+                    assert!(queue.queue_message_if_empty(
+                        session,
+                        DraftFollowUpData {
+                            message: "Correction: open PR and stop".into(),
+                            executor_config: ExecutorConfig::new(BaseCodingAgent::ClaudeCode),
+                        },
+                    ));
+                })
+                .await
+            }
+        });
+        tokio::task::yield_now().await;
+        assert!(!follow_up.is_finished());
+        // Other sessions remain available while this startup is suspended.
+        with_session_admission(Uuid::new_v4(), async {}).await;
+        release_startup.add_permits(1);
+        initial.await.unwrap();
+        follow_up.await.unwrap();
+        assert!(queue.has_queued(session));
+        with_session_admission(session, async {
+            running.store(false, Ordering::SeqCst);
+            let message = queue.take_queued(session).unwrap();
+            assert_eq!(message.data.message, "Correction: open PR and stop");
+            // A nested continuation reuses admission; spawned tasks cannot.
+            with_session_admission(session, async {
+                assert!(!running.swap(true, Ordering::SeqCst));
+            })
+            .await;
+        })
+        .await;
+        assert!(!queue.has_queued(session));
+    }
+
+    #[tokio::test]
+    async fn cancelled_session_admission_releases_guard_and_spawned_tasks_do_not_inherit_it() {
+        use super::with_session_admission;
+        let session = Uuid::new_v4();
+        let entered = Arc::new(Semaphore::new(0));
+        let owner = tokio::spawn({
+            let entered = entered.clone();
+            async move {
+                with_session_admission(session, async {
+                    entered.add_permits(1);
+                    std::future::pending::<()>().await;
+                })
+                .await
+            }
+        });
+        entered.acquire().await.unwrap().forget();
+        let follower =
+            tokio::spawn(async move { with_session_admission(session, async { 42 }).await });
+        tokio::task::yield_now().await;
+        assert!(!follower.is_finished());
+        owner.abort();
+        let _ = owner.await;
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), follower)
+                .await
+                .unwrap()
+                .unwrap(),
+            42
+        );
+    }
+
+    #[tokio::test]
+    async fn child_task_does_not_inherit_session_admission() {
+        use super::with_session_admission;
+        let session = Uuid::new_v4();
+        let mut child = None;
+        with_session_admission(session, async {
+            let handle =
+                tokio::spawn(async move { with_session_admission(session, async { 7 }).await });
+            tokio::task::yield_now().await;
+            assert!(!handle.is_finished());
+            child = Some(handle);
+        })
+        .await;
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), child.unwrap())
+                .await
+                .unwrap()
+                .unwrap(),
+            7
+        );
+    }
 
     #[tokio::test]
     async fn workspace_restart_gate_rejects_ordinary_execution_starts() {

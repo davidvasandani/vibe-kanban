@@ -135,11 +135,16 @@ comment id, followed by the quoted message. A versioned marker line
   A host that cannot answer shows "delivery status unavailable", never
   "delivered".
 
-## Residual
+## Shared admission
 
-A user's own follow-up submitted at the same instant as a dispatch is not
-serialized with it. This race already exists between any two follow-ups.
+Direct follow-ups and comment dispatch now use the same session admission lock.
+The dispatcher uses `follow_up_now` to require an actual execution receipt;
+a queued response cannot mark a durable delivery started. See
+[agent-process-lifecycle.md](agent-process-lifecycle.md#session-admission-and-finalization)
+for startup, monitor handoff, and worker enforcement.
 
 ## Contributed by
 
 - `vk/e252-deliver-issue-co`
+
+- `vk/0890-investigate-a-fo`

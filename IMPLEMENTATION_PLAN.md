@@ -1,11 +1,9 @@
-# Implementation plan
+# Implementation plan: session execution exclusivity
 
-1. Complete SpecKit constitution, feature specification, clarification, technical plan, tasks, and analysis before code changes. Use this task's feature pointer and Vibe Kanban's constitution; preserve unrelated historical specs.
-2. Extend the encrypted organization credential payload and Settings request/view types with an optional App configuration. Preserve existing PAT payloads. Validate IDs and require a normalized private-key reference.
-3. Add one App JWT/installation token resolver with bounded requests, installation-owner verification, effective-permission health, expiry-aware caching, concurrency control, and secret-safe errors. Reuse the existing 1Password resolver and row-bound storage.
-4. Integrate server credential resolution and health. Preserve existing source attribution and check coverage semantics.
-5. Implement command-time refresh for workspace gh and git, including workers and terminals, using the existing authenticated coordinator/worker execution infrastructure. Do not pass private keys to agents or introduce an unauthenticated token endpoint. Test refresh after expiry and configured failures.
-6. Extend the Settings card for PAT/App selection and staged health, regenerate TypeScript definitions, and add focused component tests.
-7. Document installation, permissions, migration, rotation, and deferred admin bypass.
-8. Run fresh-worktree dependency installation, focused tests, type checks, repository formatting and lint/check commands. Resolve failures and run independent Codex review until significant findings are resolved.
-9. Record reusable knowledge with the task id and commit it. Open a PR, observe checks, and merge when eligible. Report live acceptance separately from automated test results and identify missing App provisioning if any.
+1. Complete SpecKit stages in order, using the current task's feature directory and Vibe Kanban constitution. Carry workspace PRIOR_KNOWLEDGE.md findings into the feature plan.
+2. Trace routes/sessions follow-up and queue admission, MCP run_session_prompt, issue_comment_delivery, ContainerService start_execution and exit-monitor handoffs. Establish a shared admission boundary before async startup and preserve queued message ownership.
+3. Enforce coding execution exclusivity in the DB/server launch path, including initial and automatic turns. Add delayed-start and concurrent request tests with deterministic synchronization.
+4. Guard worker execution admission by session while startup or a child remains alive; retain execution-ID replay idempotency and cleanup semantics. Test refusal and subsequent admission after reaping.
+5. Inspect Claude peer configuration. Disable unsafe native peer messaging if isolation is unsupported; use deterministic workspace/session identity for supported VK attribution. Test permission modes and document identity and same-worktree collision guidance.
+6. Install dependencies, run focused tests and required formatting/checks, resolve failures, and obtain independent Codex diff review until significant findings are cleared.
+7. Update and commit wiki knowledge tagged vk/0890-investigate-a-fo, open a PR against the base branch, observe required checks, and merge. Report any unverified live behavior accurately.

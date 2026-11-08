@@ -11,9 +11,9 @@ use axum::{
 };
 use db::models::{
     coding_agent_turn::CodingAgentTurn,
-    execution_process::{ExecutionProcess, ExecutionProcessRunReason},
+    execution_process::{ExecutionProcess, ExecutionProcessRunReason, FollowUpResult},
     requests::UpdateSession,
-    scratch::{Scratch, ScratchType},
+    scratch::{DraftFollowUpData, Scratch, ScratchType},
     session::{CreateSession, Session, SessionError},
     workspace::{Workspace, WorkspaceCreationStatus, WorkspaceError},
     workspace_repo::WorkspaceRepo,
@@ -26,7 +26,7 @@ use executors::{
     profile::ExecutorConfig,
 };
 use serde::Deserialize;
-use services::services::container::ContainerService;
+use services::services::container::{ContainerError, ContainerService, with_session_admission};
 use ts_rs::TS;
 use utils::response::ApiResponse;
 use uuid::Uuid;
@@ -180,7 +180,32 @@ pub async fn follow_up(
     Extension(session): Extension<Session>,
     State(deployment): State<DeploymentImpl>,
     Json(payload): Json<CreateFollowUpAttempt>,
-) -> Result<ResponseJson<ApiResponse<ExecutionProcess>>, ApiError> {
+) -> Result<ResponseJson<ApiResponse<FollowUpResult>>, ApiError> {
+    with_session_admission(
+        session.id,
+        follow_up_inner(session, deployment, payload, true),
+    )
+    .await
+}
+
+pub async fn follow_up_now(
+    session: Session,
+    deployment: DeploymentImpl,
+    payload: CreateFollowUpAttempt,
+) -> Result<ResponseJson<ApiResponse<FollowUpResult>>, ApiError> {
+    with_session_admission(
+        session.id,
+        follow_up_inner(session, deployment, payload, false),
+    )
+    .await
+}
+
+async fn follow_up_inner(
+    session: Session,
+    deployment: DeploymentImpl,
+    payload: CreateFollowUpAttempt,
+    queue_busy: bool,
+) -> Result<ResponseJson<ApiResponse<FollowUpResult>>, ApiError> {
     let pool = &deployment.db().pool;
 
     // Load workspace from session
@@ -191,11 +216,6 @@ pub async fn follow_up(
         )))?;
 
     tracing::info!("{:?}", workspace);
-
-    deployment
-        .container()
-        .ensure_container_exists(&workspace)
-        .await?;
 
     let executor_profile_id = payload.executor_config.profile_id();
 
@@ -215,6 +235,35 @@ pub async fn follow_up(
             }));
         }
     }
+
+    let running =
+        ExecutionProcess::has_running_non_persistent_for_session(pool, session.id).await?;
+    if running
+        || deployment
+            .container()
+            .session_turn_unsettled(session.id)
+            .await?
+    {
+        if !queue_busy || payload.retry_process_id.is_some() {
+            return Err(ContainerError::SessionBusy(session.id).into());
+        }
+        if !deployment.queued_message_service().queue_message_if_empty(
+            session.id,
+            DraftFollowUpData {
+                message: payload.prompt,
+                executor_config: payload.executor_config,
+            },
+        ) {
+            return Err(ApiError::Conflict("This session already has a queued follow-up. Edit or cancel that queued message before submitting another.".into()));
+        }
+        return Ok(ResponseJson(ApiResponse::success(FollowUpResult::Queued {
+            queued: true,
+        })));
+    }
+    deployment
+        .container()
+        .ensure_container_exists(&workspace)
+        .await?;
 
     if session.executor.is_none() {
         Session::update_executor(pool, session.id, &executor_profile_id.executor.to_string())
@@ -285,7 +334,9 @@ pub async fn follow_up(
         );
     }
 
-    Ok(ResponseJson(ApiResponse::success(execution_process)))
+    Ok(ResponseJson(ApiResponse::success(FollowUpResult::Started(
+        Box::new(execution_process),
+    ))))
 }
 
 pub async fn reset_process(
