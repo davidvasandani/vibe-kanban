@@ -75,7 +75,10 @@ contributed to it.
   test exact ordered catalogs, and keep catalog refreshes separate from managed
   CLI upgrades. Claude upgrades must align the npm launcher, catalog and
   context mapping. Advertise versioned IDs only, and resolve legacy aliases
-  through `model_aliases` read from the pinned binary.
+  through `model_aliases` read from the pinned binary. A CLI bump can move
+  several aliases at once (2.1.322: `fable`/`sonnet`/`haiku` → Fable 5.2,
+  Sonnet 5.5, Haiku 5.5). Diff the whole table, advertise every alias target,
+  and derive effort and 1M support from the binary's capability records.
 - [model-picker-preferences.md](model-picker-preferences.md) — Per-agent
   picker preferences on `ExecutorProfile` (serde, merge, reserved keys).
   Hiding keeps the selection visible. Invalidate `['user-system']` so stale
@@ -121,7 +124,7 @@ contributed to it.
   paths, generated TypeScript types, generic route/UI behavior, focused
   validation, and host-first PATH propagation across local and clustered
   workspace process boundaries.
-- [claude-missing-transcript-fallback.md](claude-missing-transcript-fallback.md) — When Claude's private transcript is gone, a follow-up starts a visible fresh session instead of failing forever with `No conversation found`. Covers the fail-open probe across all `projects/*` folders (vendor scope verified on 2.1.281), resolving from the execution env, the stderr notice channel (IX) and why history is never seeded (`vk/9f5d-no-conversation`).
+- [claude-missing-transcript-fallback.md](claude-missing-transcript-fallback.md) — When Claude's private transcript is gone, a follow-up starts a visible fresh session instead of failing forever with `No conversation found`. Covers the fail-open probe across all `projects/*` folders (vendor scope verified on 2.1.281, re-verified on 2.1.322), resolving from the execution env, the stderr notice channel (IX) and why history is never seeded (`vk/9f5d-no-conversation`).
 - [agent-process-lifecycle.md](agent-process-lifecycle.md) — How a coding-agent
   turn ends at the process level: the one-turn-one-`ExecutionProcess` identity
   chain, the implicit app-server marker (`exit_signal: Some` vs `None`, distinct

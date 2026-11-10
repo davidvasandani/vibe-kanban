@@ -219,7 +219,7 @@ fn base_command(claude_code_router: bool) -> &'static str {
     if claude_code_router {
         "npx -y @musistudio/claude-code-router@1.0.66 code"
     } else {
-        "npx -y @anthropic-ai/claude-code@2.1.281"
+        "npx -y @anthropic-ai/claude-code@2.1.322"
     }
 }
 
@@ -288,7 +288,7 @@ fn project_mcp_suppression_args(
     ])
 }
 
-/// Enforce the verified 2.1.281 receive-side opt-out while preserving profile
+/// Enforce the verified 2.1.322 receive-side opt-out while preserving profile
 /// settings. Keep file contents out of argv and never rewrite user settings.
 fn peer_isolation_settings(
     args: &mut Vec<String>,
@@ -381,7 +381,7 @@ pub const BASH_MAX_TIMEOUT_MS_VAR: &str = "BASH_MAX_TIMEOUT_MS";
 /// # Verification source (Constitution IX)
 ///
 /// Read from the native binary in `@anthropic-ai/claude-code-linux-x64`, the
-/// platform package behind the `@anthropic-ai/claude-code@2.1.281` pin in
+/// platform package behind the `@anthropic-ai/claude-code@2.1.322` pin in
 /// [`base_command`] — not from documentation or a type-definition file:
 ///
 /// ```text
@@ -531,7 +531,8 @@ const SCHEDULE_WAKEUP_MATCHER: &str = "^ScheduleWakeup$";
 ///
 /// Because `@anthropic-ai/claude-code` is a `needs-review` Renovate carve-out,
 /// re-verify these names against the binary when the pin moves. All names were
-/// rechecked in the 2.1.281 native artifact; see `specs/opus-5-5-verification.md`.
+/// rechecked in the 2.1.322 native artifact; see
+/// `specs/vk/7c99-add-new-claude-m/verification.md`.
 ///
 /// **This list is not sufficient on its own.** `TaskOutput` is marked
 /// deprecated in-binary in favour of `Read` on the background task's output
@@ -559,8 +560,9 @@ const BACKGROUND_POLLER_TOOLS: &[&str] = &[
 /// Anchored regex matching exactly the `Bash` tool for PreToolUse hooks. The
 /// hook fires on every `Bash` call; the callback denies only the ones that ask
 /// for a background spawn.
-// Verified in the 2.1.281 native artifact: ListPeers aliases ListAgents;
-// SendMessage is the canonical wire name. See this task's research.md.
+// Verified in the 2.1.322 native artifact: ListPeers aliases ListAgents;
+// SendMessage is the canonical wire name. See
+// `specs/vk/7c99-add-new-claude-m/verification.md`.
 const PEER_TOOLS: &[&str] = &["ListAgents", "ListPeers", "SendMessage"];
 const PEER_MATCHER: &str = "^(ListAgents|ListPeers|SendMessage)$";
 
@@ -824,8 +826,8 @@ fn default_discovered_options() -> crate::executor_discovery::ExecutorDiscovered
     let effort_options =
         ReasoningOption::from_names(["low", "medium", "high", "xhigh", "max"].map(String::from));
 
-    let supports_effort =
-        |id: &str| -> bool { id.contains("opus") || id.contains("sonnet") || id.contains("fable") };
+    // Every current catalog model accepts effort; only Haiku 4.5 predates it.
+    let supports_effort = |id: &str| -> bool { id != "claude-haiku-4-5" };
 
     ExecutorDiscoveredOptions {
         model_selector: ModelSelectorConfig {
@@ -836,8 +838,14 @@ fn default_discovered_options() -> crate::executor_discovery::ExecutorDiscovered
             models: [
                 ("claude-opus-5-5", "Opus 5.5"),
                 ("claude-opus-5", "Opus 5"),
+                ("claude-sonnet-5-5", "Sonnet 5.5"),
                 ("claude-sonnet-5", "Sonnet 5"),
+                ("claude-fable-5-2", "Fable 5.2"),
                 ("claude-fable-5-1", "Fable 5.1"),
+                // Same model as Fable 5.2, for Anthropic-verified organizations
+                // only; other accounts get the API's own access error.
+                ("claude-mythos-5-2", "Mythos 5.2"),
+                ("claude-haiku-5-5", "Haiku 5.5"),
                 ("claude-haiku-4-5", "Haiku 4.5"),
             ]
             .into_iter()
@@ -853,14 +861,15 @@ fn default_discovered_options() -> crate::executor_discovery::ExecutorDiscovered
             })
             .collect(),
             default_model: Some("claude-opus-5-5".to_string()),
-            // What each alias resolves to in the pinned CLI (2.1.281). Saved
+            // What each alias resolves to in the pinned CLI (2.1.322). Saved
             // profiles keep sending the alias; the picker shows the model it runs.
+            // The CLI defines no `mythos` alias.
             model_aliases: [
                 ("opus", "claude-opus-5-5"),
                 ("opus[1m]", "claude-opus-5-5"),
-                ("sonnet", "claude-sonnet-5"),
-                ("fable", "claude-fable-5-1"),
-                ("haiku", "claude-haiku-4-5"),
+                ("sonnet", "claude-sonnet-5-5"),
+                ("fable", "claude-fable-5-2"),
+                ("haiku", "claude-haiku-5-5"),
             ]
             .into_iter()
             .map(|(alias, id)| (alias.to_string(), id.to_string()))
@@ -1408,9 +1417,10 @@ fn claude_config_dir(
 }
 
 /// Look for `<session_id>.jsonl` in every `projects/*` folder. Claude Code
-/// 2.1.281 resolves `--resume <id>` across all project folders, not only the
+/// 2.1.322 resolves `--resume <id>` across all project folders, not only the
 /// cwd's (verified against the pinned binary; see
-/// `specs/vk/9f5d-no-conversation/research.md`). Fails open: anything that
+/// `specs/vk/9f5d-no-conversation/research.md` and
+/// `specs/vk/7c99-add-new-claude-m/verification.md`). Fails open: anything that
 /// prevents a definite answer is `Unknown`.
 fn claude_transcript_status(config_dir: &Path, session_id: &str) -> TranscriptStatus {
     let safe_segment = !session_id.is_empty()
@@ -1493,9 +1503,8 @@ const CLAUDE_1M_CONTEXT_WINDOW: u32 = 1_000_000;
 
 /// Infer a model's max context window from its name or alias.
 ///
-/// Different models have different max contexts. The current Opus, Sonnet, and
-/// Fable aliases and their explicit catalog models have a 1M-token context by
-/// default; older models requesting the 1M-token context beta carry a `[1m]`
+/// Different models have different max contexts. Every current alias and every
+/// explicit catalog model except Haiku 4.5 has a 1M-token context by default; older models requesting the 1M-token context beta carry a `[1m]`
 /// suffix (e.g. `opus[1m]`). We rely on the configured/reported model string
 /// because the end-of-turn usage report is only available once a turn finishes.
 fn context_window_for_model(model: &str) -> u32 {
@@ -1504,10 +1513,15 @@ fn context_window_for_model(model: &str) -> u32 {
         "opus"
             | "sonnet"
             | "fable"
+            | "haiku"
             | "claude-opus-5-5"
             | "claude-opus-5"
+            | "claude-sonnet-5-5"
             | "claude-sonnet-5"
+            | "claude-fable-5-2"
             | "claude-fable-5-1"
+            | "claude-mythos-5-2"
+            | "claude-haiku-5-5"
     ) || model.contains("[1m]")
     {
         CLAUDE_1M_CONTEXT_WINDOW
@@ -4272,8 +4286,8 @@ mod tests {
         assert_eq!(BACKGROUND_BASH_MATCHER, "^Bash$");
         // The pin is meaningful only for the last reverified CLI artifact.
         assert!(
-            base_command(false).contains("@anthropic-ai/claude-code@2.1.281"),
-            "tool names were verified against 2.1.281; re-verify against the binary if this pin moves"
+            base_command(false).contains("@anthropic-ai/claude-code@2.1.322"),
+            "tool names were verified against 2.1.322; re-verify against the binary if this pin moves"
         );
     }
 
@@ -5131,6 +5145,20 @@ mod tests {
         assert_eq!(context_window_for_model("opus"), CLAUDE_1M_CONTEXT_WINDOW);
         assert_eq!(context_window_for_model("sonnet"), CLAUDE_1M_CONTEXT_WINDOW);
         assert_eq!(context_window_for_model("fable"), CLAUDE_1M_CONTEXT_WINDOW);
+        // `haiku` runs Haiku 5.5 (1M) since 2.1.322; Haiku 4.5 stays at 200K.
+        assert_eq!(context_window_for_model("haiku"), CLAUDE_1M_CONTEXT_WINDOW);
+        for id in [
+            "claude-fable-5-2",
+            "claude-mythos-5-2",
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5",
+        ] {
+            assert_eq!(
+                context_window_for_model(id),
+                CLAUDE_1M_CONTEXT_WINDOW,
+                "{id}"
+            );
+        }
         assert_eq!(
             context_window_for_model("claude-opus-4-8"),
             DEFAULT_CLAUDE_CONTEXT_WINDOW
@@ -5212,11 +5240,15 @@ mod tests {
     fn test_claude_discovered_catalog_is_versioned_and_defaults_to_opus_5_5() {
         let options = super::default_discovered_options();
         let efforts = ["low", "medium", "high", "xhigh", "max"];
-        let expected: [(&str, &str, &[&str]); 5] = [
+        let expected: [(&str, &str, &[&str]); 9] = [
             ("claude-opus-5-5", "Opus 5.5", &efforts),
             ("claude-opus-5", "Opus 5", &efforts),
+            ("claude-sonnet-5-5", "Sonnet 5.5", &efforts),
             ("claude-sonnet-5", "Sonnet 5", &efforts),
+            ("claude-fable-5-2", "Fable 5.2", &efforts),
             ("claude-fable-5-1", "Fable 5.1", &efforts),
+            ("claude-mythos-5-2", "Mythos 5.2", &efforts),
+            ("claude-haiku-5-5", "Haiku 5.5", &efforts),
             ("claude-haiku-4-5", "Haiku 4.5", &[]),
         ];
 
@@ -5269,11 +5301,11 @@ mod tests {
         assert_eq!(
             aliases,
             [
-                ("fable", "claude-fable-5-1"),
-                ("haiku", "claude-haiku-4-5"),
+                ("fable", "claude-fable-5-2"),
+                ("haiku", "claude-haiku-5-5"),
                 ("opus", "claude-opus-5-5"),
                 ("opus[1m]", "claude-opus-5-5"),
-                ("sonnet", "claude-sonnet-5"),
+                ("sonnet", "claude-sonnet-5-5"),
             ]
         );
         for (alias, id) in &aliases {
@@ -5287,8 +5319,8 @@ mod tests {
             );
         }
         assert!(
-            base_command(false).contains("@anthropic-ai/claude-code@2.1.281"),
-            "aliases were read from the 2.1.281 binary; re-verify if this pin moves"
+            base_command(false).contains("@anthropic-ai/claude-code@2.1.322"),
+            "aliases were read from the 2.1.322 binary; re-verify if this pin moves"
         );
     }
 
