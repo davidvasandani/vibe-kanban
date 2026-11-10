@@ -303,7 +303,7 @@ VK names Claude processes `vk/<full workspace UUID>/<full session UUID>` through
 `VK_AGENT_NAME`, `--name`, and `CLAUDE_CODE_SESSION_NAME`. Execution IDs, cwd
 basenames, PID counters, and short UUID prefixes are not session identities.
 
-For the pinned Claude Code 2.1.281, VK disables native `ListAgents` / `ListPeers`
+For the pinned Claude Code 2.1.322 (re-verified from 2.1.281), VK disables native `ListAgents` / `ListPeers`
 and `SendMessage` through both CLI exclusions and deny hooks, including bypass
 mode. A private temporary settings file forces `crossSessionInbound=refuse`,
 preserving profile settings without putting their contents on argv. It stays
@@ -331,3 +331,4 @@ message delivery test.
 - vk/80c1-tasks-should-sur
 
 - vk/0890-investigate-a-fo
+- vk/7c99-add-new-claude-m

@@ -19,7 +19,11 @@ carries `name`, `status` and `source` (`user`/`project`), so a failed
 `claude -p --output-format=stream-json --verbose … | grep '"subtype":"init"'`
 from the repo directory.
 
-Claude Code behaviours verified on 2.1.281 (the deployed pin):
+Claude Code behaviours verified on 2.1.281 and re-verified on 2.1.322 (the
+deployed pin), with a throwaway `HOME` and the project servers approved. On
+2.1.322 an **unapproved** project entry stays `Pending approval` and does not
+shadow the user entry, so reproduce with approval on
+(`enableAllProjectMcpServers`):
 
 - A project entry with the **same name** as a user entry *replaces* it, so
   the session silently loses every VK tool.
@@ -152,3 +156,4 @@ opaque 500, so agents act on them instead of reaching for `gh`.
 
 - `vk/53bc-agents-fall-back`
 - `vk/7561-investigate-vibe`
+- `vk/7c99-add-new-claude-m`

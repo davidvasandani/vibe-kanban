@@ -25,7 +25,7 @@ Claude's default 30-day cleanup before homelab raised retention on
 
 ## Gotchas
 
-- **Vendor lookup scope.** Verified against the pinned 2.1.281 binary:
+- **Vendor lookup scope.** Verified against the 2.1.281 binary and re-verified on the 2.1.322 pin:
   `--resume <id>` finds the transcript in *any* `projects/*` folder, not just
   the cwd's slug, and the lookup runs before the auth check. So the probe
   scans every folder and never recomputes the slug. Re-verify on a Claude
@@ -56,3 +56,4 @@ Claude's default 30-day cleanup before homelab raised retention on
 ## Contributed by
 
 - vk/9f5d-no-conversation
+- vk/7c99-add-new-claude-m
