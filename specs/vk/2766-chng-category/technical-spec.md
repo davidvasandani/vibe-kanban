@@ -21,7 +21,7 @@
 
 ### Backend (local server, `crates/`)
 
-- **Migration** `crates/db/migrations/20261108000000_chng_settings.sql`:
+- **Migration** `crates/db/migrations/20261112000000_chng_settings.sql`:
   singleton table `chng_settings` (`id = 1`) with `jira_base_url`,
   `jira_email`, `jql`, `encrypted_jira_token`, `hashmal_mcp_url`,
   `encrypted_hashmal_token`, `updated_at`.

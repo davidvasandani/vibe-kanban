@@ -4,7 +4,7 @@ Builds on `technical-spec.md` and `prior-knowledge.md`.
 
 ## Step 1 — Storage (Rust, `crates/db`)
 
-1. `crates/db/migrations/20261108000000_chng_settings.sql`: singleton
+1. `crates/db/migrations/20261112000000_chng_settings.sql`: singleton
    `chng_settings` table (`id INTEGER PRIMARY KEY CHECK (id = 1)`).
 2. `crates/db/src/models/chng_settings.rs`: `ChngSettingsRow` with a redacting
    `Debug`, `get(pool)` and `upsert(pool, &row)` via runtime `sqlx::query`.

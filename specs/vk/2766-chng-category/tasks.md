@@ -7,7 +7,7 @@ and may run in parallel within their group. Each task names the file(s) it
 changes.
 
 ## Phase 1: Storage
-- [x] T001 [P] Migration `crates/db/migrations/20261108000000_chng_settings.sql`
+- [x] T001 [P] Migration `crates/db/migrations/20261112000000_chng_settings.sql`
 - [x] T002 [P] Row model `crates/db/src/models/chng_settings.rs` + `crates/db/src/models/mod.rs`
 - [x] T003 [P] Host key path `crates/utils/src/assets.rs` (`chng_settings_key_path`)
 
