@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { create, useModal } from '@ebay/nice-modal-react';
 import { SpinnerIcon } from '@phosphor-icons/react';
@@ -104,7 +104,13 @@ const ChngStartSessionDialogImpl = create<ChngStartSessionDialogProps>(
       gcTime: 0,
     });
 
+    // One instance's pending Continue must never complete into a later
+    // instance: dismissing or unmounting aborts it.
+    const continueRequest = useRef<AbortController | null>(null);
+    useEffect(() => () => continueRequest.current?.abort(), []);
+
     const finish = (result: ChngStartSessionResult) => {
+      continueRequest.current?.abort();
       modal.resolve(result);
       // Removed, not just hidden: reopening must ask Hashmal again rather
       // than show the previous lookup.
@@ -115,13 +121,17 @@ const ChngStartSessionDialogImpl = create<ChngStartSessionDialogProps>(
     const handleContinue = async (session: HashmalSession) => {
       setError(null);
       setContinuing(session.session_id);
+      const request = new AbortController();
+      continueRequest.current = request;
       try {
         let transcript = lookup.data?.transcript ?? null;
         if (transcript?.session_id !== session.session_id) {
           const targeted = await chngApi.lookupHashmal(
             ticket.key,
-            session.session_id
+            session.session_id,
+            request.signal
           );
+          if (request.signal.aborted) return;
           if (targeted.state !== 'found') {
             setError(
               targeted.message ?? 'Hashmal could not load that session.'
@@ -134,13 +144,17 @@ const ChngStartSessionDialogImpl = create<ChngStartSessionDialogProps>(
           prompt: buildChngContinuationPrompt(ticket, session, transcript),
         });
       } catch (err) {
+        if (request.signal.aborted) return;
         setError(
           err instanceof Error
             ? `Hashmal could not load that session: ${err.message}`
             : 'Hashmal could not load that session.'
         );
       } finally {
-        setContinuing(null);
+        if (continueRequest.current === request) {
+          continueRequest.current = null;
+          if (!request.signal.aborted) setContinuing(null);
+        }
       }
     };
 
