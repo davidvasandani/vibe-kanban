@@ -49,7 +49,9 @@
         "attachments": "Attachments",
         "attachmentsDesc": "Attachment storage status",
         "slack": "Slack",
-        "slackDesc": "Slack workspace connection"
+        "slackDesc": "Slack workspace connection",
+        "chng": "CHNG",
+        "chngDesc": "Change-ticket search and Hashmal"
       }
     },
     "hostPicker": {

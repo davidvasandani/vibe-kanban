@@ -8,6 +8,7 @@ export type AppDestination =
   | { kind: 'workspace'; workspaceId: string; hostId?: string }
   | { kind: 'workspace-vscode'; workspaceId: string; hostId?: string }
   | { kind: 'export' }
+  | { kind: 'chng' }
   | { kind: 'project'; projectId: string }
   | {
       kind: 'project-issue';
@@ -54,6 +55,8 @@ export interface AppNavigation {
     transition?: NavigationTransition
   ): void;
   goToExport(transition?: NavigationTransition): void;
+  /** Local-only CHNG ticket list; absent on remote navigation. */
+  goToChng?(transition?: NavigationTransition): void;
   goToProject(projectId: string, transition?: NavigationTransition): void;
   goToProjectIssue(
     projectId: string,

@@ -127,6 +127,9 @@ function destinationToRemoteTarget(
       return { to: "/" } as const;
     case "onboarding-sign-in":
       return { to: "/" } as const;
+    // CHNG needs the local server API; the remote app has no CHNG page.
+    case "chng":
+      return { to: "/" } as const;
     case "workspaces":
       if (effectiveHostId) {
         return {

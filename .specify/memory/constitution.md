@@ -1493,3 +1493,17 @@ turn owns its session before asynchronous launch completes. Neither a terminal
 DB status nor an empty queue alone proves its process has been reaped. Peer
 names must not confer authority to message an unrelated workspace. No new
 principle is required.
+
+## Review: vk/2766-chng-category
+
+Applied `/speckit.constitution`. Existing principles govern this feature:
+XLV (the CHNG Jira and Hashmal credentials come from their own Settings
+entry, are sent only to their stored URL, fail closed, and failures name the
+service and credential source), LV (`op://` failures are classified, never
+echoed), XL/XLIII (client reads carry deadlines), XLVI (continuing a Hashmal
+session is a visibly fresh VK session seeded with an attributed transcript
+excerpt, never fabricated vendor history), LVII (transcript text is framed
+as attributed reference content, not instructions) and IV (rail presentation
+in `@vibe/ui`, data and dialogs in web-core). No new principle needed. Use
+Vibe Kanban's constitution and task feature directory; the workspace
+command's homelab prefix is a shared pipeline default.

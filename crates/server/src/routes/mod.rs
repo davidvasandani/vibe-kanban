@@ -14,6 +14,7 @@ pub mod containers;
 pub mod filesystem;
 // pub mod github;
 pub mod attachments;
+pub mod chng;
 pub mod events;
 pub mod execution_processes;
 pub mod frontend;
@@ -72,6 +73,7 @@ pub fn router(
         .merge(filesystem::router())
         .merge(repo::router())
         .merge(github_owner_tokens::router())
+        .merge(chng::router())
         .merge(events::router(&deployment))
         .merge(approvals::router())
         .merge(browser_sessions::router(&deployment))

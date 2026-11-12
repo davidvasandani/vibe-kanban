@@ -1,5 +1,6 @@
 pub mod background_subtask;
 pub mod browser_session;
+pub mod chng_settings;
 pub mod coding_agent_turn;
 pub mod execution_process;
 pub mod execution_process_logs;

@@ -95,6 +95,11 @@ pub fn github_owner_tokens_key_path() -> std::path::PathBuf {
     asset_dir().join("github_owner_tokens_aead_key")
 }
 
+/// Host-local key used to encrypt the Settings → CHNG Jira and Hashmal tokens.
+pub fn chng_settings_key_path() -> std::path::PathBuf {
+    asset_dir().join("chng_settings_aead_key")
+}
+
 /// App-owned directory holding the `gh` routing shim. Derived on the host
 /// that spawns the child; never sent to a cluster worker.
 pub fn github_auth_bin_dir() -> std::path::PathBuf {

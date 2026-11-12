@@ -108,6 +108,8 @@ pub enum ApiError {
     WebRtc(#[from] WebRtcError),
     #[error(transparent)]
     GitHubOwnerToken(#[from] services::services::github_owner_tokens::GitHubOwnerTokenError),
+    #[error(transparent)]
+    Chng(#[from] services::services::chng::ChngError),
 }
 
 impl From<&'static str> for ApiError {
@@ -567,6 +569,7 @@ impl IntoResponse for ApiError {
             ApiError::Pty(_) => ErrorInfo::internal("PtyError"),
 
             ApiError::GitHubOwnerToken(error) => github_owner_token_error(error),
+            ApiError::Chng(error) => chng_error(error),
 
             ApiError::Unauthorized => ErrorInfo::with_status(
                 StatusCode::UNAUTHORIZED,
@@ -776,6 +779,24 @@ fn github_owner_token_error(
             ErrorInfo::with_status(StatusCode::INTERNAL_SERVER_ERROR, TYPE, error.to_string())
         }
         E::Database(_) => ErrorInfo::internal(TYPE),
+    }
+}
+
+fn chng_error(error: &services::services::chng::ChngError) -> ErrorInfo {
+    use services::services::chng::ChngError as E;
+    const TYPE: &str = "ChngError";
+    // Every variant's message is curated and never contains a token value.
+    match error {
+        E::Conflict => ErrorInfo::conflict(TYPE, error.to_string()),
+        E::Database(_) => ErrorInfo::internal(TYPE),
+        E::KeyUnavailable => {
+            ErrorInfo::with_status(StatusCode::INTERNAL_SERVER_ERROR, TYPE, error.to_string())
+        }
+        error if error.is_invalid_input() => ErrorInfo::bad_request(TYPE, error.to_string()),
+        error if error.is_upstream() => {
+            ErrorInfo::with_status(StatusCode::BAD_GATEWAY, TYPE, error.to_string())
+        }
+        _ => ErrorInfo::bad_request(TYPE, error.to_string()),
     }
 }
 

@@ -83,3 +83,26 @@ it('opens global search from an accessible rail control', () => {
   act(() => button!.click());
   expect(open).toHaveBeenCalledOnce();
 });
+
+describe('AppBar CHNG filter', () => {
+  it('shows CHNG under Filters and opens it', () => {
+    const open = vi.fn();
+    renderAppBar({ onChngClick: open, isChngActive: true });
+    expect(container.textContent).toContain('Filters');
+    const button = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="CHNG tickets"]'
+    );
+    expect(button).not.toBeNull();
+    expect(button!.className).toContain('text-brand');
+    act(() => button!.click());
+    expect(open).toHaveBeenCalledOnce();
+  });
+
+  it('hides the Filters section without a CHNG handler', () => {
+    renderAppBar();
+    expect(container.textContent).not.toContain('Filters');
+    expect(
+      container.querySelector('button[aria-label="CHNG tickets"]')
+    ).toBeNull();
+  });
+});

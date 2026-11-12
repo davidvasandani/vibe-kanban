@@ -46,6 +46,8 @@
         "attachmentsDesc": "첨부 파일 저장소 상태",
         "slack": "Slack",
         "slackDesc": "Slack 워크스페이스 연결",
+        "chng": "CHNG",
+        "chngDesc": "Change-ticket search and Hashmal",
         "pipelines": "Pipelines",
         "pipelinesDesc": "Pipeline TOML files and defaults",
         "workers": "클러스터 워커",
