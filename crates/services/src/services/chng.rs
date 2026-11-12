@@ -593,15 +593,23 @@ fn bounded(text: &str, limit: usize) -> String {
     clipped
 }
 
-async fn read_body(response: reqwest::Response) -> Option<Vec<u8>> {
+/// The body, or `None` once it passes `MAX_RESPONSE_BYTES`. Read chunk by
+/// chunk so a response without a Content-Length can't grow past the cap.
+async fn read_body(mut response: reqwest::Response) -> Option<Vec<u8>> {
     if response
         .content_length()
         .is_some_and(|length| length as usize > MAX_RESPONSE_BYTES)
     {
         return None;
     }
-    let bytes = response.bytes().await.ok()?;
-    (bytes.len() <= MAX_RESPONSE_BYTES).then(|| bytes.to_vec())
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.ok()? {
+        if body.len() + chunk.len() > MAX_RESPONSE_BYTES {
+            return None;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Some(body)
 }
 
 // -------------------------------------------------------------------- Jira
