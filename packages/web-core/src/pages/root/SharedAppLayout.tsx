@@ -12,6 +12,7 @@ import {
   LayoutIcon,
   KanbanIcon,
   DownloadSimpleIcon,
+  ClipboardTextIcon,
 } from '@phosphor-icons/react';
 import { SyncErrorProvider } from '@/shared/providers/SyncErrorProvider';
 import { useIsMobile } from '@/shared/hooks/useIsMobile';
@@ -199,6 +200,7 @@ export function SharedAppLayout() {
   );
   const isWorkspacesActive = isLocalWorkspacesDestination(currentDestination);
   const isExportActive = currentDestination?.kind === 'export';
+  const isChngActive = currentDestination?.kind === 'chng';
   // Fork: disabled cloud shutdown banner for self-hosting (set VITE_SHOW_CLOUD_SHUTDOWN_BANNER=1 to re-enable)
   const showCloudShutdownBanner = import.meta.env
     .VITE_SHOW_CLOUD_SHUTDOWN_BANNER
@@ -230,6 +232,12 @@ export function SharedAppLayout() {
 
   const handleExportClick = useCallback(() => {
     appNavigation.goToExport();
+  }, [appNavigation]);
+
+  // CHNG needs the local server; remote navigation has no route for it.
+  const handleChngClick = useMemo(() => {
+    const goToChng = appNavigation.goToChng;
+    return goToChng ? () => goToChng() : undefined;
   }, [appNavigation]);
 
   const handleProjectClick = useCallback(
@@ -391,6 +399,8 @@ export function SharedAppLayout() {
               activeHostId={activeHostId}
               onCreateProject={handleCreateProject}
               onExportClick={handleExportClick}
+              onChngClick={handleChngClick}
+              isChngActive={isChngActive}
               onWorkspacesClick={handleWorkspacesClick}
               onHostClick={handleHostClick}
               onPairHostClick={handlePairHostClick}
@@ -550,6 +560,32 @@ export function SharedAppLayout() {
 
             {/* Divider */}
             <div className="border-t border-border mx-4" />
+
+            {/* Filters */}
+            {handleChngClick && (
+              <>
+                <div className="px-4 py-3">
+                  <p className="mb-2 text-xs font-medium text-low">Filters</p>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      handleChngClick();
+                      setIsDrawerOpen(false);
+                    }}
+                    className={cn(
+                      'flex w-full items-center gap-2 rounded-md px-3 py-2.5 text-sm cursor-pointer',
+                      isChngActive
+                        ? 'bg-brand/10 text-high'
+                        : 'text-normal hover:bg-secondary'
+                    )}
+                  >
+                    <ClipboardTextIcon className="h-4 w-4" />
+                    CHNG tickets
+                  </button>
+                </div>
+                <div className="border-t border-border mx-4" />
+              </>
+            )}
 
             {/* Export link */}
             {isSignedIn && (

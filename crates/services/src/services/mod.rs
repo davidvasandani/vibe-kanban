@@ -4,6 +4,7 @@ pub mod approvals;
 pub mod auth;
 pub mod aws_sso;
 pub mod browser;
+pub mod chng;
 pub mod cli_tools;
 pub mod cluster;
 pub mod config;

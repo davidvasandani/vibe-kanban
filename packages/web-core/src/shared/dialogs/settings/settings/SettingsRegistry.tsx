@@ -14,6 +14,7 @@ import {
   ListChecksIcon,
   HardDrivesIcon,
   BookOpenTextIcon,
+  ClipboardTextIcon,
 } from '@phosphor-icons/react';
 import type { Icon } from '@phosphor-icons/react';
 import { useParams } from '@tanstack/react-router';
@@ -33,6 +34,7 @@ import { SlackSettingsSection } from './SlackSettingsSection';
 import { PipelinesSettingsSection } from './PipelinesSettingsSection';
 import { WorkersSettingsSection } from './WorkersSettingsSection';
 import { SkillsSettingsSection } from './SkillsSettingsSection';
+import { ChngSettingsSection } from './ChngSettingsSection';
 
 export type SettingsSectionType =
   | 'general'
@@ -49,7 +51,8 @@ export type SettingsSectionType =
   | 'relay'
   | 'attachments'
   | 'jira-sync'
-  | 'slack';
+  | 'slack'
+  | 'chng';
 
 export type SettingsSectionGroup = 'host' | 'universal';
 
@@ -71,6 +74,7 @@ export type SettingsSectionInitialState = {
   attachments: undefined;
   'jira-sync': { organizationId?: string; projectId?: string } | undefined;
   slack: { organizationId?: string } | undefined;
+  chng: undefined;
 };
 
 export interface SettingsSectionDefinition {
@@ -89,6 +93,7 @@ export const SETTINGS_SECTION_DEFINITIONS: SettingsSectionDefinition[] = [
   { id: 'auth', icon: KeyIcon, group: 'host' },
   { id: 'pipelines', icon: ListChecksIcon, group: 'host' },
   { id: 'workers', icon: HardDrivesIcon, group: 'host' },
+  { id: 'chng', icon: ClipboardTextIcon, group: 'host' },
   { id: 'organizations', icon: BuildingsIcon, group: 'universal' },
   { id: 'remote-projects', icon: CloudIcon, group: 'universal' },
   { id: 'relay', icon: BroadcastIcon, group: 'universal' },
@@ -179,6 +184,8 @@ export function renderSettingsSection(
           initialState={initialState as SettingsSectionInitialState['slack']}
         />
       );
+    case 'chng':
+      return <ChngSettingsSection />;
     default:
       return <GeneralSettingsSection />;
   }

@@ -1,5 +1,6 @@
 import type { FollowUpResult, ArchiveIntent } from 'shared/types';
 import type { WakeupSummary } from 'shared/types';
+import type { ChngTicketList, HashmalChngLookup } from 'shared/types';
 // Import all necessary types from shared types
 
 import {
@@ -2330,6 +2331,59 @@ export const searchApi = {
       options
     );
     return handleApiResponse<SearchResult[]>(response);
+  },
+};
+
+// Cover the whole server operation so the server's own error wins: a
+// 1Password lookup (up to 30 s), then 15 s per upstream request (Jira reads
+// up to two pages, Hashmal one).
+export const CHNG_TICKETS_DEADLINE_MS = 75_000;
+export const CHNG_HASHMAL_DEADLINE_MS = 50_000;
+
+// A manual controller rather than AbortSignal.any/timeout: older iOS Safari
+// lacks `any` (see useWorkspaces).
+async function chngRequest<T>(
+  url: string,
+  signal: AbortSignal | undefined,
+  ms: number
+): Promise<T> {
+  const controller = new AbortController();
+  const forward = () => controller.abort(signal?.reason);
+  if (signal?.aborted) forward();
+  signal?.addEventListener('abort', forward, { once: true });
+  const timer = setTimeout(
+    () =>
+      controller.abort(new DOMException('Request timed out', 'TimeoutError')),
+    ms
+  );
+  try {
+    const response = await makeRequest(url, {
+      signal: controller.signal,
+      cache: 'no-store',
+    });
+    return await handleApiResponse<T>(response);
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', forward);
+  }
+}
+
+export const chngApi = {
+  listTickets: (signal?: AbortSignal): Promise<ChngTicketList> =>
+    chngRequest('/api/chng/tickets', signal, CHNG_TICKETS_DEADLINE_MS),
+  lookupHashmal: (
+    key: string,
+    sessionId?: string | null,
+    signal?: AbortSignal
+  ): Promise<HashmalChngLookup> => {
+    const query = sessionId
+      ? `?session_id=${encodeURIComponent(sessionId)}`
+      : '';
+    return chngRequest(
+      `/api/chng/tickets/${encodeURIComponent(key)}/hashmal${query}`,
+      signal,
+      CHNG_HASHMAL_DEADLINE_MS
+    );
   },
 };
 

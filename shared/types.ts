@@ -1384,6 +1384,45 @@ export type GitHubOwnerTokenHealth = {
  */
 healthy: boolean, owners: Array<OwnerTokenHealth>, };
 
+export type ChngSettings = { jira_base_url: string, jira_email: string, 
+/**
+ * The saved search; the default when none is saved.
+ */
+jql: string, default_jql: string, has_jira_token: boolean, jira_token_reference?: string, hashmal_mcp_url: string, has_hashmal_token: boolean, hashmal_token_reference?: string, updated_at?: string, };
+
+export type UpdateChngSettingsRequest = { jira_base_url: string, jira_email: string, jql: string, jira_token?: string, hashmal_mcp_url: string, hashmal_token?: string, };
+
+export type ChngTicket = { key: string, summary: string, status: string, 
+/**
+ * Jira's status category key: `new`, `indeterminate` or `done`.
+ */
+status_category: string, priority?: string, created?: string, updated?: string, url: string, };
+
+export type ChngTicketList = { 
+/**
+ * False until a Jira URL, email and token are saved.
+ */
+configured: boolean, jql: string, tickets: Array<ChngTicket>, 
+/**
+ * More tickets matched than one list shows.
+ */
+truncated: boolean, };
+
+export type HashmalLookupState = "not_configured" | "unavailable" | "not_tracked" | "no_sessions" | "found";
+
+export type HashmalSession = { session_id: string, title: string, cwd?: string, last_active?: string, running: boolean, };
+
+export type HashmalTurn = { role: string, text: string, tool?: string, truncated: boolean, };
+
+export type HashmalTranscript = { session_id: string, total_turns: number, turns: Array<HashmalTurn>, };
+
+export type HashmalChngLookup = { state: HashmalLookupState, message?: string, 
+/**
+ * The first session is the best match: Hashmal's manual link when
+ * `manual`, else the most recently active.
+ */
+sessions: Array<HashmalSession>, manual: boolean, transcript?: HashmalTranscript, };
+
 export type OwnerTokenHealth = { app?: AppHealth, owner: string, 
 /**
  * `None` when the stored value cannot be decrypted.

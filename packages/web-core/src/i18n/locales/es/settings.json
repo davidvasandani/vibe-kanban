@@ -46,6 +46,8 @@
         "attachmentsDesc": "Estado del almacenamiento de archivos adjuntos",
         "slack": "Slack",
         "slackDesc": "Conexión del espacio de trabajo de Slack",
+        "chng": "CHNG",
+        "chngDesc": "Change-ticket search and Hashmal",
         "pipelines": "Pipelines",
         "pipelinesDesc": "Pipeline TOML files and defaults",
         "workers": "Trabajadores del clúster",

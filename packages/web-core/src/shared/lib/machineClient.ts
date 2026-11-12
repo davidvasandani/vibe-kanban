@@ -7,6 +7,8 @@ import type {
   AwsSsoSession,
   CliToolId,
   CliToolStatus,
+  ChngSettings,
+  UpdateChngSettingsRequest,
   CreateGitHubOwnerTokenRequest,
   GitHubOwnerToken,
   GitHubOwnerTokenHealth,
@@ -117,6 +119,10 @@ export interface MachineClient {
   disconnectSharedMcp: (connectionId: string) => Promise<boolean>;
   getGitHubOwnerTokenHealth: () => Promise<GitHubOwnerTokenHealth>;
   listGitHubOwnerTokens: () => Promise<GitHubOwnerToken[]>;
+  getChngSettings: () => Promise<ChngSettings>;
+  updateChngSettings: (
+    data: UpdateChngSettingsRequest
+  ) => Promise<ChngSettings>;
   createGitHubOwnerToken: (
     data: CreateGitHubOwnerTokenRequest
   ) => Promise<GitHubOwnerToken>;
@@ -367,6 +373,19 @@ export function createMachineClient(
       handleApiResponse<GitHubOwnerToken[]>(
         await makeMachineRequest(runtime, target, '/api/github-owner-tokens', {
           cache: 'no-store',
+        })
+      ),
+    getChngSettings: async () =>
+      handleApiResponse<ChngSettings>(
+        await makeMachineRequest(runtime, target, '/api/chng/settings', {
+          cache: 'no-store',
+        })
+      ),
+    updateChngSettings: async (data) =>
+      handleApiResponse<ChngSettings>(
+        await makeMachineRequest(runtime, target, '/api/chng/settings', {
+          method: 'PUT',
+          body: JSON.stringify(data),
         })
       ),
     createGitHubOwnerToken: async (data) =>

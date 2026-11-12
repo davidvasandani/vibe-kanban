@@ -15,6 +15,7 @@ import {
   SpinnerIcon,
   GearIcon,
   ListIcon,
+  ClipboardTextIcon,
   type Icon,
 } from '@phosphor-icons/react';
 import { cn } from '../lib/cn';
@@ -45,6 +46,9 @@ interface AppBarProps {
   activeHostId?: string | null;
   onCreateProject: () => void;
   onExportClick?: () => void;
+  /** Opens the CHNG ticket list. The Filters section is hidden without it. */
+  onChngClick?: () => void;
+  isChngActive?: boolean;
   onWorkspacesClick: () => void;
   onHostClick?: (hostId: string, status: AppBarHostStatus) => void;
   showWorkspacesButton?: boolean;
@@ -117,7 +121,7 @@ const appBarItemBaseClassName =
   'flex items-center justify-center w-10 h-10 rounded-lg text-sm font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand';
 
 type AppBarSection = {
-  key: 'local' | 'remote' | 'projects' | 'export';
+  key: 'local' | 'remote' | 'projects' | 'filters' | 'export';
   label: string;
   items: AppBarSectionItem[];
 };
@@ -206,6 +210,8 @@ export function AppBar({
   activeHostId = null,
   onCreateProject,
   onExportClick,
+  onChngClick,
+  isChngActive = false,
   onWorkspacesClick,
   onHostClick,
   showWorkspacesButton = true,
@@ -328,6 +334,23 @@ export function AppBar({
       key: 'projects',
       label: 'Projects',
       items: projectSectionItems,
+    });
+  }
+
+  if (onChngClick) {
+    sections.push({
+      key: 'filters',
+      label: 'Filters',
+      items: [
+        {
+          key: 'chng',
+          kind: 'icon-button',
+          label: 'CHNG tickets',
+          icon: ClipboardTextIcon,
+          isActive: isChngActive,
+          onClick: onChngClick,
+        },
+      ],
     });
   }
 

@@ -44,6 +44,8 @@ function resolveLocalDestinationFromPath(path: string): AppDestination | null {
       return { kind: 'workspaces' };
     case '/_app/export':
       return { kind: 'export' };
+    case '/_app/chng':
+      return { kind: 'chng' };
     case '/_app/hosts/$hostId/workspaces': {
       const hostId = getPathParam(routeParams, 'hostId');
       return hostId ? { kind: 'workspaces', hostId } : null;
@@ -237,6 +239,8 @@ function destinationToLocalTarget(
       } as const;
     case 'export':
       return { to: '/export' } as const;
+    case 'chng':
+      return { to: '/chng' } as const;
     case 'project':
       return {
         to: '/projects/$projectId',
@@ -347,6 +351,7 @@ export function createLocalAppNavigation(): AppNavigation {
     goToWorkspaceVsCode: (workspaceId, transition) =>
       navigateTo({ kind: 'workspace-vscode', workspaceId }, transition),
     goToExport: (transition) => navigateTo({ kind: 'export' }, transition),
+    goToChng: (transition) => navigateTo({ kind: 'chng' }, transition),
     goToProject: (projectId, transition) =>
       navigateTo({ kind: 'project', projectId }, transition),
     goToProjectIssue: (projectId, issueId, transition) =>
