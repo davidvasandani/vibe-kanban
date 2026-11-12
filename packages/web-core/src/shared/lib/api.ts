@@ -2334,10 +2334,11 @@ export const searchApi = {
   },
 };
 
-// Jira and Hashmal answer through the server with a 15 s upstream timeout;
-// these deadlines leave room for that plus a 1Password lookup.
-export const CHNG_TICKETS_DEADLINE_MS = 25_000;
-export const CHNG_HASHMAL_DEADLINE_MS = 25_000;
+// Cover the whole server operation so the server's own error wins: a
+// 1Password lookup (up to 30 s), then 15 s per upstream request (Jira reads
+// up to two pages, Hashmal one).
+export const CHNG_TICKETS_DEADLINE_MS = 75_000;
+export const CHNG_HASHMAL_DEADLINE_MS = 50_000;
 
 // A manual controller rather than AbortSignal.any/timeout: older iOS Safari
 // lacks `any` (see useWorkspaces).

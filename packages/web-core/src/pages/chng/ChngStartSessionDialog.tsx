@@ -106,7 +106,10 @@ const ChngStartSessionDialogImpl = create<ChngStartSessionDialogProps>(
 
     const finish = (result: ChngStartSessionResult) => {
       modal.resolve(result);
+      // Removed, not just hidden: reopening must ask Hashmal again rather
+      // than show the previous lookup.
       modal.hide();
+      modal.remove();
     };
 
     const handleContinue = async (session: HashmalSession) => {
