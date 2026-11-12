@@ -18,6 +18,8 @@ contributed to it.
 
 ## Pages
 
+- [chng-category-and-hashmal.md](chng-category-and-hashmal.md) — CHNG rail item, Settings → CHNG token storage bound to its URL, Hashmal's read-only MCP lookup, and continuing another host's session by seeding the prompt (`vk/2766-chng-category`).
+
 - [issue-workspace-lifecycle.md](issue-workspace-lifecycle.md) — Durable archive intent, explicit-unarchive acknowledgement, protected-workspace retries, and preserving Done during activity (`VAS-892`, `VAS-910`).
 
 - [conversation-entry-aggregation.md](conversation-entry-aggregation.md) — How chat entries collapse into thinking/diff/tool groups, same-name MCP tool runs, never grouping pending approvals, and why to extend `AGGREGATED_GROUP` rather than add a group type (`vk/d068-collapse-matchin`).

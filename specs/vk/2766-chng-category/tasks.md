@@ -32,4 +32,4 @@ changes.
 
 ## Phase 6: Validation
 - [x] T015 Rust tests, `generate-types:check`, `pnpm run check`, `pnpm run lint`, Vitest, `pnpm run format`
-- [ ] T016 [P] Wiki page `wiki/chng-category.md` + `wiki/INDEX.md` (stage 12)
+- [x] T016 [P] Wiki page `wiki/chng-category.md` + `wiki/INDEX.md` (stage 12)
