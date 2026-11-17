@@ -147,6 +147,11 @@ pub struct CreatePreviewLeaseResponse {
     pub lease: PreviewLeaseSummary,
     /// Contains the capability only in this creation response. It is never stored.
     pub url: String,
+    /// The lease origin without a capability. Present only when the deployment
+    /// trusts some source networks; it opens the lease from those networks and
+    /// nowhere else.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direct_url: Option<String>,
     pub vite_host: String,
 }
 
@@ -189,6 +194,10 @@ fn preview_token_digest(token: &str) -> String {
 
 fn valid_preview_port(port: u16) -> bool {
     port >= 1024
+}
+
+fn preview_direct_url(lease_id: Uuid, public_host: &str, trusted_sources: bool) -> Option<String> {
+    trusted_sources.then(|| format!("https://{lease_id}.{public_host}/"))
 }
 
 fn preview_lease_summary(lease: &PreviewLease) -> PreviewLeaseSummary {
@@ -321,6 +330,11 @@ pub async fn create_preview_lease(
                 "https://{}.{}{}#{token}",
                 lease.id, public_host, "/__vk/open"
             ),
+            direct_url: preview_direct_url(
+                lease.id,
+                &public_host,
+                !crate::routes::preview::trusted_source::configured_cidrs().is_empty(),
+            ),
             vite_host: format!(".{public_host}"),
         },
     )))
@@ -336,6 +350,19 @@ mod preview_lease_tests {
         assert!(!valid_preview_port(1023));
         assert!(valid_preview_port(1024));
         assert!(valid_preview_port(u16::MAX));
+    }
+
+    #[test]
+    fn direct_url_is_offered_only_when_sources_are_trusted() {
+        let lease_id = Uuid::new_v4();
+        assert_eq!(
+            preview_direct_url(lease_id, "preview.example.com", true),
+            Some(format!("https://{lease_id}.preview.example.com/"))
+        );
+        assert_eq!(
+            preview_direct_url(lease_id, "preview.example.com", false),
+            None
+        );
     }
 
     #[test]

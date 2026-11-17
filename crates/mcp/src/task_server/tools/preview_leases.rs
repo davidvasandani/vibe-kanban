@@ -38,6 +38,11 @@ struct PreviewLeaseSummary {
 struct CreatePreviewLeaseResponse {
     lease: PreviewLeaseSummary,
     url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        description = "Plain lease URL with no capability. Present only when this deployment trusts some source networks; it opens the lease from those networks only, so give it to a person on such a network and keep using `url` for the remote browser."
+    )]
+    direct_url: Option<String>,
     vite_host: String,
 }
 
@@ -53,7 +58,7 @@ struct StopPreviewLeaseRequest {
 #[tool_router(router = preview_leases_tools_router, vis = "pub")]
 impl McpServer {
     #[tool(
-        description = "Create a four-hour, one-port URL capability that lets the existing remote Firecrawl browser reach a sandbox-local HTTP dev server. Start the server first and bind it to 127.0.0.1. The returned URL is shown only once; stop it when verification finishes."
+        description = "Create a four-hour, one-port URL capability that lets the existing remote Firecrawl browser reach a sandbox-local HTTP dev server. Start the server first and bind it to 127.0.0.1. The returned URL is shown only once; stop it when verification finishes. When the deployment trusts some source networks, the result also has `direct_url`, a plain link that works only from those networks."
     )]
     async fn create_preview_lease(
         &self,

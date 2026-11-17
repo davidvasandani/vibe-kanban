@@ -126,8 +126,12 @@ async fn main() -> Result<(), VibeKanbanError> {
 
     let main_server = axum::serve(main_listener, app_router)
         .with_graceful_shutdown(async move { main_shutdown.cancelled().await });
-    let proxy_server = axum::serve(proxy_listener, proxy_router)
-        .with_graceful_shutdown(async move { proxy_shutdown.cancelled().await });
+    let proxy_server = axum::serve(
+        proxy_listener,
+        // The preview origin admits trusted sources by peer address.
+        proxy_router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move { proxy_shutdown.cancelled().await });
 
     let main_handle = tokio::spawn(async move {
         if let Err(e) = main_server.await {
