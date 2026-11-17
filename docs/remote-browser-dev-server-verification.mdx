@@ -113,11 +113,51 @@ stop the lease.
 | Remote browser tool connection error | `firecrawl-browser` itself is unreachable | Check the existing MCP connection and central browser service; do not install Chromium locally |
 | Vite “host not allowed” page | Vite rejected the lease-specific preview hostname | Add only the returned `vite_host` suffix to `server.allowedHosts` and restart Vite |
 
+## Open a lease from a trusted network
+
+A deployment can name source networks whose requests open a live lease by its
+plain URL, with no capability link. This is for a person looking at an agent's
+running app from a known site. It is off unless the operator sets it.
+
+```bash Coordinator environment
+VK_PREVIEW_TRUSTED_SOURCE_CIDRS=203.0.113.7/32
+```
+
+The value is a comma-separated list of CIDRs or single addresses. An entry that
+does not parse, or a range broader than IPv4 `/24` or IPv6 `/48`, is logged and
+ignored.
+
+When the list is set, `create_preview_lease` also returns `direct_url`
+(`https://<lease-id>.preview.vasandani.dev/`). Give that link to someone on a
+trusted network. Keep using `url` for the remote browser, which is not on one.
+
+| Request from a trusted network | Result |
+|---|---|
+| Live lease | The dev server's content, no cookie needed |
+| Unknown lease ID | `404 Not Found` |
+| Expired or stopped lease | `410 Gone` |
+
+Every other source behaves as before and needs the capability.
+
+Vibe Kanban reads the client address only from Cloudflare's
+`CF-Connecting-IP`, and only on a connection from the tunnel connector on the
+coordinator's loopback interface. It never reads `X-Forwarded-For`. A request
+that reaches the preview listener any other way is untrusted, whatever headers
+it carries.
+
+<Warning>
+On a trusted network the lease ID is the only thing protecting the preview, and
+a lease ID is not a secret: it is part of the hostname. Every device and guest
+behind that network's public address can open any live lease whose ID it knows.
+If the address is assigned by DHCP and the provider reassigns it, the new holder
+is trusted until you update the setting.
+</Warning>
+
 ## Security boundary
 
 Each lease uses its own browser origin, isolating cookies, storage, and service
 workers from every other lease. The public preview origin serves no workspace content without a valid lease
-cookie. Vibe Kanban stores only a SHA-256 digest of the 256-bit capability. Every
+cookie, except to a trusted network when one is configured (see above). Vibe Kanban stores only a SHA-256 digest of the 256-bit capability. Every
 request resolves the lease's fixed workspace, tracked helper execution, worker,
 and port before using the existing signed coordinator-to-worker preview
 transport. Callers cannot supply another target port, hostname, filesystem path,

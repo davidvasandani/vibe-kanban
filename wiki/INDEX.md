@@ -18,6 +18,7 @@ contributed to it.
 
 ## Pages
 
+- [preview-lease-trusted-sources.md](preview-lease-trusted-sources.md) — Opening a public preview lease from a trusted network without the capability: `CF-Connecting-IP` believed only from a loopback tunnel peer, connect info on the preview listener, shared authorization tail, bounded CIDRs, `direct_url`, and the forgery and reverse-proxy caveats (`vk/c5fe-preview-leases-l`).
 - [chng-category-and-hashmal.md](chng-category-and-hashmal.md) — CHNG rail item, Settings → CHNG token storage bound to its URL, Hashmal's read-only MCP lookup, and continuing another host's session by seeding the prompt (`vk/2766-chng-category`).
 
 - [issue-workspace-lifecycle.md](issue-workspace-lifecycle.md) — Durable archive intent, explicit-unarchive acknowledgement, protected-workspace retries, and preserving Done during activity (`VAS-892`, `VAS-910`).

@@ -1,8 +1,10 @@
+use std::net::{IpAddr, SocketAddr};
+
 use axum::{
     Router,
     body::{Body, to_bytes},
     extract::{
-        FromRequestParts, Path, Request, State,
+        ConnectInfo, FromRequestParts, Path, Request, State,
         ws::{WebSocketUpgrade, rejection::WebSocketUpgradeRejection},
     },
     http::{StatusCode, header},
@@ -23,6 +25,8 @@ use sha2::{Digest, Sha256};
 use ws_bridge::{bridge_axum_ws, connect_upstream_ws};
 
 use crate::{DeploymentImpl, middleware::signed_ws::SignedWsUpgrade};
+
+pub mod trusted_source;
 
 pub(super) fn api_router() -> Router<DeploymentImpl> {
     Router::new()
@@ -128,7 +132,13 @@ async fn subdomain_proxy_request(
     request: Request,
 ) -> Response {
     if is_public_preview_request(&request) {
-        return public_preview_request(&deployment, request).await;
+        // Absent when the listener was not served with connect info, which
+        // leaves the request untrusted.
+        let peer = request
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|ConnectInfo(peer)| *peer);
+        return public_preview_request(&deployment, peer, request).await;
     }
     if let Some(metadata) = preview_metadata(&request) {
         return proxy_cluster_preview(&deployment, request, metadata).await;
@@ -274,7 +284,11 @@ if(response.ok){history.replaceState(null,'','/');location.reload()}else{documen
         .unwrap()
 }
 
-async fn public_preview_request(deployment: &DeploymentImpl, request: Request) -> Response {
+async fn public_preview_request(
+    deployment: &DeploymentImpl,
+    peer: Option<SocketAddr>,
+    request: Request,
+) -> Response {
     let Some(host_lease_id) = public_preview_lease_id(&request) else {
         return (StatusCode::NOT_FOUND, "Preview lease origin not found").into_response();
     };
@@ -316,25 +330,20 @@ async fn public_preview_request(deployment: &DeploymentImpl, request: Request) -
             .unwrap();
     }
 
-    let Some(token) = cookie_token(&request) else {
-        return if request.uri().path() == "/" {
-            bootstrap_page()
-        } else {
-            (StatusCode::UNAUTHORIZED, "Preview capability required").into_response()
-        };
+    let trusted =
+        trusted_source::trusted_source(peer, request.headers(), trusted_source::configured_cidrs());
+    let lease = match resolve_public_lease(
+        &deployment.db().pool,
+        host_lease_id,
+        trusted,
+        cookie_token(&request),
+        request.uri().path(),
+    )
+    .await
+    {
+        Ok(lease) => lease,
+        Err(response) => return response,
     };
-    let lease =
-        match PreviewLease::find_by_digest(&deployment.db().pool, &token_digest(token)).await {
-            Ok(Some(lease)) => lease,
-            _ => return (StatusCode::NOT_FOUND, "Preview capability not found").into_response(),
-        };
-    if lease.id != host_lease_id || lease.is_expired(Utc::now()) {
-        return (
-            StatusCode::GONE,
-            "Preview capability expired or was revoked",
-        )
-            .into_response();
-    }
     let Ok(Some(process)) =
         ExecutionProcess::find_by_id(&deployment.db().pool, lease.execution_process_id).await
     else {
@@ -356,6 +365,50 @@ async fn public_preview_request(deployment: &DeploymentImpl, request: Request) -
         Some(lease),
     )
     .await
+}
+
+/// Finds the lease a public request may use.
+///
+/// A trusted source (see [`trusted_source`]) is admitted by the lease ID in the
+/// hostname alone. Every other request needs the capability cookie. Either way
+/// the caller proxies only to what the returned lease binds.
+async fn resolve_public_lease(
+    pool: &sqlx::SqlitePool,
+    host_lease_id: uuid::Uuid,
+    trusted: Option<IpAddr>,
+    cookie: Option<&str>,
+    path: &str,
+) -> Result<PreviewLease, Response> {
+    if let Some(source) = trusted {
+        let lease = match PreviewLease::find_by_id(pool, host_lease_id).await {
+            Ok(Some(lease)) => lease,
+            _ => return Err((StatusCode::NOT_FOUND, "Preview lease not found").into_response()),
+        };
+        if lease.is_expired(Utc::now()) {
+            return Err((StatusCode::GONE, "Preview lease expired or was revoked").into_response());
+        }
+        trusted_source::note_admission(lease.id, source);
+        return Ok(lease);
+    }
+    let Some(token) = cookie else {
+        return Err(if path == "/" {
+            bootstrap_page()
+        } else {
+            (StatusCode::UNAUTHORIZED, "Preview capability required").into_response()
+        });
+    };
+    let lease = match PreviewLease::find_by_digest(pool, &token_digest(token)).await {
+        Ok(Some(lease)) => lease,
+        _ => return Err((StatusCode::NOT_FOUND, "Preview capability not found").into_response()),
+    };
+    if lease.id != host_lease_id || lease.is_expired(Utc::now()) {
+        return Err((
+            StatusCode::GONE,
+            "Preview capability expired or was revoked",
+        )
+            .into_response());
+    }
+    Ok(lease)
 }
 
 struct ClusterPreviewMetadata {
@@ -738,5 +791,131 @@ mod tests {
         let response = bootstrap_page();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    }
+
+    async fn lease_pool() -> sqlx::SqlitePool {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("../db/migrations").run(&pool).await.unwrap();
+        // Leases reference workspaces and executions; those rows are not what
+        // these tests are about. The pool has one connection, so this holds.
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool
+    }
+
+    async fn lease(pool: &sqlx::SqlitePool, token: &str, lifetime_seconds: i64) -> PreviewLease {
+        PreviewLease::create(
+            pool,
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            4173,
+            &token_digest(token),
+            Utc::now() + chrono::Duration::seconds(lifetime_seconds),
+        )
+        .await
+        .unwrap()
+    }
+
+    fn camero() -> Option<IpAddr> {
+        Some("107.193.224.69".parse().unwrap())
+    }
+
+    #[tokio::test]
+    async fn trusted_source_opens_a_live_lease_without_a_cookie() {
+        let pool = lease_pool().await;
+        let live = lease(&pool, "live-token", 60).await;
+        let resolved = resolve_public_lease(&pool, live.id, camero(), None, "/src/main.ts")
+            .await
+            .unwrap();
+        assert_eq!(resolved.id, live.id);
+        assert_eq!(resolved.workspace_id, live.workspace_id);
+        assert_eq!(resolved.execution_process_id, live.execution_process_id);
+        assert_eq!(resolved.target_port, 4173);
+    }
+
+    #[tokio::test]
+    async fn trusted_source_gets_gone_for_expired_and_revoked_leases() {
+        let pool = lease_pool().await;
+        let expired = lease(&pool, "expired-token", -1).await;
+        let response = resolve_public_lease(&pool, expired.id, camero(), None, "/")
+            .await
+            .unwrap_err();
+        assert_eq!(response.status(), StatusCode::GONE);
+
+        let revoked = lease(&pool, "revoked-token", 60).await;
+        PreviewLease::revoke(&pool, revoked.id).await.unwrap();
+        let response = resolve_public_lease(&pool, revoked.id, camero(), None, "/")
+            .await
+            .unwrap_err();
+        assert_eq!(response.status(), StatusCode::GONE);
+    }
+
+    #[tokio::test]
+    async fn trusted_source_gets_not_found_for_an_unknown_lease() {
+        let pool = lease_pool().await;
+        lease(&pool, "other-token", 60).await;
+        let response = resolve_public_lease(&pool, uuid::Uuid::new_v4(), camero(), None, "/")
+            .await
+            .unwrap_err();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn trusted_source_is_bound_to_the_lease_in_the_hostname() {
+        let pool = lease_pool().await;
+        let host = lease(&pool, "host-token", 60).await;
+        let other = lease(&pool, "other-token", 60).await;
+        // A cookie for another lease cannot redirect a trusted request.
+        let resolved = resolve_public_lease(&pool, host.id, camero(), Some("other-token"), "/")
+            .await
+            .unwrap();
+        assert_eq!(resolved.id, host.id);
+        assert_ne!(resolved.id, other.id);
+    }
+
+    #[tokio::test]
+    async fn untrusted_source_still_needs_the_capability() {
+        let pool = lease_pool().await;
+        let live = lease(&pool, "live-token", 60).await;
+
+        let root = resolve_public_lease(&pool, live.id, None, None, "/")
+            .await
+            .unwrap_err();
+        assert_eq!(root.status(), StatusCode::OK);
+        assert_eq!(root.headers()[header::CACHE_CONTROL], "no-store");
+        let body = to_bytes(root.into_body(), 4096).await.unwrap();
+        assert!(body.starts_with(b"<!doctype html><meta charset=\"utf-8\"><title>Opening preview"));
+
+        let asset = resolve_public_lease(&pool, live.id, None, None, "/src/main.ts")
+            .await
+            .unwrap_err();
+        assert_eq!(asset.status(), StatusCode::UNAUTHORIZED);
+
+        let wrong = resolve_public_lease(&pool, live.id, None, Some("guess"), "/")
+            .await
+            .unwrap_err();
+        assert_eq!(wrong.status(), StatusCode::NOT_FOUND);
+
+        let resolved = resolve_public_lease(&pool, live.id, None, Some("live-token"), "/")
+            .await
+            .unwrap();
+        assert_eq!(resolved.id, live.id);
+    }
+
+    #[tokio::test]
+    async fn capability_for_another_lease_is_rejected_for_untrusted_sources() {
+        let pool = lease_pool().await;
+        let host = lease(&pool, "host-token", 60).await;
+        lease(&pool, "other-token", 60).await;
+        let response = resolve_public_lease(&pool, host.id, None, Some("other-token"), "/")
+            .await
+            .unwrap_err();
+        assert_eq!(response.status(), StatusCode::GONE);
     }
 }
