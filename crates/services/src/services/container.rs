@@ -2947,6 +2947,14 @@ pub trait ContainerService {
             run_reason: run_reason.clone(),
         };
 
+        // From the moment the row is visible until dispatch returns, a
+        // dropped caller future would leave it `Running` with no owner. The
+        // guard ends it in that case. It is registered before the insert:
+        // `create` writes the row and then awaits more work, and a stop
+        // arriving in that gap must find the start in flight rather than end a
+        // row that is about to launch.
+        let start_guard =
+            ExecutionStartGuard::register(self.db().pool.clone(), execution_process_id, session.id);
         let execution_process = ExecutionProcess::create(
             &self.db().pool,
             &create_execution_process,
@@ -2954,10 +2962,6 @@ pub trait ContainerService {
             &repo_states,
         )
         .await?;
-        // From here until dispatch returns, a dropped caller future would leave
-        // this row `Running` with no owner. The guard ends it in that case.
-        let start_guard =
-            ExecutionStartGuard::register(self.db().pool.clone(), execution_process.id, session.id);
         if *run_reason != ExecutionProcessRunReason::ArchiveScript {
             self.activate_workspace(workspace.id).await?;
         }
