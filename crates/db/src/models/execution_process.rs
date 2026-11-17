@@ -665,6 +665,42 @@ impl ExecutionProcess {
         Ok(())
     }
 
+    /// Record a terminal status for an execution that never launched.
+    ///
+    /// The write lands only while the row is still `running` and carries no
+    /// launch evidence: no process group id and no worker job. One statement
+    /// checks and writes, so it cannot overwrite a terminal state recorded by
+    /// an exit monitor or worker tracker, and it cannot end a turn that a
+    /// process or worker has picked up in the meantime. Returns whether the
+    /// row changed.
+    pub async fn terminalize_if_unlaunched(
+        pool: &SqlitePool,
+        id: Uuid,
+        status: ExecutionProcessStatus,
+    ) -> Result<bool, sqlx::Error> {
+        if matches!(status, ExecutionProcessStatus::Running) {
+            return Ok(false);
+        }
+        let result = sqlx::query(
+            r#"UPDATE execution_processes
+               SET status = ?, exit_code = NULL, completed_at = ?
+               WHERE id = ?
+                 AND status = 'running'
+                 AND pgid IS NULL
+                 AND NOT EXISTS (
+                     SELECT 1 FROM execution_worker_jobs
+                     WHERE execution_process_id = execution_processes.id
+                 )"#,
+        )
+        .bind(status)
+        .bind(Utc::now())
+        .bind(id)
+        .execute(pool)
+        .await?;
+
+        Ok(result.rows_affected() == 1)
+    }
+
     pub fn executor_action(&self) -> Result<&ExecutorAction, anyhow::Error> {
         match &self.executor_action.0 {
             ExecutorActionField::ExecutorAction(action) => Ok(action),
@@ -1183,5 +1219,138 @@ mod session_exclusivity_tests {
             .execute(&pool)
             .await
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod unlaunched_terminalization_tests {
+    use sqlx::SqlitePool;
+    use uuid::Uuid;
+
+    use super::{ExecutionProcess, ExecutionProcessStatus};
+    use crate::models::execution_worker_job::ExecutionWorkerJob;
+
+    async fn pool() -> SqlitePool {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool
+    }
+
+    async fn insert(pool: &SqlitePool, status: &str, pgid: Option<i64>) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            r#"INSERT INTO execution_processes
+               (id, session_id, run_reason, executor_action, status, pgid,
+                started_at, created_at, updated_at)
+               VALUES (?, ?, 'codingagent', '{}', ?, ?,
+                       datetime('now'), datetime('now'), datetime('now'))"#,
+        )
+        .bind(id)
+        .bind(Uuid::new_v4())
+        .bind(status)
+        .bind(pgid)
+        .execute(pool)
+        .await
+        .unwrap();
+        id
+    }
+
+    async fn status_and_completion(pool: &SqlitePool, id: Uuid) -> (String, bool) {
+        sqlx::query_as::<_, (String, bool)>(
+            "SELECT status, completed_at IS NOT NULL FROM execution_processes WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn ends_a_running_row_that_never_launched() {
+        let pool = pool().await;
+        let id = insert(&pool, "running", None).await;
+
+        let changed =
+            ExecutionProcess::terminalize_if_unlaunched(&pool, id, ExecutionProcessStatus::Killed)
+                .await
+                .unwrap();
+
+        assert!(changed);
+        assert_eq!(
+            status_and_completion(&pool, id).await,
+            ("killed".to_string(), true)
+        );
+    }
+
+    #[tokio::test]
+    async fn leaves_an_already_terminal_row_alone() {
+        let pool = pool().await;
+        let id = insert(&pool, "completed", None).await;
+
+        let changed =
+            ExecutionProcess::terminalize_if_unlaunched(&pool, id, ExecutionProcessStatus::Failed)
+                .await
+                .unwrap();
+
+        assert!(!changed);
+        assert_eq!(status_and_completion(&pool, id).await.0, "completed");
+    }
+
+    #[tokio::test]
+    async fn leaves_a_row_with_a_process_group_running() {
+        let pool = pool().await;
+        let id = insert(&pool, "running", Some(4242)).await;
+
+        let changed =
+            ExecutionProcess::terminalize_if_unlaunched(&pool, id, ExecutionProcessStatus::Killed)
+                .await
+                .unwrap();
+
+        assert!(!changed);
+        assert_eq!(
+            status_and_completion(&pool, id).await,
+            ("running".to_string(), false)
+        );
+    }
+
+    #[tokio::test]
+    async fn leaves_a_row_with_a_worker_job_running() {
+        let pool = pool().await;
+        let id = insert(&pool, "running", None).await;
+        ExecutionWorkerJob::create_pending(&pool, id, Uuid::new_v4(), "digest")
+            .await
+            .unwrap();
+
+        let changed =
+            ExecutionProcess::terminalize_if_unlaunched(&pool, id, ExecutionProcessStatus::Failed)
+                .await
+                .unwrap();
+
+        assert!(!changed);
+        assert_eq!(
+            status_and_completion(&pool, id).await,
+            ("running".to_string(), false)
+        );
+    }
+
+    #[tokio::test]
+    async fn refuses_to_write_a_non_terminal_status() {
+        let pool = pool().await;
+        let id = insert(&pool, "running", None).await;
+
+        let changed =
+            ExecutionProcess::terminalize_if_unlaunched(&pool, id, ExecutionProcessStatus::Running)
+                .await
+                .unwrap();
+
+        assert!(!changed);
     }
 }
