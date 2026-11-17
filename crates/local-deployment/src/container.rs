@@ -1794,6 +1794,9 @@ impl LocalContainerService {
             err @ WorkspaceError::SharedStore { .. } => {
                 ContainerError::SharedStore(err.to_string())
             }
+            err @ WorkspaceError::TargetBranchAsWorkspaceBranch { .. } => {
+                ContainerError::Other(anyhow!(err.to_string()))
+            }
             WorkspaceError::InvalidSharedRoot(path) => {
                 ContainerError::Other(anyhow!("Invalid shared workspace root: {}", path.display()))
             }
@@ -4938,6 +4941,7 @@ impl ContainerService for LocalContainerService {
 
         Self::create_workspace_config_files(&created_workspace.workspace_dir, &repositories)
             .await?;
+        record_base_status(&created_workspace.workspace_dir, &workspace_inputs).await;
 
         Workspace::update_container_ref(
             &self.db.pool,
@@ -6112,11 +6116,18 @@ impl ContainerService for LocalContainerService {
 
         let workspace_root = PathBuf::from(container_ref);
         let repos_with_changes = self.check_repos_for_changes(&workspace_root, &ctx.repos)?;
+        let target_branches: HashMap<Uuid, String> =
+            WorkspaceRepo::find_by_workspace_id(&self.db.pool, ctx.workspace.id)
+                .await?
+                .into_iter()
+                .map(|wr| (wr.repo_id, wr.target_branch))
+                .collect();
         let mut failures = Vec::new();
         for (repo, worktree_path) in repos_with_changes {
-            match self.git().commit(
+            match commit_interrupted_wip_off_target_branch(
+                self.git(),
                 &worktree_path,
-                "WIP: run interrupted by vibe-kanban shutdown",
+                target_branches.get(&repo.id).map(String::as_str),
             ) {
                 Ok(true) => tracing::info!("Committed interrupted WIP in repo '{}'", repo.name),
                 Ok(false) => {
@@ -6456,6 +6467,93 @@ fn assert_worktrees_are_portable(
     )))
 }
 
+const BASE_STATUS_HEADING: &str = "## Workspace base (written by Vibe Kanban)";
+
+/// The workspace-level note that tells an agent which commit each repository
+/// started from and how far `origin/<target>` had moved past it. `None` when no
+/// repository could be measured.
+fn base_status_section(entries: &[(String, git::BaseFreshness)]) -> Option<String> {
+    if entries.is_empty() {
+        return None;
+    }
+    let mut section = format!("\n{BASE_STATUS_HEADING}\n\n");
+    for (repo_name, freshness) in entries {
+        section.push_str(&freshness.describe(repo_name));
+        section.push('\n');
+    }
+    Some(section)
+}
+
+/// Append [`base_status_section`] to the workspace-level `CLAUDE.md` and
+/// `AGENTS.md` (the files agents read first), once. Best-effort: a workspace is
+/// never failed over a note.
+async fn record_base_status(workspace_dir: &Path, inputs: &[RepoWorkspaceInput]) {
+    let git = GitService::new();
+    let mut entries = Vec::new();
+    for input in inputs {
+        let worktree_path = workspace_dir.join(&input.repo.name);
+        match git.base_freshness(&worktree_path, &input.target_branch) {
+            Ok(freshness) => {
+                if freshness.is_stale() {
+                    tracing::warn!(
+                        repo = %input.repo.name,
+                        base = %freshness.base_commit,
+                        behind = ?freshness.commits_behind,
+                        "workspace started from a base that is far behind {}",
+                        freshness.upstream_ref
+                    );
+                }
+                entries.push((input.repo.name.clone(), freshness));
+            }
+            Err(e) => tracing::warn!(
+                "could not measure the base of repo '{}' for the workspace note: {e}",
+                input.repo.name
+            ),
+        }
+    }
+    let Some(section) = base_status_section(&entries) else {
+        return;
+    };
+    for file in ["CLAUDE.md", "AGENTS.md"] {
+        let path = workspace_dir.join(file);
+        let existing = tokio::fs::read_to_string(&path).await.unwrap_or_default();
+        if existing.contains(BASE_STATUS_HEADING) {
+            continue;
+        }
+        if let Err(e) = tokio::fs::write(&path, format!("{existing}{section}")).await {
+            tracing::warn!("could not record the workspace base in {file}: {e}");
+        }
+    }
+}
+
+/// The message of the snapshot commit taken when a run is interrupted.
+const INTERRUPTED_WIP_MESSAGE: &str = "WIP: run interrupted by vibe-kanban shutdown";
+
+/// Snapshot an interrupted run's uncommitted work, but never onto the
+/// repository's target branch. The snapshot belongs on a workspace branch; if
+/// the worktree's HEAD is the target branch the work is left uncommitted in the
+/// working tree (nothing is discarded) and the caller gets an error, instead of
+/// a commit that would be pushed to `origin/<target>` by whoever next syncs it.
+fn commit_interrupted_wip_off_target_branch(
+    git: &GitService,
+    worktree_path: &Path,
+    target_branch: Option<&str>,
+) -> Result<bool, String> {
+    if let Some(target_branch) = target_branch {
+        let current = git
+            .get_current_branch(worktree_path)
+            .map_err(|e| format!("could not read the checked-out branch: {e}"))?;
+        if workspace_manager::is_target_branch(&current, target_branch) {
+            return Err(format!(
+                "refusing to commit the interrupted WIP snapshot onto target branch \
+                 '{current}'; the changes are left uncommitted in the worktree"
+            ));
+        }
+    }
+    git.commit(worktree_path, INTERRUPTED_WIP_MESSAGE)
+        .map_err(|e| e.to_string())
+}
+
 async fn create_cluster_workspace(
     service: &LocalContainerService,
     workspace: &Workspace,
@@ -6536,6 +6634,7 @@ async fn create_cluster_workspace(
             &repositories,
         )
         .await?;
+        record_base_status(&created_workspace.workspace_dir, &workspace_inputs).await;
         let container_ref = created_workspace
             .workspace_dir
             .to_string_lossy()
@@ -7196,5 +7295,126 @@ mod warm_tests {
         if let Some((mut child, _)) = take_live_warm_entry(&reg, &fresh).await {
             let _ = child.kill().await;
         }
+    }
+}
+
+#[cfg(test)]
+mod interrupted_wip_tests {
+    use std::{fs, path::Path, process::Command};
+
+    use git::{BaseFreshness, GitService};
+
+    use super::{
+        BASE_STATUS_HEADING, base_status_section, commit_interrupted_wip_off_target_branch,
+    };
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git should be available on PATH");
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// A repo on `main` with uncommitted work in its worktree.
+    fn dirty_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["init", "--initial-branch=main"]);
+        git(dir.path(), &["config", "user.email", "test@example.com"]);
+        git(dir.path(), &["config", "user.name", "Test"]);
+        fs::write(dir.path().join("tracked.txt"), "base\n").unwrap();
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-m", "base"]);
+        fs::write(dir.path().join("agent-work.txt"), "half done\n").unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_shutdown_wip_commit_never_lands_on_the_target_branch() {
+        let dir = dirty_repo();
+        let before = git(dir.path(), &["rev-parse", "main"]);
+
+        let err =
+            commit_interrupted_wip_off_target_branch(&GitService::new(), dir.path(), Some("main"))
+                .unwrap_err();
+
+        assert!(err.contains("target branch 'main'"), "{err}");
+        assert_eq!(git(dir.path(), &["rev-parse", "main"]), before);
+        // Nothing is discarded: the work is still there, uncommitted.
+        assert!(dir.path().join("agent-work.txt").exists());
+        assert!(git(dir.path(), &["status", "--porcelain"]).contains("agent-work.txt"));
+    }
+
+    #[test]
+    fn the_remote_form_of_the_target_branch_is_also_protected() {
+        let dir = dirty_repo();
+        assert!(
+            commit_interrupted_wip_off_target_branch(
+                &GitService::new(),
+                dir.path(),
+                Some("origin/main"),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_shutdown_wip_commit_lands_on_the_workspace_branch() {
+        let dir = dirty_repo();
+        git(dir.path(), &["checkout", "-b", "vk/1234-work"]);
+        let main_before = git(dir.path(), &["rev-parse", "main"]);
+
+        let committed =
+            commit_interrupted_wip_off_target_branch(&GitService::new(), dir.path(), Some("main"))
+                .unwrap();
+
+        assert!(committed);
+        assert_eq!(git(dir.path(), &["rev-parse", "main"]), main_before);
+        assert_eq!(
+            git(dir.path(), &["log", "-1", "--format=%s", "vk/1234-work"]),
+            "WIP: run interrupted by vibe-kanban shutdown"
+        );
+        assert!(git(dir.path(), &["status", "--porcelain"]).is_empty());
+    }
+
+    #[test]
+    fn the_base_note_names_the_base_and_flags_a_stale_one() {
+        let entries = vec![
+            (
+                "homelab".to_string(),
+                BaseFreshness {
+                    base_commit: "ec5cfb0a1234".into(),
+                    upstream_ref: "origin/main".into(),
+                    commits_behind: Some(1679),
+                },
+            ),
+            (
+                "vibe-kanban".to_string(),
+                BaseFreshness {
+                    base_commit: "3fa02d561234".into(),
+                    upstream_ref: "origin/main".into(),
+                    commits_behind: Some(0),
+                },
+            ),
+        ];
+        let note = base_status_section(&entries).unwrap();
+        assert!(note.contains(BASE_STATUS_HEADING));
+        assert!(
+            note.contains("WARNING homelab: based on ec5cfb0a"),
+            "{note}"
+        );
+        assert!(note.contains("1679 commits behind origin/main"), "{note}");
+        assert!(
+            note.contains("vibe-kanban: based on 3fa02d56, up to date"),
+            "{note}"
+        );
+        assert!(base_status_section(&[]).is_none());
     }
 }

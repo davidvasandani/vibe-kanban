@@ -100,6 +100,49 @@ pub struct HeadInfo {
     pub oid: String,
 }
 
+/// Commits `origin/<target>` may be ahead of a workspace's base before the
+/// workspace is flagged as stale to the agent working in it.
+pub const STALE_BASE_WARN_THRESHOLD: usize = 50;
+
+/// Where a workspace's base stands relative to `origin/<target>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaseFreshness {
+    pub base_commit: String,
+    pub upstream_ref: String,
+    pub commits_behind: Option<usize>,
+}
+
+impl BaseFreshness {
+    pub fn is_stale(&self) -> bool {
+        self.commits_behind
+            .is_some_and(|behind| behind > STALE_BASE_WARN_THRESHOLD)
+    }
+
+    /// One line describing this base for `repo_name`, with a warning when stale.
+    pub fn describe(&self, repo_name: &str) -> String {
+        let short = &self.base_commit[..self.base_commit.len().min(8)];
+        match self.commits_behind {
+            None => format!(
+                "- {repo_name}: based on {short} (no {} to compare with)",
+                self.upstream_ref
+            ),
+            Some(0) => format!(
+                "- {repo_name}: based on {short}, up to date with {}",
+                self.upstream_ref
+            ),
+            Some(behind) if self.is_stale() => format!(
+                "- WARNING {repo_name}: based on {short}, which is {behind} commits behind {}. \
+                 Fetch and rebase onto {} before reading or changing code.",
+                self.upstream_ref, self.upstream_ref
+            ),
+            Some(behind) => format!(
+                "- {repo_name}: based on {short}, {behind} commits behind {}",
+                self.upstream_ref
+            ),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Commit(git2::Oid);
 
@@ -204,10 +247,75 @@ impl GitService {
         base_branch_name: &str,
     ) -> Result<(), GitServiceError> {
         let repo = self.open_repo(repo_path)?;
-        let base_ref = Self::find_branch(&repo, base_branch_name)?.into_reference();
-        let commit = base_ref.peel_to_commit()?;
+        let commit = Self::resolve_base_commit(&repo, base_branch_name)?;
         repo.branch(new_branch_name, &commit, false)?;
         Ok(())
+    }
+
+    /// The commit a new workspace branch should start from for `base_branch_name`.
+    ///
+    /// A bare local name (`main`) resolves to the local head, unless the
+    /// repository's `origin/<name>` remote-tracking ref is strictly ahead of
+    /// it, in which case the remote tip wins. A local base head can fall
+    /// behind and be impossible to fast-forward (for example because a
+    /// worktree has it checked out), and a workspace must never start from
+    /// that stale commit when a fresher one is already fetched. A diverged or
+    /// ahead local head is left alone: it holds commits `origin` lacks.
+    fn resolve_base_commit<'r>(
+        repo: &'r Repository,
+        base_branch_name: &str,
+    ) -> Result<git2::Commit<'r>, GitServiceError> {
+        let base = Self::find_branch(repo, base_branch_name)?;
+        let is_local = base.get().is_branch();
+        let local = base.get().peel_to_commit()?;
+        if !is_local {
+            return Ok(local);
+        }
+        let Ok(remote) =
+            repo.find_branch(&format!("origin/{base_branch_name}"), BranchType::Remote)
+        else {
+            return Ok(local);
+        };
+        let Ok(remote) = remote.get().peel_to_commit() else {
+            return Ok(local);
+        };
+        if remote.id() != local.id() && repo.graph_descendant_of(remote.id(), local.id())? {
+            return Ok(remote);
+        }
+        Ok(local)
+    }
+
+    /// Record which commit a worktree is based on and how far `origin/<target>`
+    /// has moved past it, so a stale base is visible to whoever starts work.
+    ///
+    /// `commits_behind` is `None` when there is no `origin/<target>` to compare
+    /// with (a local-only repository, or a target that is not on origin).
+    pub fn base_freshness(
+        &self,
+        worktree_path: &Path,
+        target_branch: &str,
+    ) -> Result<BaseFreshness, GitServiceError> {
+        let repo = self.open_repo(worktree_path)?;
+        let head = repo.head()?.peel_to_commit()?;
+        let name = target_branch
+            .strip_prefix("origin/")
+            .unwrap_or(target_branch);
+        let upstream_ref = format!("origin/{name}");
+        let commits_behind = match repo.find_branch(&upstream_ref, BranchType::Remote) {
+            Ok(remote) => {
+                let tip = remote.get().peel_to_commit()?;
+                let mut walk = repo.revwalk()?;
+                walk.push(tip.id())?;
+                walk.hide(head.id())?;
+                Some(walk.count())
+            }
+            Err(_) => None,
+        };
+        Ok(BaseFreshness {
+            base_commit: head.id().to_string(),
+            upstream_ref,
+            commits_behind,
+        })
     }
 
     /// Ensure local (repo-scoped) identity exists for CLI commits.
