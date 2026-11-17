@@ -51,6 +51,10 @@ visible to operators.
 - FR-8: A stop that fails MUST be logged at warning level with the turn and
   workspace identifiers.
 - FR-9: A turn ended by FR-1 or FR-3 is never recorded as completed.
+- FR-10: A turn that Stop has ended MUST NOT start afterwards, and Stop
+  MUST NOT end a turn whose launch has already begun.
+- FR-11: If a start is abandoned after its launch began, the turn keeps its
+  current recovery behaviour (FR-6), because an agent may have run.
 
 ## Out of Scope
 - Running turn starts independently of the request that began them.
@@ -73,6 +77,8 @@ visible to operators.
       it after an execution-server job exists leaves the turn untouched.
 - [ ] A turn that is already terminal is unchanged by a late stop or a late
       abandoned-start cleanup.
+- [ ] A start that was stopped while hung does not launch when it resumes.
+- [ ] A start abandoned after its launch began leaves the turn running.
 - [ ] A failed workspace stop writes a warning to the coordinator log.
 - [ ] After deployment, execution `5cc7e118-c02b-4c33-ad7e-6a864fb53ad7` is
       terminal and its session accepts a new turn.

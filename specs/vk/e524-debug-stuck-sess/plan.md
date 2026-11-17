@@ -69,6 +69,27 @@ The swallowed `stop_execution` error is logged at `warn`, not `debug`.
 - `services`: guard disarm, guard drop, guard drop with a worker job,
   registry state, and each `unowned_stop_decision` branch plus the bound.
 
+### Launch boundary (added after Codex review)
+The registry entry carries a phase: `Preparing`, `Launching`, `Stopped`,
+`LaunchInterrupted`. Every transition happens under the map's entry lock.
+
+- The guard is registered **before** `ExecutionProcess::create`, because
+  `create` inserts the row and then awaits more work.
+- `begin_execution_launch(id)` moves `Preparing` to `Launching` and is
+  called in `crates/local-deployment/src/container.rs` immediately before
+  `ExecutionWorkerJob::create_pending` (cluster) and before the warm server
+  is claimed or a process is spawned (local). It returns `false` if a stop
+  already ended the execution, and the start then gives up.
+- `resolve_unowned_stop(id, pgid)` decides and, when it terminalises a
+  preparing start, sets `Stopped` in the same step. A start that is
+  `Launching` answers `StillStarting` whatever its age.
+- A guard dropped while `Launching` sets `LaunchInterrupted` and leaves the
+  row `Running`: a process may have run before its `pgid` was recorded, so
+  boot recovery must still see the row.
+- When dispatch returns `Err` for a start that was stopped before launch,
+  `start_execution_admitted` leaves the stop's status in place instead of
+  overwriting it with `Failed`.
+
 ## Data Model
 No change. No new table, column or migration.
 
@@ -101,9 +122,13 @@ Checked against `.specify/memory/constitution.md` (0.56.2).
 No deviation.
 
 ## Risks & Dependencies
-- A start that hangs past the bound, is stopped, and later resumes will
-  dispatch under a terminal row. There is no preflight timeout today. This
-  residual is accepted and recorded in the knowledge base.
+- A start that hangs past the bound and is stopped can no longer launch:
+  the stop revokes it at the launch boundary. It still holds the session's
+  admission lock until it returns, so a new turn waits behind it (the FR-2
+  exception). A timeout on dispatch preflight would close that and is left
+  as a follow-up.
+- `LaunchInterrupted` entries are never removed. They arise only when a
+  caller is dropped mid-launch, and they are cleared by a restart.
 - `Drop` runs outside a Tokio runtime only at process exit; the guard then
   skips cleanup and boot `cleanup_orphan_executions` covers the row.
 - The live stuck turn clears on the deployment restart, not through this

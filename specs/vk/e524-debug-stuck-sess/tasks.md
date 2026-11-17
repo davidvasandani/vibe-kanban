@@ -41,6 +41,19 @@ are therefore serial.
       `pnpm run lint` and `pnpm run format`; fix anything they report
       (depends on T005, T006, T007)
 
+## Phase 3b: Codex review fixes
+- [x] T010 Add start phases, `begin_execution_launch` and
+      `resolve_unowned_stop`, and keep a stop's status when a stopped start
+      gives up, in `crates/services/src/services/container.rs` (FR-10,
+      FR-11)
+- [x] T011 Call `begin_execution_launch` before `create_pending` and before
+      the warm-server claim and spawn, and use `resolve_unowned_stop`, in
+      `crates/local-deployment/src/container.rs` (FR-10)
+- [x] T012 Register the guard before `ExecutionProcess::create` in
+      `crates/services/src/services/container.rs` (FR-10)
+- [x] T013 Add phase tests in `crates/services/src/services/container.rs`
+      and re-run T008's checks
+
 ## Phase 4: After merge
 - [ ] T009 On the live coordinator, confirm execution
       `5cc7e118-c02b-4c33-ad7e-6a864fb53ad7` is terminal and session
