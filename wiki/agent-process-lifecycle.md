@@ -297,6 +297,72 @@ Execution-ID replay remains idempotent. Under the worker-wide jobs lock, use
 nonblocking child/state lock attempts and treat uncertainty as busy: waiting
 there can freeze unrelated sessions behind a stuck reap.
 
+## Abandoned starts and the launch boundary (`vk/e524-debug-stuck-sess`)
+
+`start_execution_admitted` inserts the execution row as `Running` and then
+awaits `dispatch_execution`, all inside the caller's future. For a UI
+follow-up that future is the HTTP request. Its failure handling only runs
+when dispatch returns `Err`. If the future is dropped, or hangs, between the
+insert and the first launch step, the row stays `Running` with no worker job,
+no child and no `pgid`.
+
+How to recognise it: `running`, `pgid` null, `updated_at == created_at`,
+`GET /api/execution-processes/{id}/worker-job` returns null on a worker-placed
+workspace, the raw log is unreadable, and the worker journal never mentions
+the execution id. The coordinator log shows the follow-up request and nothing
+after it.
+
+Why it could not be stopped: `stop_execution` found no owner and returned
+`Child process not found` without touching the row. That return is deliberate
+for a row that launched (see `docs/knowledge-base/interrupted-worktree-recovery.md`).
+`try_stop`, which is what the UI Stop button calls, swallowed the error at
+`debug` and the route answered 200. So Stop looked like it did nothing, and
+only a coordinator restart (boot orphan cleanup) cleared the session.
+
+What exists now:
+
+- **`ExecutionStartGuard`** (`services/container.rs`) covers the window. It
+  is registered **before** `ExecutionProcess::create`, because `create`
+  inserts the row and then awaits more work. Dropped while the start is still
+  preparing, it marks the row `Failed`.
+- **The start registry has phases**: `Preparing`, `Launching`, `Stopped`,
+  `LaunchInterrupted`. Transitions happen under the map's entry lock, which
+  is what makes stop and launch mutually exclusive.
+- **`begin_execution_launch(id)`** is the launch boundary. Call it
+  immediately before the first step that can make something run:
+  `ExecutionWorkerJob::create_pending` on the cluster path, and before the
+  warm server is claimed or a process spawned on the local path. It returns
+  `false` if a stop already ended the execution. A new launch path must call
+  it too, or a stopped start can launch through that path.
+- **`resolve_unowned_stop(id, pgid)`** decides what a stop does with an
+  ownerless row. Launch evidence (a `pgid`, or an interrupted launch) keeps
+  the row `Running` for boot recovery. A start that is preparing and under
+  `ABANDONED_START_AFTER` (120 s), or that is launching, answers "still
+  starting". Otherwise the row is ended with the requested status, and a
+  preparing start loses its right to launch in the same step.
+- **`ExecutionProcess::terminalize_if_unlaunched`** is the only write these
+  paths use. One statement requires `running`, a null `pgid` and no worker
+  job, so it cannot overwrite a terminal state or end a turn that launched.
+
+Traps found in review (Codex, three rounds):
+
+- "No durable launch evidence yet" is not "cannot launch". The `pgid` is
+  written after the spawn and the worker job after preflight. Any check that
+  reads durable evidence and then writes leaves a gap in which the start can
+  launch. The boundary has to be crossed in memory, before the launch.
+- On the local path a caller can be dropped after the process started and
+  before its `pgid` was recorded. Marking that row failed hides it from boot
+  recovery and its work snapshot. Hence `LaunchInterrupted`: unknown whether
+  anything ran, so preserve.
+- When a stopped start gives up, `start_execution_admitted`'s `Err` branch
+  must not overwrite the stop's status with `Failed`.
+- The guard's cleanup takes no session admission. The abandoned start may
+  still hold it.
+
+Residual: a start that hangs (rather than drops) keeps the session's
+admission lock until it returns, so a new turn waits behind it even after
+Stop has ended the row. Dispatch preflight has no timeout.
+
 ## Claude native peers and stable identity
 
 VK names Claude processes `vk/<full workspace UUID>/<full session UUID>` through
@@ -332,3 +398,4 @@ message delivery test.
 
 - vk/0890-investigate-a-fo
 - vk/7c99-add-new-claude-m
+- vk/e524-debug-stuck-sess

@@ -1,6 +1,6 @@
 # Interrupted worktree recovery and reset safety
 
-Tags: `959a-restart-rewinds`, `0bc4-server-restart-w`
+Tags: `959a-restart-rewinds`, `0bc4-server-restart-w`, `e524-debug-stuck-sess`
 
 ## Lifecycle invariant
 
@@ -44,6 +44,27 @@ attempting capture — not to the shutdown path.
 Corollary for triage: because that backstop exists, a shutdown-side preservation
 gap usually costs nothing visible, which is why it survived review. It still
 matters — the backstop needs a next startup to happen at all.
+
+### The exception: a row that never launched
+
+The rule protects work, so it applies only where work can exist. A `Running`
+row with a null `pgid`, no worker job, and no start in flight never ran
+anything: its start was abandoned between the row insert and dispatch. There
+is nothing to snapshot, and before `e524-debug-stuck-sess` nothing but a
+restart could end it, so the user could neither stop the turn nor send
+another.
+
+`stop_execution` now ends such a row with the requested status. It decides
+through `resolve_unowned_stop` and writes through
+`ExecutionProcess::terminalize_if_unlaunched`, which re-checks the evidence
+in the same statement. Everything else in the ownerless branch is unchanged:
+a row with a `pgid`, or one whose launch was interrupted partway, still
+returns the error and stays `Running`.
+
+Do not widen the exception by reading it as "ownerless rows may be ended".
+The test is launch evidence, and "unknown" counts as launched. See
+`wiki/agent-process-lifecycle.md`, "Abandoned starts and the launch
+boundary".
 
 ## Multi-repository partial failure
 

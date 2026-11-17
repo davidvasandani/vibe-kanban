@@ -5,7 +5,7 @@ use std::{
         Arc, LazyLock, Mutex as StdMutex, Weak,
         atomic::{AtomicBool, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Error as AnyhowError, anyhow};
@@ -104,6 +104,285 @@ pub async fn with_session_admission<F: std::future::Future>(
         .clone();
     let _guard = lock.lock_owned().await;
     ADMITTED_SESSION.scope(session_id, future).await
+}
+
+/// Where an execution's start stands between inserting its row as `Running`
+/// and its dispatch returning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartPhase {
+    /// Lookups, secret resolution, configuration snapshot. Nothing can have run.
+    Preparing,
+    /// The launch boundary was crossed: a worker job is being created or a
+    /// local process is being spawned. From here something may be running even
+    /// though no durable launch evidence is recorded yet.
+    Launching,
+    /// An explicit stop ended the row while the start was still preparing. The
+    /// start must not launch if it ever resumes.
+    Stopped,
+    /// The caller went away mid-launch. Whether a process ran is unknown.
+    LaunchInterrupted,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct StartEntry {
+    since: Instant,
+    phase: StartPhase,
+}
+
+/// One entry per execution whose start has not returned. Entries are owned by
+/// an [`ExecutionStartGuard`]; every phase change happens under the map's entry
+/// lock, which is what makes "stop" and "launch" mutually exclusive.
+static EXECUTION_STARTS: LazyLock<DashMap<Uuid, StartEntry>> = LazyLock::new(DashMap::new);
+
+/// How long a start may sit in preparation before an explicit stop may treat
+/// it as abandoned. That work is database lookups, secret resolution and a
+/// configuration snapshot, which normally take seconds. This is consulted only
+/// when a caller asks to stop the execution; it never ends one on its own.
+pub const ABANDONED_START_AFTER: Duration = Duration::from_secs(120);
+
+/// What the start registry knows about an execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionStartState {
+    /// No start is in flight (it returned, was dropped while preparing, or
+    /// was already stopped).
+    NotStarting,
+    Preparing {
+        age: Duration,
+    },
+    Launching,
+    LaunchInterrupted,
+}
+
+fn start_state_of(entry: Option<&StartEntry>) -> ExecutionStartState {
+    match entry {
+        None => ExecutionStartState::NotStarting,
+        Some(entry) => match entry.phase {
+            StartPhase::Preparing => ExecutionStartState::Preparing {
+                age: entry.since.elapsed(),
+            },
+            StartPhase::Launching => ExecutionStartState::Launching,
+            StartPhase::Stopped => ExecutionStartState::NotStarting,
+            StartPhase::LaunchInterrupted => ExecutionStartState::LaunchInterrupted,
+        },
+    }
+}
+
+pub fn execution_start_state(execution_id: Uuid) -> ExecutionStartState {
+    start_state_of(EXECUTION_STARTS.get(&execution_id).as_deref())
+}
+
+/// What a stop should do with a `Running` execution that has no owner in this
+/// process: no worker job, no child handle and no adopted process group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnownedStopDecision {
+    /// The execution launched, or may have. Leave the row `Running`: the next
+    /// boot's orphan cleanup selects running rows and snapshots their
+    /// uncommitted work, so ending it here would skip that.
+    PreserveForBootRecovery,
+    /// The start is in flight. It will launch or fail by itself.
+    StillStarting,
+    /// The execution never launched and can no longer launch. There is no work
+    /// to preserve and nothing else will ever end the row.
+    Terminalize,
+}
+
+pub fn unowned_stop_decision(pgid: Option<i64>, start: ExecutionStartState) -> UnownedStopDecision {
+    if pgid.is_some() {
+        return UnownedStopDecision::PreserveForBootRecovery;
+    }
+    match start {
+        ExecutionStartState::LaunchInterrupted => UnownedStopDecision::PreserveForBootRecovery,
+        ExecutionStartState::Launching => UnownedStopDecision::StillStarting,
+        ExecutionStartState::Preparing { age } if age < ABANDONED_START_AFTER => {
+            UnownedStopDecision::StillStarting
+        }
+        ExecutionStartState::Preparing { .. } | ExecutionStartState::NotStarting => {
+            UnownedStopDecision::Terminalize
+        }
+    }
+}
+
+/// Decide what a stop does with an unowned execution and, when the answer is
+/// [`UnownedStopDecision::Terminalize`] for a start that is still preparing,
+/// revoke that start's right to launch in the same step. Without the
+/// revocation a start that hung, was stopped, and then resumed would launch a
+/// turn under a row the user had already ended.
+pub fn resolve_unowned_stop(execution_id: Uuid, pgid: Option<i64>) -> UnownedStopDecision {
+    match EXECUTION_STARTS.get_mut(&execution_id) {
+        None => unowned_stop_decision(pgid, ExecutionStartState::NotStarting),
+        Some(mut entry) => {
+            let decision = unowned_stop_decision(pgid, start_state_of(Some(&entry)));
+            if decision == UnownedStopDecision::Terminalize {
+                entry.phase = StartPhase::Stopped;
+            }
+            decision
+        }
+    }
+}
+
+/// Cross the launch boundary. Call this immediately before the first step that
+/// can make something run: creating a worker job or spawning a local process.
+///
+/// Returns `false` when an explicit stop already ended the execution, in which
+/// case the caller must not launch. An execution with no registered start (a
+/// path that does not go through the guarded start) is always allowed.
+#[must_use]
+pub fn begin_execution_launch(execution_id: Uuid) -> bool {
+    match EXECUTION_STARTS.get_mut(&execution_id) {
+        None => true,
+        Some(mut entry) => match entry.phase {
+            StartPhase::Stopped => false,
+            StartPhase::Preparing | StartPhase::Launching | StartPhase::LaunchInterrupted => {
+                entry.phase = StartPhase::Launching;
+                true
+            }
+        },
+    }
+}
+
+/// Mark an execution failed if its start was abandoned before anything
+/// launched. Returns whether the row changed. A row that has a process group or
+/// a worker job is left alone: something may be running it, and that owner (or
+/// cluster reconciliation) is the authority for its outcome.
+async fn fail_abandoned_start(pool: &sqlx::SqlitePool, execution_id: Uuid) -> bool {
+    match ExecutionProcess::terminalize_if_unlaunched(
+        pool,
+        execution_id,
+        ExecutionProcessStatus::Failed,
+    )
+    .await
+    {
+        Ok(changed) => changed,
+        Err(error) => {
+            tracing::error!(
+                %execution_id,
+                "Failed to mark an abandoned execution start as failed: {error}"
+            );
+            false
+        }
+    }
+}
+
+/// How a guarded start ended, as seen when its dispatch returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartOutcome {
+    Returned,
+    /// An explicit stop ended the row before the start could launch. The row's
+    /// outcome belongs to that stop.
+    StoppedBeforeLaunch,
+}
+
+/// Covers the window between inserting an execution row as `Running` and its
+/// dispatch returning. The start runs inside the caller's future (usually an
+/// HTTP request), and nothing else ends the row if that future is dropped in
+/// this window: the row would stay `Running` with no process and no worker job
+/// until the next restart.
+///
+/// Dropped while the start is still preparing, the guard ends the row. Dropped
+/// after the launch boundary, it cannot know whether a process ran, so it
+/// leaves the row for boot recovery and records that the launch was
+/// interrupted.
+struct ExecutionStartGuard {
+    execution_id: Uuid,
+    session_id: Uuid,
+    pool: sqlx::SqlitePool,
+    armed: bool,
+}
+
+impl ExecutionStartGuard {
+    fn register(pool: sqlx::SqlitePool, execution_id: Uuid, session_id: Uuid) -> Self {
+        EXECUTION_STARTS.insert(
+            execution_id,
+            StartEntry {
+                since: Instant::now(),
+                phase: StartPhase::Preparing,
+            },
+        );
+        Self {
+            execution_id,
+            session_id,
+            pool,
+            armed: true,
+        }
+    }
+
+    /// Dispatch returned, successfully or not. The caller owns the outcome.
+    fn disarm(mut self) -> StartOutcome {
+        self.armed = false;
+        match EXECUTION_STARTS.remove(&self.execution_id) {
+            Some((_, entry)) if entry.phase == StartPhase::Stopped => {
+                StartOutcome::StoppedBeforeLaunch
+            }
+            _ => StartOutcome::Returned,
+        }
+    }
+}
+
+impl Drop for ExecutionStartGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // Decide and transition under the entry lock, so a concurrent stop
+        // sees either the old phase or the new one.
+        let abandoned_while_preparing = match EXECUTION_STARTS.entry(self.execution_id) {
+            dashmap::Entry::Vacant(_) => false,
+            dashmap::Entry::Occupied(mut entry) => match entry.get().phase {
+                StartPhase::Preparing => {
+                    entry.remove();
+                    true
+                }
+                StartPhase::Stopped => {
+                    entry.remove();
+                    false
+                }
+                StartPhase::Launching | StartPhase::LaunchInterrupted => {
+                    entry.get_mut().phase = StartPhase::LaunchInterrupted;
+                    false
+                }
+            },
+        };
+        if !abandoned_while_preparing {
+            return;
+        }
+        // No runtime means the process is exiting; boot orphan cleanup covers
+        // the row then.
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let pool = self.pool.clone();
+        let execution_id = self.execution_id;
+        let session_id = self.session_id;
+        // Deliberately takes no session admission: the abandoned start may
+        // still hold it, and this is a single conditional write.
+        runtime.spawn(async move {
+            if !fail_abandoned_start(&pool, execution_id).await {
+                return;
+            }
+            tracing::warn!(
+                %execution_id,
+                %session_id,
+                "Execution start was abandoned before dispatch; marked failed"
+            );
+            #[cfg(not(test))]
+            if let Err(error) = execution_process::append_log_message(
+                session_id,
+                execution_id,
+                &LogMsg::Stderr(
+                    "Failed to start execution: the request was abandoned before the turn \
+                     was dispatched. Nothing ran. Send the message again."
+                        .to_string(),
+                ),
+            )
+            .await
+            {
+                tracing::error!(
+                    %execution_id,
+                    "Failed to write abandoned-start log line: {error}"
+                );
+            }
+        });
+    }
 }
 
 static WORKSPACE_EXECUTION_GATES: LazyLock<DashMap<Uuid, Arc<RwLock<()>>>> =
@@ -1807,7 +2086,10 @@ pub trait ContainerService {
                         self.stop_execution(&process, ExecutionProcessStatus::Killed)
                             .await
                             .unwrap_or_else(|e| {
-                                tracing::debug!(
+                                // The stop route answers 200 regardless, so
+                                // this line is the only trace of a stop that
+                                // did nothing.
+                                tracing::warn!(
                                     "Failed to stop execution process {} for workspace {}: {}",
                                     process.id,
                                     workspace.id,
@@ -2665,6 +2947,14 @@ pub trait ContainerService {
             run_reason: run_reason.clone(),
         };
 
+        // From the moment the row is visible until dispatch returns, a
+        // dropped caller future would leave it `Running` with no owner. The
+        // guard ends it in that case. It is registered before the insert:
+        // `create` writes the row and then awaits more work, and a stop
+        // arriving in that gap must find the start in flight rather than end a
+        // row that is about to launch.
+        let start_guard =
+            ExecutionStartGuard::register(self.db().pool.clone(), execution_process_id, session.id);
         let execution_process = ExecutionProcess::create(
             &self.db().pool,
             &create_execution_process,
@@ -2703,12 +2993,19 @@ pub trait ContainerService {
             .await?;
         }
 
-        if let Err(start_error) = self
+        let dispatch_result = self
             .dispatch_execution(workspace, &execution_process, executor_action)
-            .await
-        {
-            // Mark process as failed
-            if let Err(update_error) = ExecutionProcess::update_completion(
+            .await;
+        let start_outcome = start_guard.disarm();
+        if let Err(start_error) = dispatch_result {
+            // Mark process as failed, unless an explicit stop already ended
+            // it before launch: that stop's outcome stands.
+            if start_outcome == StartOutcome::StoppedBeforeLaunch {
+                tracing::info!(
+                    execution_id = %execution_process.id,
+                    "Execution start gave up: it was stopped before it launched"
+                );
+            } else if let Err(update_error) = ExecutionProcess::update_completion(
                 &self.db().pool,
                 execution_process.id,
                 ExecutionProcessStatus::Failed,
@@ -4097,6 +4394,313 @@ mod log_snapshot_tests {
         assert_eq!(
             snapshot.entries,
             vec![json!({"type": "STDOUT", "content": "partial"})]
+        );
+    }
+}
+
+#[cfg(test)]
+mod abandoned_start_tests {
+    use std::time::Duration;
+
+    use db::models::{
+        execution_process::ExecutionProcessStatus, execution_worker_job::ExecutionWorkerJob,
+    };
+    use sqlx::SqlitePool;
+    use uuid::Uuid;
+
+    use super::{
+        ABANDONED_START_AFTER, EXECUTION_STARTS, ExecutionStartGuard, ExecutionStartState,
+        StartOutcome, UnownedStopDecision, begin_execution_launch, execution_start_state,
+        fail_abandoned_start, resolve_unowned_stop, unowned_stop_decision,
+    };
+
+    /// Age a registered start past the abandonment bound.
+    fn age_past_bound(id: Uuid) {
+        let mut entry = EXECUTION_STARTS.get_mut(&id).unwrap();
+        entry.since = entry
+            .since
+            .checked_sub(ABANDONED_START_AFTER + Duration::from_secs(1))
+            .expect("the monotonic clock is older than the abandonment bound");
+    }
+
+    async fn pool() -> SqlitePool {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("../db/migrations").run(&pool).await.unwrap();
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool
+    }
+
+    async fn insert_running(pool: &SqlitePool, pgid: Option<i64>) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            r#"INSERT INTO execution_processes
+               (id, session_id, run_reason, executor_action, status, pgid,
+                started_at, created_at, updated_at)
+               VALUES (?, ?, 'codingagent', '{}', 'running', ?,
+                       datetime('now'), datetime('now'), datetime('now'))"#,
+        )
+        .bind(id)
+        .bind(Uuid::new_v4())
+        .bind(pgid)
+        .execute(pool)
+        .await
+        .unwrap();
+        id
+    }
+
+    async fn status(pool: &SqlitePool, id: Uuid) -> ExecutionProcessStatus {
+        sqlx::query_scalar("SELECT status FROM execution_processes WHERE id = ?")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// The guard's cleanup runs on a spawned task; wait for it to land.
+    async fn wait_for_status(
+        pool: &SqlitePool,
+        id: Uuid,
+        expected: ExecutionProcessStatus,
+    ) -> ExecutionProcessStatus {
+        let mut current = status(pool, id).await;
+        for _ in 0..200 {
+            if current == expected {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            current = status(pool, id).await;
+        }
+        current
+    }
+
+    #[tokio::test]
+    async fn a_live_guard_reports_the_start_and_disarming_leaves_the_row_running() {
+        let pool = pool().await;
+        let id = insert_running(&pool, None).await;
+        assert_eq!(execution_start_state(id), ExecutionStartState::NotStarting);
+
+        let guard = ExecutionStartGuard::register(pool.clone(), id, Uuid::new_v4());
+        assert!(matches!(
+            execution_start_state(id),
+            ExecutionStartState::Preparing { .. }
+        ));
+
+        assert_eq!(guard.disarm(), StartOutcome::Returned);
+        assert_eq!(execution_start_state(id), ExecutionStartState::NotStarting);
+        // Give a wrongly spawned cleanup time to run before asserting.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(status(&pool, id).await, ExecutionProcessStatus::Running);
+    }
+
+    #[tokio::test]
+    async fn dropping_an_armed_guard_fails_a_row_that_never_launched() {
+        let pool = pool().await;
+        let id = insert_running(&pool, None).await;
+
+        drop(ExecutionStartGuard::register(
+            pool.clone(),
+            id,
+            Uuid::new_v4(),
+        ));
+
+        assert_eq!(execution_start_state(id), ExecutionStartState::NotStarting);
+        assert_eq!(
+            wait_for_status(&pool, id, ExecutionProcessStatus::Failed).await,
+            ExecutionProcessStatus::Failed
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_the_future_that_holds_the_guard_fails_the_row() {
+        let pool = pool().await;
+        let id = insert_running(&pool, None).await;
+
+        // The shape of the incident: the start is parked on an await between
+        // row creation and dispatch when its caller goes away.
+        let start = tokio::spawn({
+            let pool = pool.clone();
+            async move {
+                let _guard = ExecutionStartGuard::register(pool, id, Uuid::new_v4());
+                std::future::pending::<()>().await;
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(status(&pool, id).await, ExecutionProcessStatus::Running);
+
+        start.abort();
+        let _ = start.await;
+
+        assert_eq!(
+            wait_for_status(&pool, id, ExecutionProcessStatus::Failed).await,
+            ExecutionProcessStatus::Failed
+        );
+    }
+
+    #[tokio::test]
+    async fn an_abandoned_start_never_ends_a_turn_that_launched() {
+        let pool = pool().await;
+        let with_process_group = insert_running(&pool, Some(4242)).await;
+        let with_worker_job = insert_running(&pool, None).await;
+        ExecutionWorkerJob::create_pending(&pool, with_worker_job, Uuid::new_v4(), "digest")
+            .await
+            .unwrap();
+
+        assert!(!fail_abandoned_start(&pool, with_process_group).await);
+        assert!(!fail_abandoned_start(&pool, with_worker_job).await);
+
+        assert_eq!(
+            status(&pool, with_process_group).await,
+            ExecutionProcessStatus::Running
+        );
+        assert_eq!(
+            status(&pool, with_worker_job).await,
+            ExecutionProcessStatus::Running
+        );
+    }
+
+    #[tokio::test]
+    async fn a_start_dropped_after_the_launch_boundary_is_preserved_not_failed() {
+        let pool = pool().await;
+        let id = insert_running(&pool, None).await;
+
+        let guard = ExecutionStartGuard::register(pool.clone(), id, Uuid::new_v4());
+        assert!(begin_execution_launch(id));
+        assert_eq!(execution_start_state(id), ExecutionStartState::Launching);
+        // A stop that arrives mid-launch must wait, not end the row.
+        assert_eq!(
+            resolve_unowned_stop(id, None),
+            UnownedStopDecision::StillStarting
+        );
+
+        // The caller goes away after a process may have started but before
+        // its process group id was recorded.
+        drop(guard);
+
+        assert_eq!(
+            execution_start_state(id),
+            ExecutionStartState::LaunchInterrupted
+        );
+        assert_eq!(
+            resolve_unowned_stop(id, None),
+            UnownedStopDecision::PreserveForBootRecovery
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(status(&pool, id).await, ExecutionProcessStatus::Running);
+        EXECUTION_STARTS.remove(&id);
+    }
+
+    #[tokio::test]
+    async fn stopping_a_stale_start_revokes_its_right_to_launch() {
+        let pool = pool().await;
+        let id = insert_running(&pool, None).await;
+        let guard = ExecutionStartGuard::register(pool.clone(), id, Uuid::new_v4());
+
+        // Fresh: the stop is refused and the start may still launch.
+        assert_eq!(
+            resolve_unowned_stop(id, None),
+            UnownedStopDecision::StillStarting
+        );
+
+        age_past_bound(id);
+        assert_eq!(
+            resolve_unowned_stop(id, None),
+            UnownedStopDecision::Terminalize
+        );
+
+        // The hung start resumes and reaches the launch boundary.
+        assert!(!begin_execution_launch(id));
+        // A repeated stop still terminalises (the first write may have failed).
+        assert_eq!(
+            resolve_unowned_stop(id, None),
+            UnownedStopDecision::Terminalize
+        );
+        assert_eq!(guard.disarm(), StartOutcome::StoppedBeforeLaunch);
+        assert_eq!(execution_start_state(id), ExecutionStartState::NotStarting);
+    }
+
+    #[tokio::test]
+    async fn a_start_that_reached_launch_cannot_be_revoked_by_a_late_stop() {
+        let pool = pool().await;
+        let id = insert_running(&pool, None).await;
+        let guard = ExecutionStartGuard::register(pool.clone(), id, Uuid::new_v4());
+        age_past_bound(id);
+
+        assert!(begin_execution_launch(id));
+        assert_eq!(
+            resolve_unowned_stop(id, None),
+            UnownedStopDecision::StillStarting
+        );
+        assert!(begin_execution_launch(id));
+        assert_eq!(guard.disarm(), StartOutcome::Returned);
+    }
+
+    #[test]
+    fn an_execution_without_a_registered_start_may_always_launch() {
+        assert!(begin_execution_launch(Uuid::new_v4()));
+    }
+
+    #[test]
+    fn a_launched_execution_is_preserved_for_boot_recovery() {
+        for start in [
+            ExecutionStartState::NotStarting,
+            ExecutionStartState::Preparing {
+                age: Duration::ZERO,
+            },
+            ExecutionStartState::Preparing {
+                age: ABANDONED_START_AFTER * 2,
+            },
+            ExecutionStartState::Launching,
+            ExecutionStartState::LaunchInterrupted,
+        ] {
+            assert_eq!(
+                unowned_stop_decision(Some(4242), start),
+                UnownedStopDecision::PreserveForBootRecovery
+            );
+        }
+    }
+
+    #[test]
+    fn an_unlaunched_execution_with_no_start_in_flight_is_terminalized() {
+        assert_eq!(
+            unowned_stop_decision(None, ExecutionStartState::NotStarting),
+            UnownedStopDecision::Terminalize
+        );
+    }
+
+    #[test]
+    fn an_interrupted_launch_without_a_process_group_is_still_preserved() {
+        assert_eq!(
+            unowned_stop_decision(None, ExecutionStartState::LaunchInterrupted),
+            UnownedStopDecision::PreserveForBootRecovery
+        );
+        assert_eq!(
+            unowned_stop_decision(None, ExecutionStartState::Launching),
+            UnownedStopDecision::StillStarting
+        );
+    }
+
+    #[test]
+    fn a_recent_start_is_left_alone_and_a_stale_one_is_terminalized() {
+        let just_under = ABANDONED_START_AFTER - Duration::from_millis(1);
+        assert_eq!(
+            unowned_stop_decision(None, ExecutionStartState::Preparing { age: just_under }),
+            UnownedStopDecision::StillStarting
+        );
+        assert_eq!(
+            unowned_stop_decision(
+                None,
+                ExecutionStartState::Preparing {
+                    age: ABANDONED_START_AFTER
+                }
+            ),
+            UnownedStopDecision::Terminalize
         );
     }
 }

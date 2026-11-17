@@ -143,6 +143,10 @@ contributed to it.
   finalization must dispatch queued follow-ups before setting its finalized
   guard. Session admission/finalization, worker live-child exclusion, Claude
   native peer isolation and stable VK identity (`vk/0890-investigate-a-fo`).
+  Abandoned starts: a `Running` row with no worker job, child or `pgid`, how
+  to recognise it, the start guard, the in-memory launch boundary that makes
+  stop and launch exclusive, and why durable evidence alone cannot
+  (`vk/e524-debug-stuck-sess`).
 - [vk-pollers.md](vk-pollers.md) — Replacing each agent CLI's in-turn background
   poller with a VK-owned one: why a poller is deliberately a background helper
   (migration-free `Option<PollerSpec>`, one shared concurrency budget), why

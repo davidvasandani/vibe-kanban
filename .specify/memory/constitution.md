@@ -461,6 +461,15 @@ records a truthful actionable outcome, never infers success from absence and
 never leaves an unbounded pending state. Slow external or filesystem operations
 run outside request cancellation, and no coordination lock is held across them.
 
+A durable non-terminal state written before its owner exists (an execution row
+inserted as `running` ahead of dispatch) is covered too. If the creating
+request is abandoned before an owner takes the work, that state MUST be made
+terminal by the code that wrote it, not left for the next restart. An explicit
+user stop of a state with no launch evidence (no process group, no worker job)
+MUST record a terminal outcome. It must not fail silently or report success
+while the state stays `running`. A state that does have launch evidence keeps
+its existing recovery path, so preserved work is never skipped.
+
 ### XXIX. Settings-owned MCP materialization is executor-neutral and isolated
 Every MCP-capable remote execution receives the selected profile's complete,
 latest settings-owned MCP map, regardless of executor. The worker materializes
@@ -957,7 +966,10 @@ naming the branch, the repository, and both commits, per Principle XXI.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.56.1 (refines LIX: a local branch already resolving in a
+**Version**: 0.56.2 (refines XXVIII: a non-terminal state written before its
+owner exists must be made terminal by its writer when the creating request is
+abandoned, and an explicit stop of a state with no launch evidence must record
+a terminal outcome instead of failing silently); 0.56.1 (refined LIX: a local branch already resolving in a
 shared cluster store must still be checked against the remote and
 fast-forwarded when behind before being served as a new workspace's base,
 and workspace creation must fail rather than silently branch from a base
@@ -1507,3 +1519,22 @@ as attributed reference content, not instructions) and IV (rail presentation
 in `@vibe/ui`, data and dialogs in web-core). No new principle needed. Use
 Vibe Kanban's constitution and task feature directory; the workspace
 command's homelab prefix is a shared pipeline default.
+
+## Review: vk/e524-debug-stuck-sess
+
+Applied `/speckit.constitution`: refined XXVIII (0.56.2). A UI follow-up
+inserted a `running` execution row and its request was abandoned before
+dispatch, so the row had no worker job, no process and no log. Stop then
+failed without changing it, and the workspace stop route hid that failure
+and answered 200. XXVIII already required accepted work to outlive its
+request, but did not say who terminalises a state whose owner never
+appeared, or what an explicit stop owes the user in that case. Also
+governing: II (tests assert the stop outcome and the abandoned-start
+outcome), III/VI (a drop guard and one new branch in the existing stop
+path, not a sweeper or a new job framework), XI (a failed stop is logged at
+`warn`), XV (a launched row keeps its boot-time work preservation), XVIII
+and LVI (a row with a worker job is never terminalised from the
+coordinator; the age bound applies only to a start that was never
+dispatched and only on an explicit stop). Use Vibe Kanban's constitution
+and task feature directory; the workspace command's homelab prefix is a
+shared pipeline default.

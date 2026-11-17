@@ -69,7 +69,10 @@ use services::services::{
         dispatch_liveness,
     },
     config::{Config, DEFAULT_COMMIT_REMINDER_PROMPT},
-    container::{ContainerError, ContainerRef, ContainerService},
+    container::{
+        ContainerError, ContainerRef, ContainerService, UnownedStopDecision,
+        begin_execution_launch, resolve_unowned_stop,
+    },
     diff_stream::{self, DiffStreamHandle},
     error_remediation::ErrorRemediationEvent,
     file::FileService,
@@ -1087,6 +1090,12 @@ fn classify_worker_structured(json: &str) -> WorkerStructuredEvent {
         }
         _ => WorkerStructuredEvent::Diagnostic(format!("Unrecognized worker event: {json}")),
     }
+}
+
+fn stopped_before_launch_error() -> ContainerError {
+    ContainerError::Other(anyhow!(
+        "Execution was stopped before it launched; nothing ran"
+    ))
 }
 
 async fn mark_remote_execution_indeterminate(
@@ -5259,6 +5268,12 @@ impl ContainerService for LocalContainerService {
             request_digest: request_digest.clone(),
         };
 
+        // Launch boundary: from the worker-job record onwards a worker may run
+        // this turn. Refuse if an explicit stop ended the execution while its
+        // preflight above was still in flight.
+        if !begin_execution_launch(execution_process.id) {
+            return Err(stopped_before_launch_error());
+        }
         ExecutionWorkerJob::create_pending(
             &self.db.pool,
             execution_process.id,
@@ -5626,6 +5641,14 @@ impl ContainerService for LocalContainerService {
         #[cfg(not(unix))]
         let dev_server_raw_log: Option<PathBuf> = None;
 
+        // Launch boundary: everything below claims a warm server or spawns a
+        // process. Refuse if an explicit stop ended the execution while it was
+        // still preparing. Checked before the warm server is taken out of its
+        // registry, so a refusal leaves that server parked.
+        if !begin_execution_launch(execution_process.id) {
+            return Err(stopped_before_launch_error());
+        }
+
         // Phase 2 warm reuse: when the gate is on and this is an OpenCode
         // follow-up whose session has a *live* warm server parked, drive the turn
         // against that server instead of spawning a new process. A miss or a
@@ -5918,8 +5941,67 @@ impl ContainerService for LocalContainerService {
                     .stop_adopted_execution(execution_process, status, pgid)
                     .await;
             }
-            // Deliberately returns before `update_completion`, leaving the row
-            // `Running`. That is load-bearing, not an oversight: the next boot's
+            // No owner at all. What happens next depends on whether the
+            // execution ever launched; re-read the row, because the caller's
+            // copy may predate the spawn that records the process group.
+            let pgid = match ExecutionProcess::find_by_id(&self.db.pool, execution_process.id).await
+            {
+                Ok(Some(current)) => current.pgid,
+                Ok(None) => execution_process.pgid,
+                Err(error) => {
+                    tracing::warn!(
+                        execution_id = %execution_process.id,
+                        "Could not re-read execution before stopping it: {error}"
+                    );
+                    // Unknown evidence: assume it launched and preserve it.
+                    Some(0)
+                }
+            };
+            match resolve_unowned_stop(execution_process.id, pgid) {
+                UnownedStopDecision::StillStarting => {
+                    return Err(ContainerError::Other(anyhow!(
+                        "Execution is still starting; try stopping it again shortly"
+                    )));
+                }
+                UnownedStopDecision::Terminalize => {
+                    // The row was inserted as `Running` and its start was
+                    // abandoned before any process or worker job existed, so
+                    // there is no work to preserve and no other path that
+                    // would ever end it. The write re-checks that evidence.
+                    if ExecutionProcess::terminalize_if_unlaunched(
+                        &self.db.pool,
+                        execution_process.id,
+                        status.clone(),
+                    )
+                    .await?
+                    {
+                        tracing::warn!(
+                            execution_id = %execution_process.id,
+                            session_id = %execution_process.session_id,
+                            ?status,
+                            "Stopped an execution that was never dispatched"
+                        );
+                        self.finish_msg_store(&execution_process.id).await;
+                        return Ok(());
+                    }
+                    // Nothing changed. Either another path already ended the
+                    // row, or launch evidence appeared after the read above.
+                    let still_running =
+                        ExecutionProcess::find_by_id(&self.db.pool, execution_process.id)
+                            .await?
+                            .is_some_and(|current| {
+                                current.status == ExecutionProcessStatus::Running
+                            });
+                    if !still_running {
+                        self.finish_msg_store(&execution_process.id).await;
+                        return Ok(());
+                    }
+                }
+                UnownedStopDecision::PreserveForBootRecovery => {}
+            }
+            // The execution launched but its child is gone. Deliberately
+            // returns before `update_completion`, leaving the row `Running`.
+            // That is load-bearing, not an oversight: the next boot's
             // `cleanup_orphan_executions` selects rows via `find_running` and
             // unconditionally snapshots their uncommitted work. Marking the row
             // terminal here would hide it from that sweep and remove the last
