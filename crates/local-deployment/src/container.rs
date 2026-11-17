@@ -70,8 +70,8 @@ use services::services::{
     },
     config::{Config, DEFAULT_COMMIT_REMINDER_PROMPT},
     container::{
-        ContainerError, ContainerRef, ContainerService, UnownedStopDecision, execution_start_state,
-        unowned_stop_decision,
+        ContainerError, ContainerRef, ContainerService, UnownedStopDecision,
+        begin_execution_launch, resolve_unowned_stop,
     },
     diff_stream::{self, DiffStreamHandle},
     error_remediation::ErrorRemediationEvent,
@@ -1090,6 +1090,12 @@ fn classify_worker_structured(json: &str) -> WorkerStructuredEvent {
         }
         _ => WorkerStructuredEvent::Diagnostic(format!("Unrecognized worker event: {json}")),
     }
+}
+
+fn stopped_before_launch_error() -> ContainerError {
+    ContainerError::Other(anyhow!(
+        "Execution was stopped before it launched; nothing ran"
+    ))
 }
 
 async fn mark_remote_execution_indeterminate(
@@ -5262,6 +5268,12 @@ impl ContainerService for LocalContainerService {
             request_digest: request_digest.clone(),
         };
 
+        // Launch boundary: from the worker-job record onwards a worker may run
+        // this turn. Refuse if an explicit stop ended the execution while its
+        // preflight above was still in flight.
+        if !begin_execution_launch(execution_process.id) {
+            return Err(stopped_before_launch_error());
+        }
         ExecutionWorkerJob::create_pending(
             &self.db.pool,
             execution_process.id,
@@ -5629,6 +5641,14 @@ impl ContainerService for LocalContainerService {
         #[cfg(not(unix))]
         let dev_server_raw_log: Option<PathBuf> = None;
 
+        // Launch boundary: everything below claims a warm server or spawns a
+        // process. Refuse if an explicit stop ended the execution while it was
+        // still preparing. Checked before the warm server is taken out of its
+        // registry, so a refusal leaves that server parked.
+        if !begin_execution_launch(execution_process.id) {
+            return Err(stopped_before_launch_error());
+        }
+
         // Phase 2 warm reuse: when the gate is on and this is an OpenCode
         // follow-up whose session has a *live* warm server parked, drive the turn
         // against that server instead of spawning a new process. A miss or a
@@ -5937,7 +5957,7 @@ impl ContainerService for LocalContainerService {
                     Some(0)
                 }
             };
-            match unowned_stop_decision(pgid, execution_start_state(execution_process.id)) {
+            match resolve_unowned_stop(execution_process.id, pgid) {
                 UnownedStopDecision::StillStarting => {
                     return Err(ContainerError::Other(anyhow!(
                         "Execution is still starting; try stopping it again shortly"
