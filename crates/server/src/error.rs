@@ -160,6 +160,9 @@ impl From<WorkspaceManagerError> for ApiError {
             WorkspaceManagerError::WorktreeNotPortable { repo_name, detail } => ApiError::Conflict(
                 format!("Repository '{repo_name}' has a worktree other nodes cannot use: {detail}"),
             ),
+            err @ WorkspaceManagerError::TargetBranchAsWorkspaceBranch { .. } => {
+                ApiError::BadRequest(err.to_string())
+            }
             WorkspaceManagerError::InvalidSharedRoot(path) => {
                 ApiError::BadRequest(format!("Invalid shared workspace root: {}", path.display()))
             }
