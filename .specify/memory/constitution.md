@@ -1538,3 +1538,10 @@ coordinator; the age bound applies only to a start that was never
 dispatched and only on an explicit stop). Use Vibe Kanban's constitution
 and task feature directory; the workspace command's homelab prefix is a
 shared pipeline default.
+
+## Review: vk/723d-don-t-run-auto-f
+
+Applied `/speckit.constitution`. II, III, VI, IX and XLI govern this fix:
+classify explicit credit/usage failure evidence in the existing consumer before
+reserving capacity or performing remediation side effects; preserve diagnostic
+text and ordinary failure behavior. No new principle is required.

@@ -30,6 +30,31 @@ receiver is lost. The consumer must subscribe immediately after
 (`resume_interrupted_on_startup`); otherwise an early resumed failure is
 dropped. This was Codex review round 1.
 
+## Credit and usage failures are not code remediation
+
+The server consumer reads the failed execution's normalized entries **before**
+reserving a guard slot. Explicit exhausted-credit, quota, usage-limit and
+rate-limit errors return without creating an issue, recording a recurrence,
+starting a workspace, or consuming either remediation allowance.
+
+`has_credit_or_usage_error` examines full `ErrorMessage` content. Never classify
+from `extract_error_messages`: its five-message/2000-character bounds are for
+issue presentation and can hide the relevant error. Do not match bare words
+like `usage`, `quota`, `limit`, or HTTP 429, and do not scan ordinary assistant,
+user or system messages. Known phrases and provider codes are matched
+case-insensitively; new provider wording needs a regression fixture. Empty or
+unavailable evidence retains existing remediation behavior.
+
+**Normalizer gotcha:** Claude can first display an allowance error as assistant
+text. Its terminal `Result` with `is_error` must also become an `ErrorMessage`
+for both Claude and Amp, preserving `result`, `error`, and the `errors` array.
+Previously only Amp emitted this evidence, so a classifier tested solely with
+handmade error entries looked correct while Claude could still start auto-fix.
+The regression test now runs actual result events through `ClaudeLogProcessor`
+and the admission classifier, including successful prose mentioning credits.
+
+Contributed by `vk/723d-don-t-run-auto-f`.
+
 ## Guards: reserve before I/O, fail closed
 
 `ErrorRemediationGuard::try_reserve` makes its decision and claims the slot
