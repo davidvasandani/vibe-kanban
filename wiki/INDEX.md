@@ -337,6 +337,9 @@ contributed to it.
   guaranteed explicitly. `updateDraft`'s lodash merge cannot shrink arrays.
   Active similar issues are reused through a one-snapshot, fail-closed lookup
   with every id form normalized to one placeholder (`vk/7e4f-auto-error-remed`).
+  Credit/usage errors are excluded before reservation and remote side effects;
+  classify full error evidence and preserve Claude failed-result diagnostics
+  (`vk/723d-don-t-run-auto-f`).
 - [coordinator-nfs-load.md](coordinator-nfs-load.md) — Diagnosing coordinator
   load from NFS waits (io PSI and `procs_blocked` miss it, so count D-state
   threads). Root cause was per-client summaries git sweeps. Bulk worktree scans
