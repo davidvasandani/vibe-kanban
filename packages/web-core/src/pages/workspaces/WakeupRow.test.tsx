@@ -27,6 +27,8 @@ function summary(
       poller_id: pollerId,
       trigger_context: null,
       created_at: '2026-10-24T12:00:00Z',
+      capacity_retry_of: null,
+      capacity_attempt: null,
     },
     delivery: {
       state,
@@ -74,6 +76,17 @@ describe('wake-up rows', () => {
     ).toBe(summary().wakeup.prompt);
     act(() => vi.advanceTimersByTime(1000));
     expect(host.textContent).toContain('0h 0m 59s remaining');
+  });
+  it('labels an automatic capacity retry with its attempt', () => {
+    const value = summary();
+    value.wakeup.capacity_retry_of = 'failed-turn';
+    value.wakeup.capacity_attempt = 3;
+    render(value);
+    expect(host.textContent).toContain('Capacity retry (attempt 3)');
+    expect(host.textContent).not.toContain('Scheduled wake-up');
+    // Still a clock timer the operator can cancel.
+    expect(host.textContent).toContain('0h 1m 0s remaining');
+    expect(host.querySelector('button')?.textContent).toBe('Cancel');
   });
   it('distinguishes completion conditions from clock timers', () => {
     render(summary('pending', 'poller'));

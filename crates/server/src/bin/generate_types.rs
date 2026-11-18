@@ -342,6 +342,7 @@ fn generate_types_content() -> String {
         services::services::config::ShowcaseState::decl(),
         services::services::config::SendMessageShortcut::decl(),
         services::services::config::AutoErrorRemediationConfig::decl(),
+        services::services::config::CapacityBackoffConfig::decl(),
         services::services::config::NewIssuePipelineDefaults::decl(),
         services::services::github_app::AppConfig::decl(),
         services::services::github_app::AppHealth::decl(),

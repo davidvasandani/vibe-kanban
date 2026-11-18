@@ -32,6 +32,7 @@ use executors::profile::{
     ExecutorConfig, ExecutorConfigs, ExecutorProfileId, canonical_variant_key,
 };
 use services::services::{
+    capacity_backoff::turn_ended_with_capacity_error,
     config::AutoErrorRemediationConfig,
     container::ContainerService,
     error_remediation::{
@@ -135,6 +136,16 @@ async fn handle(deployment: &DeploymentImpl, consumer: &Consumer, ev: ErrorRemed
             workspace_id = %workspace.id,
             execution_id = %execution.id,
             "Auto error remediation skipped: credit or usage limit error"
+        );
+        return;
+    }
+    // A provider capacity error is an upstream outage, not a defect to fix:
+    // it is retried with backoff instead (`crate::capacity_backoff`).
+    if turn_ended_with_capacity_error(&entries) {
+        tracing::info!(
+            workspace_id = %workspace.id,
+            execution_id = %execution.id,
+            "Auto error remediation skipped: the turn ended with a provider capacity error"
         );
         return;
     }

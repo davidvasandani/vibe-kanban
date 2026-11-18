@@ -103,6 +103,34 @@ impl Default for NewIssuePipelineDefaults {
     }
 }
 
+/// Automatic backoff for provider capacity errors: when a coding-agent turn
+/// ends with "Selected model is at capacity", resume the session after an
+/// exponentially growing delay. On by default: it only continues a session a
+/// human already started and each chain is bounded by `max_attempts`; see
+/// `services::services::capacity_backoff`.
+#[derive(Clone, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(default)]
+pub struct CapacityBackoffConfig {
+    pub enabled: bool,
+    /// Wait before the first retry; each further retry doubles it.
+    pub base_delay_secs: u32,
+    /// Ceiling on a single wait (before jitter).
+    pub max_delay_secs: u32,
+    /// Consecutive retries per chain; 0 schedules nothing.
+    pub max_attempts: u32,
+}
+
+impl Default for CapacityBackoffConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            base_delay_secs: 60,
+            max_delay_secs: 60 * 60,
+            max_attempts: 10,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize, TS, PartialEq, Eq)]
 pub enum SendMessageShortcut {
     #[default]
@@ -154,6 +182,8 @@ pub struct Config {
     #[serde(default)]
     pub auto_error_remediation: AutoErrorRemediationConfig,
     #[serde(default)]
+    pub capacity_backoff: CapacityBackoffConfig,
+    #[serde(default)]
     pub new_issue_pipelines: NewIssuePipelineDefaults,
 }
 
@@ -188,6 +218,7 @@ impl Config {
             host_nickname: None,
             resume_interrupted_on_startup: false,
             auto_error_remediation: AutoErrorRemediationConfig::default(),
+            capacity_backoff: CapacityBackoffConfig::default(),
             new_issue_pipelines: NewIssuePipelineDefaults::default(),
         }
     }
@@ -247,6 +278,7 @@ impl Default for Config {
             host_nickname: None,
             resume_interrupted_on_startup: false,
             auto_error_remediation: AutoErrorRemediationConfig::default(),
+            capacity_backoff: CapacityBackoffConfig::default(),
             new_issue_pipelines: NewIssuePipelineDefaults::default(),
         }
     }
@@ -255,6 +287,24 @@ impl Default for Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn v8_config_without_capacity_backoff_gets_enabled_defaults() {
+        let mut value = serde_json::to_value(Config::default()).unwrap();
+        value.as_object_mut().unwrap().remove("capacity_backoff");
+        let config: Config = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(config.capacity_backoff, CapacityBackoffConfig::default());
+        assert!(config.capacity_backoff.enabled);
+        assert_eq!(config.capacity_backoff.base_delay_secs, 60);
+        assert_eq!(config.capacity_backoff.max_delay_secs, 3600);
+        assert_eq!(config.capacity_backoff.max_attempts, 10);
+
+        // A partial object keeps what it names and defaults the rest.
+        value["capacity_backoff"] = serde_json::json!({ "enabled": false });
+        let config: Config = serde_json::from_value(value).unwrap();
+        assert!(!config.capacity_backoff.enabled);
+        assert_eq!(config.capacity_backoff.max_attempts, 10);
+    }
 
     #[test]
     fn v8_config_without_new_issue_pipelines_gets_basic_default() {

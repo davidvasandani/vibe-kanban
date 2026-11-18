@@ -1456,6 +1456,8 @@ mod tests {
                     receipt_path: None,
                     trigger_context: None,
                     created_at: Utc::now(),
+                    capacity_retry_of: None,
+                    capacity_attempt: None,
                 };
                 assert!(wakeup.insert(&pool).await.unwrap());
                 sqlx::query("UPDATE issue_comment_deliveries SET state = ? WHERE comment_id = ?")
@@ -1636,6 +1638,8 @@ mod tests {
             receipt_path: None,
             trigger_context: None,
             created_at: Utc::now(),
+            capacity_retry_of: None,
+            capacity_attempt: None,
         };
         assert!(row.insert(&pool).await.unwrap());
         assert!(
@@ -1857,6 +1861,8 @@ mod tests {
             receipt_path: None,
             trigger_context: None,
             created_at: Utc::now(),
+            capacity_retry_of: None,
+            capacity_attempt: None,
         };
         for _ in 0..8 {
             row.id = Uuid::new_v4();

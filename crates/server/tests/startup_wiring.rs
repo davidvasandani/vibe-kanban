@@ -22,3 +22,15 @@ fn dispatcher_subscribes_before_recovery_and_reconciles_after() {
     assert!(cleanup < resume);
     assert!(resume < reconciled);
 }
+
+#[test]
+fn capacity_backoff_subscribes_before_any_turn_can_finish() {
+    let startup = include_str!("../src/startup.rs");
+    let subscribe = startup
+        .find("crate::capacity_backoff::spawn(&deployment)")
+        .unwrap();
+    let cleanup = startup.find(".cleanup_orphan_executions()").unwrap();
+    let resume = startup.find(".resume_interrupted_coding_agents(").unwrap();
+    assert!(subscribe < cleanup);
+    assert!(subscribe < resume);
+}

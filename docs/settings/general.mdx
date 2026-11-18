@@ -155,6 +155,35 @@ Specify where Vibe Kanban stores workspace data. Workspaces are created in a `.v
 Changes to Workspace Directory require an app restart. Existing workspaces remain in their original location.
 </Warning>
 
+## Automatic capacity retry
+
+When a coding agent turn ends with the provider error `Selected model is at capacity. Please try a different model.`, the work is unfinished but the session stops. Vibe Kanban resumes the session for you after a delay that doubles with each consecutive failure.
+
+- **Schedule** - The first retry waits 60 seconds. Each further retry doubles the wait, up to one hour, with up to 20% random extra delay so that workspaces that failed together do not all retry at once.
+- **Limit** - After 10 consecutive retries that end the same way, Vibe Kanban stops retrying and the session waits for you.
+- **Same agent and model** - The retry continues with the session's current agent, model and settings. It never switches model.
+- **Visibility** - A pending retry appears in the workspace's **Processes** drawer as **Capacity retry (attempt N)** with a countdown and a **Cancel** button.
+- **Your work comes first** - If you send a message, or anything else starts a new turn in the session before the retry is due, the retry is cancelled. Archived workspaces are never retried.
+
+The setting **Retry automatically when the model is at capacity** under **Task Execution** turns this on or off. It is on by default, and a change applies to the next failure without a restart.
+
+To change the schedule, edit `capacity_backoff` in `config.json`:
+
+```json config.json
+{
+  "capacity_backoff": {
+    "enabled": true,
+    "base_delay_secs": 60,
+    "max_delay_secs": 3600,
+    "max_attempts": 10
+  }
+}
+```
+
+<Note>
+Only the capacity error above triggers a retry. Rate limits, authentication errors and other failures do not. Retries survive a server restart; one that became due while the server was down fires once the server is back.
+</Note>
+
 ## Notifications
 
 <Frame>

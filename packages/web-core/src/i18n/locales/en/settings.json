@@ -133,6 +133,10 @@
         "autoResume": {
           "label": "Resume interrupted runs on startup",
           "helper": "Automatically send a follow-up to coding agent runs that were interrupted by a restart. Each run is resumed at most once. Agents start without confirmation and may spend tokens."
+        },
+        "capacityBackoff": {
+          "label": "Retry automatically when the model is at capacity",
+          "helper": "When a turn ends with “Selected model is at capacity”, resume the session automatically with exponential backoff: starting at {{baseSeconds}} s and doubling up to {{maxMinutes}} min, for at most {{attempts}} attempts. A pending retry appears in the Processes drawer, can be cancelled there, and is dropped if you continue the session yourself."
         }
       },
       "autoRemediation": {

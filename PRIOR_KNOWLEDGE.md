@@ -1,12 +1,70 @@
-# Prior knowledge: session execution exclusivity
+# Prior knowledge: automatic capacity backoff
 
-Read-only search of vibe-kanban/wiki found relevant lifecycle, worker hardening, issue comment delivery, and durable wake-up pages.
+Read-only search of `wiki/`. The knowledge base is not empty; five pages bear
+on this task. Nothing in it covers capacity errors or automatic retries of a
+provider failure.
 
-- agent-process-lifecycle.md: execution IDs own children and exit monitors. Turn liveness differs from process liveness. Cleanup and queue handoffs occur after DB completion. Warm reuse must preserve ownership across handoff and teardown.
-- issue-comment-delivery.md explicitly records that user follow-ups are not serialized with dispatcher admission or other follow-ups. Durable session_turn_boundaries prevent comment dispatch during finalization; checking only Running rows misses queue handoff gaps.
-- durable-session-wakeups.md: timers reuse comment dispatcher session locks and durable delivery records, with user-queue priority. Preserve their existing admission and launch-evidence semantics.
-- worker-execution-hardening.md: worker execution and coordinator reconciliation are separate authorities. Inspect current guards before adding another lifecycle owner.
+## durable-session-wakeups.md
+- A wake-up is a `wakeups` row plus an `issue_comment_deliveries` row with a
+  nil issue id. The shared dispatcher delivers it: session admission lock,
+  busy-turn waiting, user-queue priority, normal follow-up path, restart
+  survival with lateness reported.
+- Limits are 8 pending and 32 lifetime per session, to bound agent
+  self-chaining. `Wakeup::insert` also unarchives the workspace.
+- Cancellation and the dispatcher's claim compete on the same pending-state
+  transition, so a successful cancel can never launch later.
+- Stored prompts are untrusted for delivery markers: quote and escape.
+- Startup wiring lives only in `startup::initialize_deployment`;
+  `crates/server/tests/startup_wiring.rs` pins it. Subscribe before orphan
+  cleanup and resume.
 
-Implications: centralize admission across callers, reserve before asynchronous startup, and independently guard worker process lifetime. Do not use a startup grace period, infer idle from an empty queue, or release a process guard merely because a DB row becomes terminal. Keep warm-server reuse and automatic continuations compatible.
+Implication: reuse this ledger for retries, but give capacity retries their
+own insert that keeps its own bound, leaves the agent budget alone and never
+unarchives.
 
-Source task: vk/0890-investigate-a-fo (workspace 089057cb-ac81-44f3-969e-4aafdbfbdfb4).
+## issue-comment-delivery.md
+- The turn boundary is recorded by `finalize_task` in
+  `session_turn_boundaries`, never guessed from time. Do not identify the turn
+  in an asynchronous event handler from the event alone: a delayed event for
+  turn A would confirm turn B.
+- An execution row is not launch evidence. Evidence is a `pgid`, an accepted
+  worker job or the agent's session id. An uncertain worker launch is neither
+  delivered nor retried automatically.
+- Implicit delivery never resumes a failed or stopped turn
+  (`allow_stopped_target`).
+- Busy means: a running coding agent, a queued message, or any non-persistent
+  process in the workspace.
+
+Implication: the detector must confirm that the recorded boundary names the
+session's latest turn before reading it. A retry may resume a Failed turn only
+after proving that turn is the one that hit capacity, without widening the
+uncertain-launch rule.
+
+## auto-error-remediation.md
+- `finalize_task` only emits events; consumers in `server` do the I/O and read
+  config when they act, so a toggle needs no restart.
+- A broadcast with no receiver is lost: subscribe right after deployment
+  creation.
+- Reserve or record before I/O so a half-failed action is not repeated.
+- Settings gotcha: `updateDraft` merges arrays by index. Scalars are safe.
+- Remediation fires on `CodingAgent && Failed`. A Failed capacity turn would
+  file an `Auto-fix:` issue for an upstream outage unless excluded.
+
+## agent-process-lifecycle.md
+- Codex is signal-driven (`exit_signal: Some`). Its turn end is reported over
+  the wire and the reader loop signals Success, so an errored Codex turn is
+  recorded Completed. Natural-exit executors (Claude and others) classify from
+  the OS exit status.
+- Worker reconciliation also converges on `finalize_task`.
+
+Implication: trigger on the turn's error entries for both Completed and
+Failed, not on status.
+
+## session-chat-history-search.md
+- `ContainerService::normalized_entries` returns `Option`. `None` means the
+  log could not be read, which is different from "read, no errors". Treat it
+  as no evidence and schedule nothing.
+
+## host-env-sensitive-tests.md
+- Some Slack MCP and GitHub-routing tests fail only on the agent host because
+  of real environment variables. Re-run with them unset before blaming a diff.

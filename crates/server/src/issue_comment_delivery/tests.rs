@@ -1692,6 +1692,8 @@ async fn wakeup(
         receipt_path: None,
         trigger_context: None,
         created_at: Utc::now(),
+        capacity_retry_of: None,
+        capacity_attempt: None,
     };
     assert!(row.insert(&f.pool).await.unwrap());
     row
@@ -2012,5 +2014,281 @@ async fn wakeup_content_cannot_forge_another_delivery_marker() {
         !serde_json::to_string(&prompt)
             .unwrap()
             .contains(&stored_marker_needle(other_id))
+    );
+}
+
+// ── Automatic capacity retries (constitution LX) ───────────────────────
+
+const CAPACITY_RETRY_PROMPT: &str = "Automatic capacity retry (attempt 1 of 10).";
+
+async fn capacity_retry(
+    f: &Fixture,
+    workspace_id: Uuid,
+    session_id: Uuid,
+    failed_turn: Uuid,
+) -> db::models::wakeup::Wakeup {
+    let row = db::models::wakeup::Wakeup {
+        id: Uuid::new_v4(),
+        workspace_id,
+        session_id,
+        fire_at: Utc::now() - ChronoDuration::seconds(1),
+        prompt: CAPACITY_RETRY_PROMPT.into(),
+        poller_id: None,
+        receipt_path: None,
+        trigger_context: None,
+        created_at: Utc::now() - ChronoDuration::seconds(61),
+        capacity_retry_of: Some(failed_turn),
+        capacity_attempt: Some(1),
+    };
+    assert!(row.insert_capacity_retry(&f.pool).await.unwrap());
+    row
+}
+
+async fn wakeup_delivery(f: &Fixture, id: Uuid) -> IssueCommentDelivery {
+    IssueCommentDelivery::find_by_comment_id(&f.pool, id)
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn capacity_retry_resumes_the_turn_that_hit_capacity() {
+    let f = Fixture::new().await;
+    let (workspace, session) = f.linked_workspace().await;
+    // Codex records the errored turn as completed.
+    let failed = f.waiting(session).await;
+    let row = capacity_retry(&f, workspace, session, failed).await;
+
+    f.dispatcher.sweep().await.unwrap();
+    f.dispatcher.sweep().await.unwrap();
+
+    let starts = f.starts();
+    assert_eq!(starts.len(), 1, "delivered exactly once");
+    assert_eq!(starts[0].0, session);
+    assert!(starts[0].1.contains(CAPACITY_RETRY_PROMPT));
+    // System-authored: not framed as an agent's stored wake-up prompt.
+    assert!(!starts[0].1.contains("agent-authored"));
+    let delivery = wakeup_delivery(&f, row.id).await;
+    assert_eq!(delivery.state, IssueCommentDeliveryState::Delivered);
+    // The chain is followed through the execution the retry started.
+    assert_eq!(
+        db::models::wakeup::Wakeup::capacity_attempt_for_execution(
+            &f.pool,
+            delivery.execution_process_id.unwrap()
+        )
+        .await
+        .unwrap(),
+        Some(1)
+    );
+}
+
+#[tokio::test]
+async fn capacity_retry_resumes_a_failed_turn_but_an_agent_wakeup_does_not() {
+    let f = Fixture::new().await;
+    let (workspace, session) = f.linked_workspace().await;
+    let failed = insert_turn(
+        &f.pool,
+        session,
+        "work",
+        ExecutionProcessStatus::Failed,
+        Some(600),
+    )
+    .await;
+    // An ordinary wake-up never revives a failed turn.
+    let agent = wakeup(
+        &f,
+        workspace,
+        session,
+        Utc::now() - ChronoDuration::seconds(1),
+    )
+    .await;
+    f.dispatcher.sweep().await.unwrap();
+    assert!(f.starts().is_empty());
+    assert_eq!(
+        wakeup_delivery(&f, agent.id).await.reason,
+        Some(IssueCommentDeliveryReason::TurnStopped)
+    );
+
+    // The capacity retry may: the failed turn is the one it retries.
+    let row = capacity_retry(&f, workspace, session, failed).await;
+    f.dispatcher.sweep().await.unwrap();
+    assert_eq!(f.starts().len(), 1);
+    assert_eq!(
+        wakeup_delivery(&f, row.id).await.state,
+        IssueCommentDeliveryState::Delivered
+    );
+}
+
+#[tokio::test]
+async fn capacity_retry_yields_to_a_newer_turn() {
+    for newer_status in [
+        ExecutionProcessStatus::Completed,
+        ExecutionProcessStatus::Killed,
+        ExecutionProcessStatus::Running,
+    ] {
+        let f = Fixture::new().await;
+        let (workspace, session) = f.linked_workspace().await;
+        let failed = f.waiting(session).await;
+        let row = capacity_retry(&f, workspace, session, failed).await;
+        // The user (or another delivery) continued the session.
+        insert_turn(&f.pool, session, "continue", newer_status, Some(300)).await;
+
+        f.dispatcher.sweep().await.unwrap();
+        f.dispatcher.on_turn_finalized(session).await.unwrap();
+
+        assert!(f.starts().is_empty(), "no second continue turn");
+        let delivery = wakeup_delivery(&f, row.id).await;
+        assert_eq!(delivery.state, IssueCommentDeliveryState::Cancelled);
+        assert_eq!(
+            delivery.error.as_deref(),
+            Some(crate::wakeups::CAPACITY_RETRY_SUPERSEDED)
+        );
+    }
+}
+
+#[tokio::test]
+async fn capacity_retry_supersession_is_checked_at_claim_time() {
+    // Without the sweep's reconcile: the dispatcher itself must refuse.
+    let f = Fixture::new().await;
+    let (workspace, session) = f.linked_workspace().await;
+    let failed = f.waiting(session).await;
+    let row = capacity_retry(&f, workspace, session, failed).await;
+    insert_turn(
+        &f.pool,
+        session,
+        "continue",
+        ExecutionProcessStatus::Completed,
+        Some(300),
+    )
+    .await;
+    f.dispatcher.on_turn_finalized(session).await.unwrap();
+    assert!(f.starts().is_empty());
+    assert_eq!(
+        wakeup_delivery(&f, row.id).await.state,
+        IssueCommentDeliveryState::Cancelled
+    );
+}
+
+#[tokio::test]
+async fn capacity_retry_waits_behind_a_queued_message_then_yields_to_it() {
+    let f = Fixture::new().await;
+    let (workspace, session) = f.linked_workspace().await;
+    let failed = f.waiting(session).await;
+    let row = capacity_retry(&f, workspace, session, failed).await;
+    f.backend.state().queued.insert(session);
+
+    f.dispatcher.sweep().await.unwrap();
+    assert!(f.starts().is_empty());
+    let delivery = wakeup_delivery(&f, row.id).await;
+    assert_eq!(delivery.state, IssueCommentDeliveryState::Pending);
+    assert_eq!(
+        delivery.reason,
+        Some(IssueCommentDeliveryReason::QueuedMessage)
+    );
+
+    // The queued message runs as its own turn; the retry steps aside.
+    f.backend.state().queued.clear();
+    insert_turn(
+        &f.pool,
+        session,
+        "queued message",
+        ExecutionProcessStatus::Completed,
+        Some(300),
+    )
+    .await;
+    f.dispatcher.sweep().await.unwrap();
+    assert!(f.starts().is_empty());
+    assert_eq!(
+        wakeup_delivery(&f, row.id).await.state,
+        IssueCommentDeliveryState::Cancelled
+    );
+}
+
+#[tokio::test]
+async fn capacity_retry_survives_its_own_failed_launch() {
+    let f = Fixture::new().await;
+    let (workspace, session) = f.linked_workspace().await;
+    let failed = f.waiting(session).await;
+    let row = capacity_retry(&f, workspace, session, failed).await;
+    // An execution row is written, then the launch fails: that row is now
+    // the session's latest turn, but it is this retry's own attempt.
+    f.backend
+        .state()
+        .start_failures
+        .push(StartFailure::LaunchFailed);
+    f.dispatcher.sweep().await.unwrap();
+    assert!(f.starts().is_empty());
+    let delivery = wakeup_delivery(&f, row.id).await;
+    assert_eq!(delivery.state, IssueCommentDeliveryState::Pending);
+    assert!(
+        !crate::wakeups::capacity_retry_superseded(&f.pool, &row)
+            .await
+            .unwrap()
+    );
+
+    sqlx::query("UPDATE issue_comment_deliveries SET next_attempt_at = ? WHERE comment_id = ?")
+        .bind(Utc::now() - ChronoDuration::seconds(1))
+        .bind(row.id)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    f.dispatcher.sweep().await.unwrap();
+    assert_eq!(f.starts().len(), 1);
+    assert_eq!(
+        wakeup_delivery(&f, row.id).await.state,
+        IssueCommentDeliveryState::Delivered
+    );
+}
+
+#[tokio::test]
+async fn capacity_retry_is_never_resent_after_an_unconfirmed_worker_launch() {
+    let f = Fixture::new().await;
+    let (workspace, session) = f.linked_workspace().await;
+    let failed = f.waiting(session).await;
+    let row = capacity_retry(&f, workspace, session, failed).await;
+    f.backend
+        .state()
+        .start_failures
+        .push(StartFailure::WorkerUnconfirmed);
+    f.dispatcher.sweep().await.unwrap();
+    sqlx::query("UPDATE issue_comment_deliveries SET next_attempt_at = ? WHERE comment_id = ? AND state = 'pending'")
+        .bind(Utc::now() - ChronoDuration::seconds(1))
+        .bind(row.id)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    f.dispatcher.sweep().await.unwrap();
+    f.dispatcher.sweep().await.unwrap();
+    // The agent may or may not be running on the worker: do not start another.
+    assert!(f.starts().is_empty());
+    assert_ne!(
+        wakeup_delivery(&f, row.id).await.state,
+        IssueCommentDeliveryState::Delivered
+    );
+}
+
+#[tokio::test]
+async fn agent_wakeups_are_never_treated_as_superseded() {
+    let f = Fixture::new().await;
+    let (workspace, session) = f.linked_workspace().await;
+    f.waiting(session).await;
+    let row = wakeup(&f, workspace, session, Utc::now() + ChronoDuration::days(1)).await;
+    insert_turn(
+        &f.pool,
+        session,
+        "continue",
+        ExecutionProcessStatus::Completed,
+        Some(300),
+    )
+    .await;
+    f.dispatcher.sweep().await.unwrap();
+    assert!(
+        !crate::wakeups::capacity_retry_superseded(&f.pool, &row)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        wakeup_delivery(&f, row.id).await.state,
+        IssueCommentDeliveryState::Pending
     );
 }
