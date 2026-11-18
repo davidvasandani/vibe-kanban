@@ -731,15 +731,21 @@ impl SharedRepositoryStore {
     /// worktree in the store (workspace branches are always named
     /// `vk/…`), so this guard is a no-op for the case this function exists
     /// to fix.
+    ///
+    /// That last claim does not always hold: a worktree can end up with the
+    /// base branch itself checked out (VAS-1069), and the ref then cannot be
+    /// fast-forwarded without desyncing that worktree. In that case this still
+    /// fetches `origin/<branch>` so the remote-tracking ref is current, and
+    /// stops there: `GitService::create_branch` starts new workspaces from
+    /// that fresher tip whenever the local head is strictly behind it, so a
+    /// checked-out base no longer freezes every later workspace.
     fn fast_forward_local_head(
         cli: &GitCli,
         store: &Path,
         repo_name: &str,
         branch: &str,
     ) -> Result<(), WorkspaceError> {
-        if Self::branch_is_checked_out(cli, store, branch)? {
-            return Ok(());
-        }
+        let checked_out = Self::branch_is_checked_out(cli, store, branch)?;
 
         let Ok(origin_url) = cli.get_remote_url(store, "origin") else {
             // A local-only registered repo: nothing upstream to be stale
@@ -776,6 +782,24 @@ impl SharedRepositoryStore {
             // `store_resolves` already proved this ref exists.
             return Ok(());
         };
+
+        if checked_out {
+            // Never move a ref out from under a live checkout. The fetch above
+            // already refreshed `origin/<branch>`, which is what new
+            // workspaces are branched from when this head is behind it.
+            if local_tip != remote_tip {
+                warn!(
+                    repo = %repo_name,
+                    branch,
+                    local = %local_tip,
+                    origin = %remote_tip,
+                    "base branch '{branch}' is checked out in a worktree and differs from \
+                     origin; it cannot be fast-forwarded, so new workspaces are branched from \
+                     origin/{branch} instead. Move that worktree onto its own branch."
+                );
+            }
+            return Ok(());
+        }
 
         match Self::classify_against_remote(cli, store, branch, &local_tip, &remote_tip)? {
             // Already at least as fresh as what we fetched (including a
@@ -2086,6 +2110,81 @@ mod tests {
             upstream_tip,
             "a stale local base branch must be fast-forwarded to origin's tip before \
              a later workspace branches from it"
+        );
+    }
+
+    /// VAS-1069: a worktree had the target branch itself checked out, which
+    /// made `git fetch origin main:main` (and the fast-forward above) refuse,
+    /// so every later workspace branched from a months-old `main`. The ref
+    /// must still never move under the checkout, but a workspace created
+    /// afterwards must start at origin's tip.
+    #[tokio::test]
+    async fn a_checked_out_stale_target_branch_does_not_make_new_workspaces_start_stale() {
+        let fixture = TempDir::new().unwrap();
+        let shared_root = fixture.path().join("shared");
+        let checkout = fixture.path().join("srv-src").join("repo");
+        let upstream = fixture.path().join("forge").join("repo");
+        fs::create_dir_all(&shared_root).unwrap();
+        fs::create_dir_all(checkout.parent().unwrap()).unwrap();
+        fs::create_dir_all(upstream.parent().unwrap()).unwrap();
+
+        seed_repo(&checkout);
+        let base_commit = cli().resolve_commit(&checkout, "HEAD").unwrap().unwrap();
+        cli()
+            .git(
+                fixture.path(),
+                [
+                    "clone",
+                    checkout.to_str().unwrap(),
+                    upstream.to_str().unwrap(),
+                ],
+            )
+            .unwrap();
+        cli()
+            .set_config(&upstream, "user.email", "test@vibekanban.invalid")
+            .unwrap();
+        cli()
+            .set_config(&upstream, "user.name", "Vibe Kanban Test")
+            .unwrap();
+        fs::write(upstream.join("merged-on-github.txt"), "new work\n").unwrap();
+        cli().add_all(&upstream).unwrap();
+        cli().commit(&upstream, "merged on the forge").unwrap();
+        let upstream_tip = cli().resolve_commit(&upstream, "HEAD").unwrap().unwrap();
+        cli()
+            .set_remote_url(&checkout, "origin", &upstream.to_string_lossy())
+            .unwrap();
+
+        let repo = repo_record("repo", &checkout);
+        let store_handle = store_with_locks(&shared_root).await;
+        let store = store_handle.ensure(&repo, "main").await.unwrap();
+
+        // The incident state: a workspace worktree has `main` itself checked out.
+        let worktree = shared_root.join("workspaces").join("on-main").join("repo");
+        fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+        cli()
+            .worktree_add(&store, &worktree, "main", false)
+            .unwrap();
+
+        store_handle.ensure(&repo, "main").await.unwrap();
+        assert_eq!(
+            cli()
+                .resolve_commit(&store, "refs/heads/main")
+                .unwrap()
+                .unwrap(),
+            base_commit,
+            "a branch checked out by a live worktree must never be moved"
+        );
+
+        git::GitService::new()
+            .create_branch(&store, "vk/new-workspace", "main")
+            .unwrap();
+        assert_eq!(
+            cli()
+                .resolve_commit(&store, "refs/heads/vk/new-workspace")
+                .unwrap()
+                .unwrap(),
+            upstream_tip,
+            "a new workspace must start at origin's tip even though local main is stuck"
         );
     }
 

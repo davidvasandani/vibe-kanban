@@ -170,6 +170,38 @@ pub enum WorkspaceError {
         branch: String,
         detail: String,
     },
+    /// A workspace's own branch is the repository's target branch. A workspace
+    /// always gets a branch of its own; checking the target branch out in a
+    /// worktree pins that ref (so it can never be fast-forwarded) and lets
+    /// work, including the shutdown WIP snapshot, land directly on it.
+    #[error(
+        "workspace branch '{branch}' is the target branch of repository '{repo_name}'; \
+         a workspace must use a branch of its own"
+    )]
+    TargetBranchAsWorkspaceBranch { repo_name: String, branch: String },
+}
+
+/// Whether `branch` names the same branch as `target_branch`, which may be given
+/// as a bare name (`main`) or in its remote-tracking form (`origin/main`).
+pub fn is_target_branch(branch: &str, target_branch: &str) -> bool {
+    let target = target_branch
+        .strip_prefix("origin/")
+        .unwrap_or(target_branch);
+    let branch = branch.strip_prefix("refs/heads/").unwrap_or(branch);
+    branch == target
+}
+
+fn reject_target_branch_as_workspace_branch(
+    input: &RepoWorkspaceInput,
+    branch_name: &str,
+) -> Result<(), WorkspaceError> {
+    if is_target_branch(branch_name, &input.target_branch) {
+        return Err(WorkspaceError::TargetBranchAsWorkspaceBranch {
+            repo_name: input.repo.name.clone(),
+            branch: branch_name.to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// Info about a single repo's worktree within a workspace
@@ -481,6 +513,10 @@ impl WorkspaceManager {
         let mut created_worktrees: Vec<RepoWorktree> = Vec::new();
 
         for input in repos {
+            reject_target_branch_as_workspace_branch(input, branch_name)?;
+        }
+
+        for input in repos {
             let worktree_path = workspace_dir.join(&input.repo.name);
 
             debug!(
@@ -603,6 +639,10 @@ impl WorkspaceManager {
         }
 
         let git = GitService::new();
+
+        for input in repos {
+            reject_target_branch_as_workspace_branch(input, branch_name)?;
+        }
 
         for input in repos {
             let repo = &input.repo;
@@ -1168,5 +1208,119 @@ mod orphan_cleanup_tests {
             result.is_err(),
             "an unreadable repo subdir must be indeterminate, not treated as clean"
         );
+    }
+}
+
+#[cfg(test)]
+mod target_branch_guard_tests {
+    use std::{fs, path::Path, process::Command};
+
+    use db::models::repo::Repo;
+    use uuid::Uuid;
+
+    use super::{RepoWorkspaceInput, WorkspaceError, WorkspaceManager, is_target_branch};
+
+    fn git(dir: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git should be available on PATH");
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn repo_record(name: &str, path: &Path) -> Repo {
+        Repo {
+            id: Uuid::new_v4(),
+            path: path.to_path_buf(),
+            name: name.to_string(),
+            display_name: name.to_string(),
+            setup_script: None,
+            cleanup_script: None,
+            archive_script: None,
+            copy_files: None,
+            parallel_setup_script: false,
+            local_pipeline_artifacts: false,
+            dev_server_script: None,
+            default_target_branch: None,
+            default_working_dir: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    fn init_repo(parent: &Path) -> std::path::PathBuf {
+        let repo = parent.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "--initial-branch=main"]);
+        git(&repo, &["config", "user.email", "test@example.com"]);
+        git(&repo, &["config", "user.name", "Test"]);
+        fs::write(repo.join("tracked.txt"), "base\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "base"]);
+        repo
+    }
+
+    #[test]
+    fn target_branch_names_match_in_bare_and_remote_form() {
+        assert!(is_target_branch("main", "main"));
+        assert!(is_target_branch("main", "origin/main"));
+        assert!(is_target_branch("refs/heads/main", "main"));
+        assert!(!is_target_branch("vk/1234-work", "main"));
+        assert!(!is_target_branch("vk/main", "main"));
+    }
+
+    #[tokio::test]
+    async fn a_workspace_cannot_be_created_on_the_target_branch() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path());
+        let input = RepoWorkspaceInput::new(repo_record("repo", &repo_path), "main".into());
+        let workspace_dir = temp.path().join("workspace");
+
+        let err = WorkspaceManager::create_workspace(&workspace_dir, &[input], "main")
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, WorkspaceError::TargetBranchAsWorkspaceBranch { .. }),
+            "{err}"
+        );
+        assert!(!workspace_dir.join("repo").exists());
+    }
+
+    #[tokio::test]
+    async fn an_existing_workspace_cannot_be_re_ensured_onto_the_target_branch() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path());
+        let input = RepoWorkspaceInput::new(repo_record("repo", &repo_path), "origin/main".into());
+        let workspace_dir = temp.path().join("workspace");
+
+        let err = WorkspaceManager::ensure_workspace_exists(&workspace_dir, &[input], "main")
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, WorkspaceError::TargetBranchAsWorkspaceBranch { .. }),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_workspace_on_its_own_branch_is_still_created() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path());
+        let input = RepoWorkspaceInput::new(repo_record("repo", &repo_path), "main".into());
+        let workspace_dir = temp.path().join("workspace");
+
+        WorkspaceManager::create_workspace(&workspace_dir, &[input], "vk/1234-work")
+            .await
+            .unwrap();
+
+        assert!(workspace_dir.join("repo").join("tracked.txt").exists());
     }
 }
