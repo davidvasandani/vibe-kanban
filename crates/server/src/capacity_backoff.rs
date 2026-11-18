@@ -7,7 +7,7 @@
 //! dispatcher delivers it, and cancels it if the session has moved on by then
 //! (`wakeups::capacity_retry_superseded`).
 
-use std::time::Duration;
+use std::{future::Future, time::Duration};
 
 use chrono::{DateTime, Utc};
 use db::models::{
@@ -30,10 +30,14 @@ use uuid::Uuid;
 
 use crate::DeploymentImpl;
 
-/// Finalization and log normalization are separate pipelines; on a worker the
-/// last log lines can reach this host just after the turn is finalized. A
-/// short wait before reading costs nothing against a backoff of a minute.
-const LOG_SETTLE_DELAY: Duration = Duration::from_secs(1);
+/// Finalization and log normalization are separate pipelines: while the turn's
+/// live log store still exists its entries may be incomplete, and on a worker
+/// the last lines can reach this host after the turn is finalized. The store
+/// is removed once the log is settled, so that is what is waited for.
+const LOG_SETTLE_POLL: Duration = Duration::from_millis(500);
+/// Upper bound on that wait. Past it the turn is judged on what is readable:
+/// a trailing capacity error is still evidence, and its absence means no retry.
+const LOG_SETTLE_DEADLINE: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScheduleOutcome {
@@ -95,7 +99,20 @@ async fn handle(deployment: &DeploymentImpl, session_id: Uuid) -> Result<(), sql
         return Ok(());
     };
 
-    tokio::time::sleep(LOG_SETTLE_DELAY).await;
+    let container = deployment.container();
+    let settled = wait_until_settled(
+        || async { container.get_msg_store_by_id(&turn_id).await.is_some() },
+        LOG_SETTLE_POLL,
+        LOG_SETTLE_DEADLINE,
+    )
+    .await;
+    if !settled {
+        tracing::debug!(
+            %session_id,
+            execution_id = %turn_id,
+            "Capacity backoff: the turn's log did not settle in time; judging what is readable"
+        );
+    }
     // `None` means the log could not be read: no evidence, no retry.
     let Some(entries) = deployment.container().normalized_entries(&turn_id).await else {
         return Ok(());
@@ -137,6 +154,25 @@ async fn handle(deployment: &DeploymentImpl, session_id: Uuid) -> Result<(), sql
         ScheduleOutcome::Disabled => {}
     }
     Ok(())
+}
+
+/// Wait until `is_live` reports false (the log is settled), polling every
+/// `poll` for at most `deadline`. Returns whether it settled.
+async fn wait_until_settled<F, Fut>(mut is_live: F, poll: Duration, deadline: Duration) -> bool
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = bool>,
+{
+    let give_up = tokio::time::Instant::now() + deadline;
+    loop {
+        if !is_live().await {
+            return true;
+        }
+        if tokio::time::Instant::now() >= give_up {
+            return false;
+        }
+        tokio::time::sleep(poll).await;
+    }
 }
 
 /// The session's latest coding-agent turn, when it genuinely ended (completed
@@ -316,6 +352,34 @@ mod tests {
 
     fn config() -> CapacityBackoffConfig {
         CapacityBackoffConfig::default()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn waits_for_the_log_to_settle_but_not_forever() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        // Already settled: no waiting at all.
+        let started = tokio::time::Instant::now();
+        assert!(wait_until_settled(|| async { false }, LOG_SETTLE_POLL, LOG_SETTLE_DEADLINE).await);
+        assert_eq!(started.elapsed(), Duration::ZERO);
+
+        // Normalization lags well past one second, then settles.
+        let polls = AtomicU32::new(0);
+        let started = tokio::time::Instant::now();
+        assert!(
+            wait_until_settled(
+                || async { polls.fetch_add(1, Ordering::SeqCst) < 10 },
+                LOG_SETTLE_POLL,
+                LOG_SETTLE_DEADLINE
+            )
+            .await
+        );
+        assert_eq!(started.elapsed(), Duration::from_secs(5));
+
+        // Never settles: bounded by the deadline.
+        let started = tokio::time::Instant::now();
+        assert!(!wait_until_settled(|| async { true }, LOG_SETTLE_POLL, LOG_SETTLE_DEADLINE).await);
+        assert_eq!(started.elapsed(), LOG_SETTLE_DEADLINE);
     }
 
     #[tokio::test]
