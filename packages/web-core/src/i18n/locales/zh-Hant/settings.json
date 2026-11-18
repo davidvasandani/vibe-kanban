@@ -112,6 +112,10 @@
         "autoResume": {
           "label": "啟動時恢復被中斷的執行",
           "helper": "自動向因重新啟動而中斷的編碼代理執行傳送後續訊息。每次執行最多恢復一次。代理會在未經確認的情況下啟動，並可能消耗 token。"
+        },
+        "capacityBackoff": {
+          "label": "模型容量已滿時自動重試",
+          "helper": "當一輪以「Selected model is at capacity」結束時，依指數退避自動恢復工作階段：從 {{baseSeconds}} 秒開始，每次加倍，最長 {{maxMinutes}} 分鐘，最多嘗試 {{attempts}} 次。待執行的重試會顯示在處理程序抽屜中，可在那裡取消；如果你自己繼續了工作階段，它會被放棄。"
         }
       },
       "autoRemediation": {

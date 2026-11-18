@@ -555,6 +555,32 @@ export function GeneralSettingsSection() {
             updateDraft({ resume_interrupted_on_startup: checked })
           }
         />
+
+        {draft?.capacity_backoff && (
+          <SettingsCheckbox
+            id="capacity-backoff-enabled"
+            label={t('settings.general.taskExecution.capacityBackoff.label')}
+            description={t(
+              'settings.general.taskExecution.capacityBackoff.helper',
+              {
+                attempts: draft.capacity_backoff.max_attempts,
+                baseSeconds: draft.capacity_backoff.base_delay_secs,
+                maxMinutes: Math.round(
+                  draft.capacity_backoff.max_delay_secs / 60
+                ),
+              }
+            )}
+            checked={draft.capacity_backoff.enabled}
+            onChange={(checked) =>
+              updateDraft({
+                capacity_backoff: {
+                  ...draft.capacity_backoff,
+                  enabled: checked,
+                },
+              })
+            }
+          />
+        )}
       </SettingsCard>
 
       {draft?.auto_error_remediation && (

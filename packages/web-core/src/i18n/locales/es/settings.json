@@ -112,6 +112,10 @@
         "autoResume": {
           "label": "Reanudar ejecuciones interrumpidas al iniciar",
           "helper": "Envía automáticamente un seguimiento a las ejecuciones de agentes interrumpidas por un reinicio. Cada ejecución se reanuda como máximo una vez. Los agentes se inician sin confirmación y pueden consumir tokens."
+        },
+        "capacityBackoff": {
+          "label": "Reintentar automáticamente cuando el modelo está al límite de capacidad",
+          "helper": "Cuando un turno termina con «Selected model is at capacity», reanuda la sesión automáticamente con espera exponencial: empieza en {{baseSeconds}} s y se duplica hasta {{maxMinutes}} min, con un máximo de {{attempts}} intentos. El reintento pendiente aparece en el panel de procesos, se puede cancelar allí y se descarta si continúas la sesión tú mismo."
         }
       },
       "autoRemediation": {

@@ -32,6 +32,7 @@ use executors::profile::{
     ExecutorConfig, ExecutorConfigs, ExecutorProfileId, canonical_variant_key,
 };
 use services::services::{
+    capacity_backoff::turn_ended_with_capacity_error,
     config::AutoErrorRemediationConfig,
     container::ContainerService,
     error_remediation::{
@@ -121,6 +122,23 @@ async fn handle(deployment: &DeploymentImpl, consumer: &Consumer, ev: ErrorRemed
             return;
         }
     };
+
+    // A provider capacity error is an upstream outage, not a defect to fix:
+    // it is retried with backoff instead (`crate::capacity_backoff`). Checked
+    // before reserving, so a skipped event consumes no dedupe or rate slot.
+    if deployment
+        .container()
+        .normalized_entries(&execution.id)
+        .await
+        .is_some_and(|entries| turn_ended_with_capacity_error(&entries))
+    {
+        tracing::info!(
+            workspace_id = %workspace.id,
+            execution_id = %execution.id,
+            "Auto error remediation skipped: the turn ended with a provider capacity error"
+        );
+        return;
+    }
 
     match consumer.guard.try_reserve(
         workspace.id,

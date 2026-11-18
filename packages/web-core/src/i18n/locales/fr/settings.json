@@ -112,6 +112,10 @@
         "autoResume": {
           "label": "Reprendre les exécutions interrompues au démarrage",
           "helper": "Envoie automatiquement une relance aux exécutions d'agents interrompues par un redémarrage. Chaque exécution n'est reprise qu'une seule fois. Les agents démarrent sans confirmation et peuvent consommer des tokens."
+        },
+        "capacityBackoff": {
+          "label": "Réessayer automatiquement lorsque le modèle est saturé",
+          "helper": "Lorsqu'un tour se termine par « Selected model is at capacity », la session reprend automatiquement avec un délai exponentiel : {{baseSeconds}} s au départ, doublé jusqu'à {{maxMinutes}} min, pour {{attempts}} tentatives au maximum. La reprise en attente apparaît dans le panneau des processus, peut y être annulée et est abandonnée si vous poursuivez vous-même la session."
         }
       },
       "autoRemediation": {

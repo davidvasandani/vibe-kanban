@@ -49,7 +49,11 @@ export function WakeupRow({ summary }: { summary: WakeupSummary }) {
     <li className="px-3 py-2 text-xs" data-testid="wakeup-row">
       <div className="flex items-center justify-between gap-2">
         <span>
-          {wakeup.poller_id ? 'Poller completion wake-up' : 'Scheduled wake-up'}
+          {wakeup.capacity_retry_of
+            ? `Capacity retry (attempt ${wakeup.capacity_attempt ?? 1})`
+            : wakeup.poller_id
+              ? 'Poller completion wake-up'
+              : 'Scheduled wake-up'}
         </span>
         {pending && (
           <Button

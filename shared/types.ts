@@ -1133,7 +1133,17 @@ script: string,
  */
 working_dir: string | null, };
 
-export type Wakeup = { id: string, workspace_id: string, session_id: string, fire_at: string, prompt: string, poller_id: string | null, trigger_context: string | null, created_at: string, };
+export type Wakeup = { id: string, workspace_id: string, session_id: string, fire_at: string, prompt: string, poller_id: string | null, trigger_context: string | null, created_at: string, 
+/**
+ * Set for an automatic capacity retry: the execution whose provider
+ * capacity error this wake-up retries. Such rows are scheduled by Vibe
+ * Kanban, not by the agent, and are outside the agent's budget.
+ */
+capacity_retry_of: string | null, 
+/**
+ * 1-based position in the retry chain; set with `capacity_retry_of`.
+ */
+capacity_attempt: number | null, };
 
 export type WakeupSummary = { wakeup: Wakeup, delivery: IssueCommentDelivery, };
 
@@ -1299,7 +1309,7 @@ export type Config = { config_version: string, theme: ThemeMode, executor_profil
  * restart. Off by default because it spawns agents (and spends
  * tokens) at boot without a human in the loop.
  */
-resume_interrupted_on_startup: boolean, auto_error_remediation: AutoErrorRemediationConfig, new_issue_pipelines: NewIssuePipelineDefaults, };
+resume_interrupted_on_startup: boolean, auto_error_remediation: AutoErrorRemediationConfig, capacity_backoff: CapacityBackoffConfig, new_issue_pipelines: NewIssuePipelineDefaults, };
 
 export type NotificationConfig = { sound_enabled: boolean, push_enabled: boolean, sound_file: SoundFile, };
 
@@ -1351,6 +1361,20 @@ merge_stage_ids: Array<string>,
  * Global cap on launches per trailing hour; 0 disables launching.
  */
 max_per_hour: number, };
+
+export type CapacityBackoffConfig = { enabled: boolean, 
+/**
+ * Wait before the first retry; each further retry doubles it.
+ */
+base_delay_secs: number, 
+/**
+ * Ceiling on a single wait (before jitter).
+ */
+max_delay_secs: number, 
+/**
+ * Consecutive retries per chain; 0 schedules nothing.
+ */
+max_attempts: number, };
 
 export type NewIssuePipelineDefaults = { 
 /**

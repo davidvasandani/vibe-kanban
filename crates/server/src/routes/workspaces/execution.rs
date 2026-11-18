@@ -918,6 +918,8 @@ pub async fn start_poller(
             receipt_path: Some(directory.join("completed").to_string_lossy().into_owned()),
             trigger_context: None,
             created_at: now,
+            capacity_retry_of: None,
+            capacity_attempt: None,
         };
         if !row.insert(&deployment.db().pool).await? {
             let _ = tokio::fs::remove_dir(&directory).await;

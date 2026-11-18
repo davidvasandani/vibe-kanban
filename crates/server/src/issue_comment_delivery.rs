@@ -1002,13 +1002,30 @@ impl<B: DeliveryBackend> IssueCommentDispatcher<B> {
                 .filter(|row| row.next_attempt_at.is_none_or(|at| at <= now))
                 .collect();
         let mut eligible = Vec::new();
+        // Capacity retries proven, under this session's admission, to still
+        // target the turn that hit the capacity error (constitution LX).
+        let mut capacity_retries = HashSet::new();
         for row in due {
             if let Some(wakeup) =
                 db::models::wakeup::Wakeup::find(&self.pool, row.comment_id).await?
-                && wakeup.receipt_path.is_some()
-                && wakeup.trigger_context.is_none()
             {
-                continue;
+                if wakeup.receipt_path.is_some() && wakeup.trigger_context.is_none() {
+                    continue;
+                }
+                if wakeup.is_capacity_retry() {
+                    // The session moved on: a second "continue" would
+                    // override whoever continued it.
+                    if crate::wakeups::capacity_retry_superseded(&self.pool, &wakeup).await? {
+                        db::models::wakeup::Wakeup::cancel(
+                            &self.pool,
+                            wakeup.id,
+                            crate::wakeups::CAPACITY_RETRY_SUPERSEDED,
+                        )
+                        .await?;
+                        continue;
+                    }
+                    capacity_retries.insert(row.id);
+                }
             }
             eligible.push(row);
         }
@@ -1130,8 +1147,11 @@ impl<B: DeliveryBackend> IssueCommentDispatcher<B> {
         let stopped = latest_status != ExecutionProcessStatus::Completed && !own_attempt;
         let mut deliverable = Vec::new();
         for row in due.into_iter().filter(|row| row.issue_id == issue_id) {
-            if stopped && !row.allow_stopped_target {
+            if stopped && !row.allow_stopped_target && !capacity_retries.contains(&row.id) {
                 // Implicit delivery never resumes a failed or stopped turn.
+                // A capacity retry is the exception: the stopped turn is
+                // proven above to be the capacity failure it retries, never
+                // a user stop.
                 IssueCommentDelivery::finish_pending(
                     &self.pool,
                     row.id,

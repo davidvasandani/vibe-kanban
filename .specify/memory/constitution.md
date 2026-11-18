@@ -945,6 +945,27 @@ remote does not — fails workspace creation rather than silently branching
 from stranded history or discarding the divergent commit, with a message
 naming the branch, the repository, and both commits, per Principle XXI.
 
+### LX. Automatic continuation after a transient provider error is evidence-driven, bounded, and yields to newer work
+Continuing an existing, human-started session after a transient provider
+error (for example, a model at capacity) is not self-spawned work under XLI:
+it files nothing and starts no workspace. It may therefore ship enabled, but
+only under these rules. The trigger is terminal error evidence in the turn's
+own normalized log, an error entry with no agent output after it, never the
+exit status alone and never text in user, assistant or tool content; a log
+that cannot be read is no evidence. Stops, restarts and indeterminate exits
+never trigger it. Retries back off exponentially with jitter up to a
+configured ceiling and a configured attempt count per chain, after which the
+give-up is logged and nothing further is scheduled. Scheduling is idempotent
+per failed turn through a database constraint, is durable across restart, and
+uses the shared delivery path (LVII) rather than a workspace process. A
+pending retry is delivered only if, under session admission at claim time, the
+session's latest turn is still the one that failed; otherwise it is cancelled
+with a stored reason. It never unarchives a workspace, never consumes or is
+blocked by the agent's own scheduling budget, keeps the session's executor
+configuration, and is visible and cancellable by the operator. The setting is
+read when the event is handled. Such an error does not also trigger XLI
+remediation.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -966,7 +987,12 @@ naming the branch, the repository, and both commits, per Principle XXI.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.56.2 (refines XXVIII: a non-terminal state written before its
+**Version**: 0.57.0 (adds LX: automatic continuation of an existing session
+after a transient provider error is triggered by terminal error evidence in
+the turn log, backs off exponentially within a per-chain bound, is idempotent
+per failed turn, yields to any newer turn under session admission, never
+unarchives or spends the agent's scheduling budget, and stays visible and
+cancellable); 0.56.2 (refines XXVIII: a non-terminal state written before its
 owner exists must be made terminal by its writer when the creating request is
 abandoned, and an explicit stop of a state with no launch evidence must record
 a terminal outcome instead of failing silently); 0.56.1 (refined LIX: a local branch already resolving in a
@@ -1538,3 +1564,21 @@ coordinator; the age bound applies only to a start that was never
 dispatched and only on an explicit stop). Use Vibe Kanban's constitution
 and task feature directory; the workspace command's homelab prefix is a
 shared pipeline default.
+
+## Review: vk/e273-automatic-expone
+
+Applied `/speckit.constitution`: added LX (0.57.0). A Codex turn that ends
+with "Selected model is at capacity" is recorded Completed and the session
+waits for a human. XLI governs work that files issues or starts workspaces
+and stays opt-in; no principle said when VK may continue a session a human
+already started, what counts as evidence, or how such a retry yields to
+newer work. Also governing: LVII (the retry is delivered through the shared
+dispatcher at a recorded turn boundary, with launch evidence and the
+uncertain-launch rule unchanged), XXVIII (the schedule is durable and
+survives restart), XII (the supersession check runs under session
+admission), XLI (a capacity failure is excluded from remediation), II (tests
+cover detection, the schedule, chaining, idempotence and supersession) and
+III/VI (one pure module, one consumer and two columns on the existing
+wake-up table, not a new scheduler). Use Vibe Kanban's constitution and task
+feature directory; the workspace command's homelab prefix is a shared
+pipeline default.

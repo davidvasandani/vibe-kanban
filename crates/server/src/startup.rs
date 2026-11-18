@@ -164,6 +164,9 @@ pub async fn initialize_deployment(
     crate::error_remediation::spawn(&deployment);
     // Same reason: turn boundaries wake waiting issue comment deliveries.
     crate::issue_comment_delivery::spawn(&deployment);
+    // And a turn that ended with a provider capacity error is retried with
+    // backoff (default on; the consumer reads the setting per event).
+    crate::capacity_backoff::spawn(&deployment);
     migrate_legacy_attachment_directories(&deployment).await?;
     deployment.update_sentry_scope().await?;
     let interrupted_processes = deployment

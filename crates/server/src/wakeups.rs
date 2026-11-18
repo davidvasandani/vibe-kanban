@@ -5,12 +5,14 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use db::models::{
+    execution_process::ExecutionProcess,
     session::Session,
     wakeup::{MAX_DELAY_SECS, Wakeup, WakeupSummary},
     workspace::Workspace,
 };
 use deployment::Deployment;
 use serde::Deserialize;
+use services::services::issue_comment_delivery::stored_marker_needle;
 use ts_rs::TS;
 use utils::response::ApiResponse;
 use uuid::Uuid;
@@ -109,6 +111,8 @@ pub async fn schedule(
         receipt_path: None,
         trigger_context: None,
         created_at: now,
+        capacity_retry_of: None,
+        capacity_attempt: None,
     };
     let inserted = row
         .insert(&deployment.db().pool)
@@ -190,6 +194,44 @@ async fn read_receipt(path: &str) -> std::io::Result<Vec<u8>> {
         })?
 }
 
+/// Stored on a capacity retry that was cancelled because the session moved on.
+pub const CAPACITY_RETRY_SUPERSEDED: &str =
+    "Superseded: the session continued before the capacity retry was due";
+
+/// Whether an automatic capacity retry no longer applies (constitution LX): it
+/// may only resume the turn that hit the capacity error. Any newer turn — a
+/// human follow-up, a queued message, another delivery — means the session
+/// moved on, and a second "continue" would override that. The one exception is
+/// a turn carrying this retry's own delivery marker: a launch of this same
+/// retry that failed before the agent started and is being retried.
+///
+/// Always `false` for other wake-ups. Once true it stays true, so the sweep
+/// may cancel on it without holding session admission; the dispatcher checks
+/// it again under admission before claiming.
+pub async fn capacity_retry_superseded(
+    pool: &sqlx::SqlitePool,
+    row: &Wakeup,
+) -> Result<bool, sqlx::Error> {
+    let Some(failed_turn) = row.capacity_retry_of else {
+        return Ok(false);
+    };
+    let Some((latest, _, _)) =
+        ExecutionProcess::latest_coding_agent_turn_for_session(pool, row.session_id).await?
+    else {
+        return Ok(true);
+    };
+    if latest == failed_turn {
+        return Ok(false);
+    }
+    let own = ExecutionProcess::find_coding_agent_turns_with_marker(
+        pool,
+        row.session_id,
+        &stored_marker_needle(row.id),
+    )
+    .await?;
+    Ok(!own.iter().any(|turn| turn.id == latest))
+}
+
 /// Reconcile invalid targets even before their deadline. IDs in wakeups survive
 /// cascading target deletion, unlike the nullable target IDs in delivery rows.
 pub async fn reconcile(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
@@ -207,6 +249,10 @@ pub async fn reconcile(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
         };
         if let Some(reason) = reason {
             Wakeup::cancel(pool, row.id, reason).await?;
+            continue;
+        }
+        if capacity_retry_superseded(pool, &row).await? {
+            Wakeup::cancel(pool, row.id, CAPACITY_RETRY_SUPERSEDED).await?;
             continue;
         }
         if let Some(path) = &row.receipt_path {
