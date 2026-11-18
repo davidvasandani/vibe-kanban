@@ -200,6 +200,40 @@ pub fn extract_error_messages(entries: &[NormalizedEntry]) -> Vec<String> {
     messages.into_iter().skip(skip).collect()
 }
 
+/// Provider allowance failures cannot be fixed by changing repository code.
+/// Only inspect error entries, and do so before the issue-text limits in
+/// `extract_error_messages`: an earlier or long diagnostic is still evidence.
+pub fn has_credit_or_usage_error(entries: &[NormalizedEntry]) -> bool {
+    entries.iter().any(|entry| {
+        matches!(entry.entry_type, NormalizedEntryType::ErrorMessage { .. })
+            && CREDIT_OR_USAGE_ERROR_RE.is_match(&entry.content)
+    })
+}
+
+// Explicit provider codes and failure phrases, not bare "usage", "quota",
+// "limit", or HTTP 429 (which can appear in unrelated code diagnostics).
+static CREDIT_OR_USAGE_ERROR_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?ix)\b(?:
+            insufficient_quota | insufficient_credits | usage_limit_reached | usage_limit_exceeded |
+            billing_hard_limit_reached | rate_limit_exceeded |
+            rate_limit_error | credit_balance_too_low |
+            out[\s-]+of[\s-]+credits? |
+            out\s+of\s+(?:extra\s+)?usage |
+            (?:insufficient|not\s+enough)\s+(?:credits|credit\s+balance) |
+            credit\s+balance\s+(?:is\s+)?too\s+low |
+            (?:credits|credit\s+balance)\s+(?:have\s+been\s+|has\s+been\s+|are\s+|is\s+)?(?:exhausted|depleted) |
+            (?:exceeded|reached|hit)\s+(?:your\s+|the\s+)?(?:current\s+)?(?:usage|rate|billing|spending)\s+limit |
+            (?:usage|rate|billing|spending)[\s-]+limit\s+(?:has\s+been\s+|is\s+)?(?:exceeded|reached|hit) |
+            exceeded\s+(?:your\s+|the\s+)?(?:current\s+)?quota |
+            (?:quota|usage\s+allowance)\s+(?:has\s+been\s+|is\s+)?(?:exhausted|exceeded|depleted) |
+            you(?:['’]ve|\s+have)\s+(?:hit|reached)\s+your\s+(?:(?:usage|weekly|monthly|daily|session)\s+)?limit |
+            too\s+many\s+requests
+        )\b",
+    )
+    .expect("valid credit/usage error regex")
+});
+
 /// What the issue body says about the failed turn.
 #[derive(Debug, Clone)]
 pub struct RemediationContext {
@@ -495,6 +529,155 @@ mod tests {
             error_messages: vec!["API Error: 500".to_string()],
             variant_fallback: None,
         }
+    }
+
+    #[test]
+    fn credit_and_usage_errors_are_not_code_failures() {
+        for message in [
+            "You are out of credits",
+            "Out-of-credit error",
+            "You are out of extra usage",
+            "insufficient_credits",
+            "usage_limit_exceeded",
+            "billing_hard_limit_reached",
+            "Out-of-creditS. Please top up.",
+            "API Error: Credit balance is too low",
+            "Insufficient credits to continue",
+            "Not enough credits",
+            "Your credits have been exhausted",
+            "Credit balance is depleted",
+            "{\"error\": {\"code\": \"insufficient_quota\"}}",
+            "You exceeded your current quota, please check your plan and billing details",
+            "Quota exhausted for this account",
+            "Usage allowance is depleted",
+            "You've hit your usage limit. Try again later.",
+            "You’ve hit your limit · resets 5pm",
+            "You have reached your weekly limit",
+            "usage_limit_reached",
+            "Usage limit has been reached",
+            "Rate limit exceeded",
+            "rate_limit_error",
+            "rate_limit_exceeded",
+            "You've reached your billing limit",
+            "Spending limit reached",
+            "Too Many Requests",
+            "USAGE\nLIMIT EXCEEDED",
+        ] {
+            assert!(has_credit_or_usage_error(&[error(message)]), "{message}");
+        }
+    }
+
+    #[test]
+    fn ordinary_failures_and_non_error_mentions_remain_eligible() {
+        for message in [
+            "API Error: 500",
+            "unexpected argument: usage: codex [OPTIONS]",
+            "cannot find function calculate_credit_balance",
+            "assertion failed: usage < limit",
+            "maximum context length exceeded",
+            "token limit exceeded",
+            "quota parser returned invalid JSON",
+            "HTTP 429 from test fixture",
+            "usage_limit_reached_handler panicked",
+            "credit card validation failed",
+            "permission denied",
+            "",
+        ] {
+            assert!(!has_credit_or_usage_error(&[error(message)]), "{message}");
+        }
+        for kind in [
+            NormalizedEntryType::UserMessage,
+            NormalizedEntryType::AssistantMessage,
+            NormalizedEntryType::SystemMessage,
+        ] {
+            assert!(!has_credit_or_usage_error(&[entry(kind, "out of credits")]));
+        }
+        assert!(!has_credit_or_usage_error(&[]));
+    }
+
+    #[tokio::test]
+    async fn claude_failed_results_preserve_allowance_evidence() {
+        use std::{path::Path, sync::Arc};
+
+        use executors::{
+            executors::claude::{ClaudeLogProcessor, HistoryStrategy},
+            logs::utils::{EntryIndexProvider, patch::extract_normalized_entry_from_patch},
+        };
+        use utils::{log_msg::LogMsg, msg_store::MsgStore};
+
+        for strategy in [HistoryStrategy::Default, HistoryStrategy::AmpResume] {
+            for (result, expected) in [
+                (
+                    serde_json::json!({"type":"result", "subtype":"success", "is_error":true,
+                    "result":"You've hit your limit · resets 5pm"}),
+                    true,
+                ),
+                (
+                    serde_json::json!({"type":"result", "subtype":"error_during_execution", "is_error":true,
+                    "errors":["Credit balance is too low"]}),
+                    true,
+                ),
+                (
+                    serde_json::json!({"type":"result", "subtype":"error_during_execution", "is_error":true,
+                    "error":"Insufficient credits"}),
+                    true,
+                ),
+                (
+                    serde_json::json!({"type":"result", "subtype":"success", "is_error":false,
+                    "result":"The test checks the message: out of credits"}),
+                    false,
+                ),
+                (
+                    serde_json::json!({"type":"result", "subtype":"error_during_execution", "is_error":true,
+                    "errors":["Repository not found"]}),
+                    false,
+                ),
+            ] {
+                let store = Arc::new(MsgStore::new());
+                store.push_stdout(format!("{result}\n"));
+                store.push_finished();
+                ClaudeLogProcessor::process_logs(
+                    store.clone(),
+                    Path::new("/tmp"),
+                    EntryIndexProvider::start_from(&store),
+                    strategy,
+                    None,
+                )
+                .await
+                .unwrap();
+                let entries: Vec<_> = store
+                    .get_history()
+                    .iter()
+                    .filter_map(|msg| match msg {
+                        LogMsg::JsonPatch(patch) => {
+                            extract_normalized_entry_from_patch(patch).map(|(_, entry)| entry)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert!(!entries.is_empty(), "{strategy:?}: {result}");
+                assert_eq!(
+                    has_credit_or_usage_error(&entries),
+                    expected,
+                    "{strategy:?}: {result}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn allowance_classification_precedes_diagnostic_truncation() {
+        let mut entries = vec![error(&format!(
+            "{} Insufficient credits",
+            "x".repeat(MAX_ERROR_CHARS)
+        ))];
+        entries.extend((0..MAX_ERROR_MESSAGES).map(|_| error("Agent exited with code 1")));
+        assert!(has_credit_or_usage_error(&entries));
+        assert!(
+            extract_error_messages(&entries)
+                .iter()
+                .all(|message| !message.contains("credits"))
+        );
     }
 
     #[test]

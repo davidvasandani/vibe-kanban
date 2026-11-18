@@ -37,7 +37,8 @@ use services::services::{
     error_remediation::{
         ErrorRemediationEvent, ErrorRemediationGuard, GuardDecision, REMEDIATION_MARKER_PREFIX,
         RemediationContext, compose_issue, compose_recurrence_comment, extract_error_messages,
-        find_similar_issue, is_active_status_name, remediation_stage_ids,
+        find_similar_issue, has_credit_or_usage_error, is_active_status_name,
+        remediation_stage_ids,
     },
     pipelines,
     remote_client::RemoteClient,
@@ -122,6 +123,23 @@ async fn handle(deployment: &DeploymentImpl, consumer: &Consumer, ev: ErrorRemed
         }
     };
 
+    // Classify the complete error evidence before reserving capacity or
+    // making any remote remediation call (including recurrence comments).
+    let entries = deployment
+        .container()
+        .normalized_entries(&execution.id)
+        .await
+        .unwrap_or_default();
+    if has_credit_or_usage_error(&entries) {
+        tracing::info!(
+            workspace_id = %workspace.id,
+            execution_id = %execution.id,
+            "Auto error remediation skipped: credit or usage limit error"
+        );
+        return;
+    }
+    let error_messages = extract_error_messages(&entries);
+
     match consumer.guard.try_reserve(
         workspace.id,
         workspace.name.as_deref(),
@@ -147,6 +165,7 @@ async fn handle(deployment: &DeploymentImpl, consumer: &Consumer, ev: ErrorRemed
         &workspace,
         &session,
         &execution,
+        error_messages,
     )
     .await
     {
@@ -186,6 +205,7 @@ async fn launch(
     workspace: &Workspace,
     session: &Session,
     execution: &ExecutionProcess,
+    error_messages: Vec<String>,
 ) -> Result<LaunchOutcome, String> {
     let pool = &deployment.db().pool;
 
@@ -201,13 +221,6 @@ async fn launch(
     if repos.is_empty() {
         return Err("no repositories to start the remediation workspace on".to_string());
     }
-
-    let error_messages = deployment
-        .container()
-        .normalized_entries(&execution.id)
-        .await
-        .map(|entries| extract_error_messages(&entries))
-        .unwrap_or_default();
 
     let (variant, variant_fallback) = resolve_variant(config);
 

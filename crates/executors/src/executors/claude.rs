@@ -2850,8 +2850,9 @@ impl ClaudeLogProcessor {
                     patches.push(self.add_token_usage_entry(entry_index_provider));
                 }
 
-                if matches!(self.strategy, HistoryStrategy::AmpResume) && is_error.unwrap_or(false)
-                {
+                // Failed results are provider error evidence for Claude as well
+                // as Amp. Their assistant text alone is not an error entry.
+                if is_error.unwrap_or(false) {
                     let entry = NormalizedEntry {
                         timestamp: None,
                         entry_type: NormalizedEntryType::ErrorMessage {
@@ -3388,6 +3389,8 @@ pub enum ClaudeJson {
         result: Option<serde_json::Value>,
         #[serde(default)]
         error: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        errors: Vec<String>,
         #[serde(default, alias = "numTurns")]
         num_turns: Option<u32>,
         #[serde(default, alias = "sessionId")]
