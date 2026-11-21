@@ -13,6 +13,15 @@ returns visible/hidden state and supported reasoning efforts, while OpenAI's
 official latest-model resolver and model reference cover newly announced models
 that an older pinned CLI may not yet list.
 
+Treat those sources as different compatibility boundaries. The public API's
+latest family can lead the ChatGPT catalog used by the pinned Codex CLI. For a
+Vibe Kanban picker refresh, initialize the exact deployed app-server and query
+`model/list` with hidden entries included. Advertise only its visible entries,
+and derive reasoning options from each returned capability record. For Codex
+0.155.1 this avoided prematurely advertising API-only GPT-6.2 IDs and exposed a
+real picker drift instead: GPT-6 Sol and Luna were missing, GPT-6 Astra lacked
+`ultra`, and two older entries were no longer visible.
+
 Keep the catalog newest-first and distinguish the infrastructure-provided
 Default choice from explicit model entries. When a supplied picker reference is
 an exact current menu, remove superseded advertised entries rather than treating
@@ -84,6 +93,7 @@ alias. Advertise the versioned ID only, and leave entitlement errors to the API.
 ## Contributed by
 
 - `vk/094a-update-chatgpt-m`
+- `vk/3ffa-upgrade-codex-mo`
 
 - `vk/129c-update-to-opus-5`
 - `vk/6823-model-menu`

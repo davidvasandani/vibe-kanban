@@ -76,6 +76,16 @@ mod tests {
                 (
                     "gpt-6-astra",
                     "GPT-6 Astra",
+                    vec!["low", "medium", "high", "xhigh", "max", "ultra"],
+                ),
+                (
+                    "gpt-6-sol",
+                    "GPT-6 Sol",
+                    vec!["low", "medium", "high", "xhigh", "max", "ultra"],
+                ),
+                (
+                    "gpt-6-luna",
+                    "GPT-6 Luna",
                     vec!["low", "medium", "high", "xhigh", "max"],
                 ),
                 (
@@ -92,12 +102,6 @@ mod tests {
                     "gpt-5.6-luna",
                     "GPT-5.6 Luna",
                     vec!["low", "medium", "high", "xhigh", "max"],
-                ),
-                ("gpt-5.5", "GPT-5.5", vec!["low", "medium", "high", "xhigh"],),
-                (
-                    "gpt-5.3-codex-spark",
-                    "GPT-5.3 Codex Spark",
-                    vec!["low", "medium", "high", "xhigh"],
                 ),
             ]
         );
@@ -1070,15 +1074,6 @@ impl StandardCodingAgentExecutor for Codex {
         _workdir: Option<&std::path::Path>,
         _repo_path: Option<&std::path::Path>,
     ) -> Result<futures::stream::BoxStream<'static, json_patch::Patch>, ExecutorError> {
-        let xhigh_reasoning_options = ReasoningOption::from_names(
-            [
-                ReasoningEffort::Low,
-                ReasoningEffort::Medium,
-                ReasoningEffort::High,
-                ReasoningEffort::Xhigh,
-            ]
-            .map(|e| e.as_ref().to_string()),
-        );
         let max_reasoning_options = ReasoningOption::from_names(
             [
                 ReasoningEffort::Low,
@@ -1109,6 +1104,18 @@ impl StandardCodingAgentExecutor for Codex {
                         id: "gpt-6-astra".to_string(),
                         name: "GPT-6 Astra".to_string(),
                         provider_id: None,
+                        reasoning_options: ultra_reasoning_options.clone(),
+                    },
+                    ModelInfo {
+                        id: "gpt-6-sol".to_string(),
+                        name: "GPT-6 Sol".to_string(),
+                        provider_id: None,
+                        reasoning_options: ultra_reasoning_options.clone(),
+                    },
+                    ModelInfo {
+                        id: "gpt-6-luna".to_string(),
+                        name: "GPT-6 Luna".to_string(),
+                        provider_id: None,
                         reasoning_options: max_reasoning_options.clone(),
                     },
                     ModelInfo {
@@ -1128,18 +1135,6 @@ impl StandardCodingAgentExecutor for Codex {
                         name: "GPT-5.6 Luna".to_string(),
                         provider_id: None,
                         reasoning_options: max_reasoning_options,
-                    },
-                    ModelInfo {
-                        id: "gpt-5.5".to_string(),
-                        name: "GPT-5.5".to_string(),
-                        provider_id: None,
-                        reasoning_options: xhigh_reasoning_options.clone(),
-                    },
-                    ModelInfo {
-                        id: "gpt-5.3-codex-spark".to_string(),
-                        name: "GPT-5.3 Codex Spark".to_string(),
-                        provider_id: None,
-                        reasoning_options: xhigh_reasoning_options,
                     },
                 ],
                 permissions: vec![
