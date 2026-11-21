@@ -966,6 +966,17 @@ configuration, and is visible and cancellable by the operator. The setting is
 read when the event is handled. Such an error does not also trigger XLI
 remediation.
 
+## Review: vk/3ffa-upgrade-codex-mo
+
+Applied `/speckit.constitution`: principles II (exact catalog regression
+evidence), III/VI (change the existing discovery catalog only), IX (derive
+vendor-facing capability identifiers from the pinned artifact that actually
+executes), and L (removing a model from discovery must not delete or strand a
+stored explicit selection) fully govern this refresh. Public API documentation
+can lead the deployed ChatGPT Codex catalog, so app-server `model/list` from the
+pinned Codex 0.155.1 binary is the compatibility authority for IDs, visibility,
+order, and reasoning levels. No new principle or version change is required.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
