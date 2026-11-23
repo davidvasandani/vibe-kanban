@@ -32,3 +32,7 @@ Independent Codex review found no actionable regressions. Formatting and officia
 ## Live deployment follow-up
 
 PR #407 deployed successfully. Live discovery lists mcp-gateway:sgsc-mcp and Cloudflare as swept with unauthenticated state. Their rejected refresh grants exposed Gateway callback port unavailable in browser fallback. The provider holds a pre-bind clone of ClientInfo; bare OnceLock cloning snapshots its empty state. Share those cells through Arc and test clone-before-initialization to repair the fallback without hardcoding ports or changing callback identity. Live renewal remains pending the follow-up deployment.
+
+## Redirect-chain follow-up
+
+PR #408 deployed and resolved the callback port. Live sgsc SSO now redirects to localhost, but Playwright route interception misses URLs after HTTP redirects, producing ERR_CONNECTION_REFUSED. A live read-only browser diagnostic confirmed that request events capture the callback while the route handler does not. Add exact-origin/path request observation alongside routing; retain state validation and remove both handlers in finally. No gateway token changed during diagnostics.
