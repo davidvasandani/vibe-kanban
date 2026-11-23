@@ -276,7 +276,7 @@ async fn persist_credentials_with_store(
     let raw =
         serde_json::to_vec(&credentials).map_err(|_| "credential update failed".to_string())?;
     let encrypted = store
-        .encrypt(&raw, binding(&current).as_bytes())
+        .encrypt(&raw, binding(current).as_bytes())
         .map_err(|_| "credential update failed".to_string())?;
     let updated = sqlx::query(
         r#"UPDATE mcp_gateway_connections
