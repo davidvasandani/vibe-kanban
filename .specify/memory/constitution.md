@@ -1618,3 +1618,15 @@ repair: test externally started turns, reuse execution discovery and bounded
 history reads, preserve both frontend consumers and scope stream lifetimes.
 No new principle is needed. Stale task paths in command templates resolve to
 this task's feature directory.
+
+## Review: vk/a221-restore-opus-4-8
+
+Applied `/speckit.constitution`. II, VI, IX and L govern restoring Opus 4.8 in
+the Claude Code picker. The ordered catalog test is the contract. Capabilities
+and the 1M context window come from the pinned 2.1.322 binary's catalog record,
+not from the model name. The CLI pin and alias map stay untouched. A newly
+advertised model must remain subject to the `disabled_models` display filter.
+No new principle is needed. This command's template names
+`homelab/.specify/memory/constitution.md`; that repo is outside this task, so
+the Vibe Kanban constitution was reviewed instead. Task artifacts use
+specs/vk/a221-restore-opus-4-8.
