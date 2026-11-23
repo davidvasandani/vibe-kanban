@@ -32,6 +32,10 @@ Gateway JSON authentication errors include `reauth_target` while preserving upst
 
 The regression fixture forces expiry, concurrently refreshes the entry, verifies initialize succeeds, and asserts that the agent capability hash remains unchanged. It also covers stale writes, disconnects, cross-upstream reconnects, retained refresh grants, and transport classification. Browser interception has mock coverage; this is not evidence of a live provider SSO success.
 
+## Startup cloning
+
+ClientInfo is cloned into the gateway provider before the server binds its listener. Its one-time listener values must be shared through Arc<OnceLock<_>>; cloning a bare OnceLock snapshots the empty state and leaves legacy OAuth browser fallback permanently unable to discover its callback port. A regression test clones before initialization and checks both the main and preview listener values. Live deployment exposed this after an upstream refresh grant was rejected.
+
 ## Contributed by
 
 - `vk/9784-auto-auth-renew`
