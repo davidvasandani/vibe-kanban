@@ -74,6 +74,9 @@ pub enum ReauthError {
     NotConfigured(String),
     #[error("{0}")]
     Busy(String),
+    /// A target-specific human gate, not an account-wide Entra refusal.
+    #[error("{0}")]
+    Refused(String),
     #[error(transparent)]
     Entra(#[from] EntraError),
     #[error("{0}")]
@@ -83,7 +86,10 @@ pub enum ReauthError {
 impl ReauthError {
     /// A refusal that must not be retried without an operator.
     fn is_refusal(&self) -> bool {
-        matches!(self, ReauthError::Entra(EntraError::Refused(_)))
+        matches!(
+            self,
+            ReauthError::Refused(_) | ReauthError::Entra(EntraError::Refused(_))
+        )
     }
 }
 
@@ -1103,7 +1109,10 @@ fn normalize_refusal(err: ReauthError) -> ReauthError {
 /// Every browser-driven target signs in as the same Entra account with the
 /// same 1Password factors; acli uses its own API token.
 fn uses_entra(id: &ReauthTargetId) -> bool {
-    !matches!(id, ReauthTargetId::CliTool(CliToolId::Acli))
+    !matches!(
+        id,
+        ReauthTargetId::CliTool(CliToolId::Acli) | ReauthTargetId::McpGateway(_)
+    )
 }
 
 /// One Entra-backed run at a time, held from the refusal check through the
@@ -1329,7 +1338,7 @@ mod tests {
             assert_eq!(status.auth_state, state);
             assert_eq!(status.auth_message.as_deref(), Some("probe evidence"));
         }
-        assert!(uses_entra(&ReauthTargetId::McpGateway("sgsc-mcp".into())));
+        assert!(!uses_entra(&ReauthTargetId::McpGateway("sgsc-mcp".into())));
     }
 
     #[test]

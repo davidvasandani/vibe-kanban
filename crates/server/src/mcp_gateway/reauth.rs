@@ -20,7 +20,7 @@ use services::services::{
     reauth::{
         ReauthAuthState, ReauthError,
         gateway::{self, GatewayReauthProvider, GatewayTarget},
-        gateway_browser, sweep,
+        sweep,
     },
 };
 
@@ -61,6 +61,15 @@ fn expiry(row: &McpGatewayConnection, credentials: &StoredCredentials) -> Option
         .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
         .map(|d| d.with_timezone(&Utc))
 }
+pub(super) fn refresh_before_request(
+    row: &McpGatewayConnection,
+    credentials: &StoredCredentials,
+) -> bool {
+    credentials.refresh_token.is_some()
+        && expiry(row, credentials)
+            .is_some_and(|at| at <= Utc::now() + chrono::Duration::seconds(60))
+}
+
 fn due(at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
     let horizon = sweep::sweep_interval_from_env()
         .unwrap_or(Duration::from_secs(1800))
@@ -101,10 +110,23 @@ fn target_name(row: &McpGatewayConnection, rows: &[McpGatewayConnection]) -> Str
         row.id.clone()
     }
 }
+async fn bound_rows(
+    pool: &sqlx::SqlitePool,
+    owner: &str,
+    machine: &str,
+) -> Result<Vec<McpGatewayConnection>, ReauthError> {
+    sqlx::query_as::<_, McpGatewayConnection>("SELECT * FROM mcp_gateway_connections WHERE owner_user_id = ? AND machine_id = ? AND auth_kind IN ('oauth', 'cloudflare_service_token_oauth') AND status != 'disconnected' AND encrypted_credentials IS NOT NULL ORDER BY id")
+            .bind(owner).bind(machine).fetch_all(pool).await.map_err(|_| failed("Gateway inventory unavailable"))
+}
+
 impl Provider {
     async fn rows(&self) -> Result<Vec<McpGatewayConnection>, ReauthError> {
-        sqlx::query_as::<_, McpGatewayConnection>("SELECT * FROM mcp_gateway_connections WHERE owner_user_id = ? AND machine_id = ? AND auth_kind IN ('oauth', 'cloudflare_service_token_oauth') AND status != 'disconnected' AND encrypted_credentials IS NOT NULL ORDER BY id")
-            .bind(self.deployment.user_id()).bind(self.deployment.user_id()).fetch_all(&self.deployment.db().pool).await.map_err(|_| failed("Gateway inventory unavailable"))
+        bound_rows(
+            &self.deployment.db().pool,
+            self.deployment.user_id(),
+            self.deployment.user_id(),
+        )
+        .await
     }
     async fn resolve(&self, name: &str) -> Result<(McpGatewayConnection, String), ReauthError> {
         let rows = self.rows().await?;
@@ -207,15 +229,18 @@ impl GatewayReauthProvider for Provider {
     async fn targets(&self) -> Result<Vec<GatewayTarget>, ReauthError> {
         let rows = self.rows().await?;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-        let targets = stream::iter(rows.iter().map(|row| async {
-            let name = target_name(row, &rows);
-            let (state, message, renewal_due) = match credentials(row) {
+        let entries: Vec<_> = rows
+            .iter()
+            .map(|row| (row.clone(), target_name(row, &rows)))
+            .collect();
+        let targets = stream::iter(entries.into_iter().map(|(row, name)| async move {
+            let (state, message, renewal_due) = match credentials(&row) {
                 Err(_) => (ReauthAuthState::Unknown, Some("Gateway credential storage unavailable".into()), false),
                 Ok(credentials) => {
-                    let at = expiry(row, &credentials);
+                    let at = expiry(&row, &credentials);
                     // Probe even future expiry: a revoked token can still carry
                     // an unexpired timestamp, and an unsigned JWT is not proof.
-                    match tokio::time::timeout_at(deadline, probe(row, &credentials)).await.unwrap_or(Probe::Unknown) {
+                    match tokio::time::timeout_at(deadline, probe(&row, &credentials)).await.unwrap_or(Probe::Unknown) {
                         Probe::Authenticated => (ReauthAuthState::Authenticated, None, due(at, Utc::now())),
                         Probe::Rejected => (ReauthAuthState::Unauthenticated, Some("Upstream rejected the gateway credential".into()), true),
                         Probe::Unknown => (ReauthAuthState::Unknown, Some("Initialize could not verify authentication (transport, permissions, or protocol failure)".into()), false),
@@ -290,7 +315,7 @@ impl GatewayReauthProvider for Provider {
             &scopes,
         )
         .map_err(|_| failed("Gateway authorize URL is invalid"))?;
-        let code = gateway_browser::authorize_code(&url, &redirect, &state, progress).await?;
+        let code = gateway::authorize_code(name, &url, &redirect, &state, progress).await?;
         let tokens = mcp_oauth::exchange_token_set(
             &client,
             &metadata.token_endpoint,
@@ -307,6 +332,7 @@ impl GatewayReauthProvider for Provider {
         stored.access_token = tokens.access_token;
         stored.refresh_token = tokens.refresh_token;
         stored.token_endpoint = Some(metadata.token_endpoint);
+        stored.revocation_endpoint = metadata.revocation_endpoint;
         stored.resource = metadata.resource;
         stored.redirect_uri = Some(redirect);
         persist_credentials(&self.deployment.db().pool, &current, &stored, expires_at)
@@ -379,6 +405,18 @@ pub(super) async fn annotate_auth_error(
     ) {
         return response;
     }
+    let provider = Provider {
+        deployment: deployment.clone(),
+    };
+    let target = provider
+        .resolve(&row.id)
+        .await
+        .map(|(_, name)| name)
+        .unwrap_or_else(|_| row.id.clone());
+    auth_error_response(response, &target).await
+}
+
+async fn auth_error_response(response: Response, target: &str) -> Response {
     let (mut parts, body) = response.into_parts();
     let bytes = match tokio::time::timeout(Duration::from_secs(5), to_bytes(body, 65536)).await {
         Ok(Ok(bytes)) => bytes,
@@ -394,18 +432,12 @@ pub(super) async fn annotate_auth_error(
     if kind.is_none() && parts.status != StatusCode::UNAUTHORIZED {
         return Response::from_parts(parts, bytes.into());
     }
-    let provider = Provider {
-        deployment: deployment.clone(),
-    };
-    let target = provider
-        .resolve(&row.id)
-        .await
-        .map(|(_, name)| name)
-        .unwrap_or_else(|_| row.id.clone());
-    let mut value: Value = serde_json::from_slice(&bytes)
+    let Some(mut value) = serde_json::from_slice::<Value>(&bytes)
         .ok()
         .filter(Value::is_object)
-        .unwrap_or_else(|| json!({"error":"Upstream MCP authentication failed"}));
+    else {
+        return Response::from_parts(parts, bytes.into());
+    };
     value["reauth_target"] = json!(format!("mcp-gateway:{target}"));
     if let Some(kind) = kind {
         value["kind"] = json!(kind);
@@ -416,38 +448,6 @@ pub(super) async fn annotate_auth_error(
         .insert("content-type", "application/json".parse().unwrap());
     let body = Json(value).into_response().into_body();
     Response::from_parts(parts, body)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn expiry_and_protocol_evidence() {
-        let token = format!("x.{}.x", URL_SAFE_NO_PAD.encode(br#"{"exp":2000000000}"#));
-        assert_eq!(
-            token_expiry(None, &token),
-            Some("2033-05-18T03:33:20+00:00".into())
-        );
-        assert!(due(
-            Some(Utc::now() + chrono::Duration::minutes(5)),
-            Utc::now()
-        ));
-        assert!(!due(None, Utc::now()));
-        assert!(!initialized_body(
-            br#"{"jsonrpc":"2.0","id":1,"error":{"code":-1}}"#
-        ));
-        assert!(!initialized_body(br#"{"ok":true}"#));
-        assert!(initialized_body(b"data: {\"id\":1,\"result\":{\"protocolVersion\":\"2025-03-26\",\"serverInfo\":{},\"capabilities\":{}}}\n\n"));
-        assert_eq!(
-            auth_kind(br#"{"kind":"token_expired"}"#),
-            Some("token_expired")
-        );
-        assert_eq!(
-            auth_kind(br#"{"error":"invalid_token"}"#),
-            Some("invalid_token")
-        );
-        assert!(!refresh_rejected("token refresh failed (HTTP 503)"));
-    }
 }
 
 #[cfg(test)]

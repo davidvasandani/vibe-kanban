@@ -140,6 +140,14 @@ async fn proxy_request(
         Ok(request) => request,
         Err(response) => return response,
     };
+    // Short-lived grants can expire between sweeps. Refresh before forwarding
+    // when expiry is known, retaining the stable agent capability.
+    if reauth::refresh_before_request(&connection, &credentials)
+        && let Ok(refreshed) =
+            refresh_credentials(&deployment.db().pool, &connection, &credentials).await
+    {
+        credentials = refreshed;
+    }
     let first = proxy::forward(&prepared, &connection, &credentials).await;
     if !matches!(
         first.status(),
@@ -193,6 +201,9 @@ async fn refresh_credentials_with_store(
     .await
     .map_err(|_| "refresh state unavailable".to_string())?
     .ok_or_else(|| "shared connection no longer exists".to_string())?;
+    if current.upstream_url != original.upstream_url {
+        return Err("shared connection upstream changed concurrently".to_string());
+    }
     let envelope = current
         .encrypted_credentials
         .as_deref()
@@ -202,7 +213,9 @@ async fn refresh_credentials_with_store(
         .map_err(|_| "stored credential unavailable".to_string())?;
     let mut credentials: StoredCredentials =
         serde_json::from_slice(&raw).map_err(|_| "stored credential unavailable".to_string())?;
-    if current.credential_version != original.credential_version || credentials.access_token != stale.access_token {
+    if current.credential_version != original.credential_version
+        || credentials.access_token != stale.access_token
+    {
         return Ok(credentials);
     }
     let refresh_token = credentials
@@ -237,6 +250,7 @@ async fn refresh_credentials_with_store(
     .await?;
     credentials.access_token = tokens.access_token;
     credentials.refresh_token = tokens.refresh_token;
+    credentials.scope = tokens.scope.or(credentials.scope);
     let expires_at = reauth::token_expiry(tokens.expires_in, &credentials.access_token);
     persist_credentials_with_store(pool, &current, &credentials, expires_at, store).await?;
     Ok(credentials)
