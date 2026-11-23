@@ -8,7 +8,7 @@ Applied `/speckit.tasks`.
 - [x] T003 [P] Fix scoped cancel_wakeup route extraction and add regression coverage in crates/server/src/routes and crates/mcp/src/task_server/tools. Update MCP recovery instructions for gateway targets.
 
 ## Layer 2
-- [ ] T004 Integrate contracts, add end-to-end forced-expiry/stable-bearer fixtures and run focused checks plus repository format/check requirements.
+- [x] T004 Integrate contracts, add end-to-end forced-expiry/stable-bearer fixtures and run focused checks plus repository format/check requirements.
 - [x] T005 Run independent Codex diff review; resolve significant findings and reverify.
 - [x] T006 Record reusable gateway renewal knowledge in wiki and index; commit.
 - [ ] T007 Open PR against main, satisfy required checks, merge and report verification limits.
