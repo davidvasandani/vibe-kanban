@@ -1,0 +1,12 @@
+# Validation
+- pnpm install --frozen-lockfile: passed.
+- Baseline regression run: 4 failed / 1 passed, reproducing missing terminal-first turns and stale terminal output after scope/removal.
+- Fixed focused suite: 42 tests passed in 5 files, including 7 history-hook regressions.
+- Repository format, check and lint: started; final outcomes recorded below.
+- pnpm run format: passed; no unrelated formatting changes.
+- Updated focused suite after review: 43 tests passed in 5 files (8 history-hook cases).
+- Full frontend type checks: local-web, remote-web, web-core and ui passed.
+- Full frontend lint: local-web, web-core, remote-web and ui passed.
+- Full pnpm lint reached backend and failed in dependency linking: rust-lld could not open libsyn-ed35e40b23a02d7c.rlib. No Rust files changed.
+- Independent Codex review pass 1: P2 on missing recovery for a failed terminal-first fetch. Fixed by updating hasEarlierHistory after failed reads; regression verifies successful recovery through loadEarlier.
+- Independent Codex review pass 2: no actionable defects. Reviewer inspected the diff and recovery change; tests were run by the implementing agent.

@@ -1610,3 +1610,11 @@ Preserve owner/machine bindings and stable agent capabilities. Network failures
 are not proof of expired credentials; human-required refusals remain distinct
 from retryable failures. No new principle is needed. Task artifacts use
 specs/vk/9784-auto-auth-renew; older task paths in command templates are stale.
+
+## Review: vk/227e-scheduled-wake-u
+
+Applied `/speckit.constitution`. Existing II, III, IV and XLIV govern this
+repair: test externally started turns, reuse execution discovery and bounded
+history reads, preserve both frontend consumers and scope stream lifetimes.
+No new principle is needed. Stale task paths in command templates resolve to
+this task's feature directory.
