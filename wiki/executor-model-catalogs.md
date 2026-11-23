@@ -90,6 +90,29 @@ alias from the 200K default to a 1M window. Mythos records have `null`
 third-party provider IDs (first-party only), and the CLI defines **no** `mythos`
 alias. Advertise the versioned ID only, and leave entitlement errors to the API.
 
+## Rebuilding the catalog must not drop models nobody retired
+
+When #329 rebuilt the Claude catalog around versioned IDs, it re-listed only the
+current-generation models. Opus 4.8 silently disappeared even though the pinned
+CLI still catalogs it and nobody asked for its removal. A stale test then
+asserted a 200K window for `claude-opus-4-8`, contradicting the binary's
+`context.window: 1e6, native_1m`. When you rebuild or refresh, diff the old
+picker against the new one and carry over every explicit model the binary still
+lists. Take each model's window from its catalog record, never from a guess
+about its generation. Restored in `vk/a221-restore-opus-4-8`.
+
+## A `claude-opus-4-8` 404 can come from the CLI, not the picker
+
+Claude Code 2.1.281 and later retries a safety refusal on a hard-coded fallback
+model. For Opus 5.5 it maps `cyber` → `claude-opus-4-8`, and `bio` /
+`frontier_llm` → `claude-opus-5`. The stream shows
+`System: model_refusal_fallback`, followed by "There's an issue with the
+selected model (claude-opus-4-8)" when the account can't reach the fallback.
+That error is the API's 404, relayed by the CLI. VK never sent that model and
+can't change the map. Before changing the catalog, check the turn's log for
+`model_refusal_fallback`. The CLI-side controls are
+`CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK` and the `switchModelsOnFlag` setting.
+
 ## Contributed by
 
 - `vk/094a-update-chatgpt-m`
@@ -98,3 +121,4 @@ alias. Advertise the versioned ID only, and leave entitlement errors to the API.
 - `vk/129c-update-to-opus-5`
 - `vk/6823-model-menu`
 - `vk/7c99-add-new-claude-m`
+- `vk/a221-restore-opus-4-8`
