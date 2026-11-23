@@ -1,6 +1,6 @@
 # Prompt-driven agent pipelines
 
-Tags: `a17f-fix-parallel-age`, `89c5-pipeline-instruc`, `30aa-speckit-analyis`
+Tags: `a17f-fix-parallel-age`, `89c5-pipeline-instruc`, `30aa-speckit-analyis`, `7f7b-keep-speckit-upd`
 
 ## Treat prompts as executable contracts
 
@@ -75,6 +75,29 @@ added. The predecessors now live as exact `git show` copies in
 there; a test asserts no current default is listed as historical and every
 listed version upgrades. Never reformat those files, since a single changed
 byte stops matching.
+
+## Refresh a vendored SpecKit release without replacing VK's state model
+
+Vibe Kanban uses SpecKit's specification content, but VK owns feature identity
+and repository selection. Upstream helper scripts create or infer git branches;
+VK persists `speckit_feature_key` and `speckit_host_repo_id` and supplies an
+untracked `.specify/feature-dir`. A release refresh therefore ports applicable
+template and command semantics instead of copying upstream's whole runtime.
+
+Record the immutable upstream tag and commit beside the bundle. Diff the new
+release against the previously recorded release, then classify each change as
+adopted, adapted to VK's `<FEATURE_DIR>`, or excluded because it belongs to an
+unsupported extension, integration, or branch-management script. This keeps a
+release claim auditable even when VK's files cannot be byte-identical to
+upstream.
+
+Scaffold templates are also user-owned after provisioning. Preserve the exact
+previous template bytes and upgrade only an exact match. A read failure is not
+evidence that a file is absent: create on `NotFound`, but return other errors
+without writing. In particular, `read_to_string` can reject non-UTF-8 operator
+content; falling through to a default write would destroy it. Tests should
+cover exact migration, a one-byte customization, non-UTF-8 content, the
+upstream release identity, and absence of upstream branch-path placeholders.
 
 ## Keeping artifacts out of git per repository
 
