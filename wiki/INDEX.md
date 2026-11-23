@@ -85,6 +85,9 @@ contributed to it.
   several aliases at once (2.1.322: `fable`/`sonnet`/`haiku` → Fable 5.2,
   Sonnet 5.5, Haiku 5.5). Diff the whole table, advertise every alias target,
   and derive effort and 1M support from the binary's capability records.
+  Catalog rebuilds must carry over models the binary still lists (Opus 4.8
+  was dropped and restored). A `claude-opus-4-8` 404 after
+  `model_refusal_fallback` is the CLI's own refusal retry, not the picker.
 - [model-picker-preferences.md](model-picker-preferences.md) — Per-agent
   picker preferences on `ExecutorProfile` (serde, merge, reserved keys).
   Hiding keeps the selection visible. Invalidate `['user-system']` so stale
