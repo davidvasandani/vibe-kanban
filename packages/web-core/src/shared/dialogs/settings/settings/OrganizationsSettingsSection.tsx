@@ -41,6 +41,7 @@ import {
   DropdownMenuTriggerButton,
 } from '@vibe/ui/components/Dropdown';
 import { SettingsCard, SettingsField } from './SettingsComponents';
+import { OrganizationCommitIdentityCard } from './OrganizationCommitIdentityCard';
 import { OrganizationEnvVarsCard } from './OrganizationEnvVarsCard';
 
 export function OrganizationsSettingsSection() {
@@ -477,6 +478,11 @@ export function OrganizationsSettingsSection() {
       {/* Environment variables (admin only; includes personal orgs) */}
       {selectedOrg && selectedOrgId && isAdmin && (
         <OrganizationEnvVarsCard organizationId={selectedOrgId} />
+      )}
+
+      {/* Commit identity (admin only; includes personal orgs) */}
+      {selectedOrg && selectedOrgId && isAdmin && (
+        <OrganizationCommitIdentityCard organizationId={selectedOrgId} />
       )}
 
       {/* Billing CTA (admin only, non-personal orgs, when remote URL is configured) */}

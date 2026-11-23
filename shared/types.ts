@@ -648,6 +648,12 @@ export type UpdateOrganizationEnvVarRequest = { value: string, };
 
 export type UpdateOrganizationEnvVarResponse = { env_var: OrganizationEnvVar, };
 
+export type OrganizationCommitIdentity = { organization_id: string, name: string, email: string, allowed_emails: Array<string>, updated_at: string, };
+
+export type GetOrganizationCommitIdentityResponse = { commit_identity: OrganizationCommitIdentity | null, };
+
+export type UpsertOrganizationCommitIdentityRequest = { name: string, email: string, allowed_emails: Array<string>, };
+
 export type RegisterRepoRequest = { path: string, display_name: string | null, };
 
 export type InitRepoRequest = { parent_path: string, folder_name: string, };

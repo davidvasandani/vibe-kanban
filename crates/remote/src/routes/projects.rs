@@ -1,7 +1,8 @@
 use api_types::{
     BulkUpdateProjectsRequest, BulkUpdateProjectsResponse, CreateProjectRequest, DeleteResponse,
-    ListProjectsQuery, ListProjectsResponse, MutationResponse, Project, ResolvedEnvVar,
-    ResolvedOrganizationEnvVarsResponse, UpdateProjectRequest,
+    GetOrganizationCommitIdentityResponse, ListProjectsQuery, ListProjectsResponse,
+    MutationResponse, Project, ResolvedEnvVar, ResolvedOrganizationEnvVarsResponse,
+    UpdateProjectRequest,
 };
 use axum::{
     Json,
@@ -14,13 +15,14 @@ use uuid::Uuid;
 
 use super::{
     error::{ErrorResponse, db_error},
-    organization_members::ensure_member_access,
+    organization_members::{ensure_member_access, ensure_project_access},
 };
 use crate::{
     AppState,
     auth::RequestContext,
     db::{
-        get_txid, organization_env_vars::OrganizationEnvVarRepository, projects::ProjectRepository,
+        get_txid, organization_commit_identities::OrganizationCommitIdentityRepository,
+        organization_env_vars::OrganizationEnvVarRepository, projects::ProjectRepository,
         types::is_valid_hsl_color,
     },
     mutation_definition::MutationBuilder,
@@ -41,6 +43,10 @@ pub fn router() -> axum::Router<AppState> {
         .router()
         .route("/projects/bulk", post(bulk_update_projects))
         .route("/projects/{project_id}/env-vars", get(get_project_env_vars))
+        .route(
+            "/projects/{project_id}/commit-identity",
+            get(get_project_commit_identity),
+        )
 }
 
 /// Returns the owning organization's env vars, decrypted, for a project the
@@ -89,6 +95,29 @@ async fn get_project_env_vars(
     }
 
     Ok(Json(ResolvedOrganizationEnvVarsResponse { env_vars }))
+}
+
+/// Returns the owning organization's commit identity for a project the caller
+/// can access. Agent hosts apply it to every workspace worktree they create
+/// against this project.
+#[instrument(
+    name = "projects.get_project_commit_identity",
+    skip(state, ctx),
+    fields(project_id = %project_id, user_id = %ctx.user.id)
+)]
+async fn get_project_commit_identity(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<RequestContext>,
+    Path(project_id): Path<Uuid>,
+) -> Result<Json<GetOrganizationCommitIdentityResponse>, ErrorResponse> {
+    let organization_id = ensure_project_access(state.pool(), ctx.user.id, project_id).await?;
+    let commit_identity =
+        OrganizationCommitIdentityRepository::find_by_organization(state.pool(), organization_id)
+            .await
+            .map_err(|error| db_error(error, "failed to load commit identity"))?;
+    Ok(Json(GetOrganizationCommitIdentityResponse {
+        commit_identity,
+    }))
 }
 
 #[instrument(

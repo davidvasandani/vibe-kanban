@@ -11,10 +11,12 @@ use ts_rs::TS;
 use utils::diff::{Diff, DiffChangeKind};
 
 mod cli;
+mod commit_identity;
 mod validation;
 
 use cli::{ChangeType, StatusDiffEntry, StatusDiffOptions};
 pub use cli::{GitCli, GitCliError, StatusEntry, WorktreeStatus};
+pub use commit_identity::WorktreeCommitIdentity;
 pub use utils::{github_credentials::GitHubCredentials, path::ALWAYS_SKIP_DIRS};
 pub use validation::is_valid_branch_prefix;
 
@@ -316,6 +318,18 @@ impl GitService {
             upstream_ref,
             commits_behind,
         })
+    }
+
+    /// Pin the commit identity of the linked worktree at `worktree_path` (see
+    /// [`WorktreeCommitIdentity`]), or remove a previously pinned one when
+    /// `identity` is `None`. Writes only the worktree's own config, never the
+    /// repository's shared one beyond enabling `extensions.worktreeConfig`.
+    pub fn apply_worktree_commit_identity(
+        &self,
+        worktree_path: &Path,
+        identity: Option<&WorktreeCommitIdentity>,
+    ) -> Result<(), GitServiceError> {
+        commit_identity::apply(worktree_path, identity)
     }
 
     /// Ensure local (repo-scoped) identity exists for CLI commits.

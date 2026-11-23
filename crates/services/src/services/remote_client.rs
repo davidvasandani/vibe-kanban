@@ -7,11 +7,12 @@ use api_types::{
     CreateInvitationResponse, CreateIssueAssigneeRequest, CreateIssueCommentRequest,
     CreateIssueRelationshipRequest, CreateIssueRequest, CreateIssueTagRequest,
     CreateOrganizationRequest, CreateOrganizationResponse, CreateWorkspaceRequest, DeleteResponse,
-    DeleteWorkspaceRequest, GetInvitationResponse, GetOrganizationResponse, HandoffInitRequest,
-    HandoffInitResponse, HandoffRedeemRequest, HandoffRedeemResponse, Issue, IssueAssignee,
-    IssueComment, IssueRelationship, IssueTag, ListAttachmentsResponse, ListInvitationsResponse,
-    ListIssueAssigneesResponse, ListIssueCommentsResponse, ListIssueRelationshipsResponse,
-    ListIssueTagsResponse, ListIssueWorkspacesResponse, ListIssuesResponse, ListMembersResponse,
+    DeleteWorkspaceRequest, GetInvitationResponse, GetOrganizationCommitIdentityResponse,
+    GetOrganizationResponse, HandoffInitRequest, HandoffInitResponse, HandoffRedeemRequest,
+    HandoffRedeemResponse, Issue, IssueAssignee, IssueComment, IssueRelationship, IssueTag,
+    ListAttachmentsResponse, ListInvitationsResponse, ListIssueAssigneesResponse,
+    ListIssueCommentsResponse, ListIssueRelationshipsResponse, ListIssueTagsResponse,
+    ListIssueWorkspacesResponse, ListIssuesResponse, ListMembersResponse,
     ListOrganizationsResponse, ListProjectStatusesResponse, ListProjectsResponse,
     ListPullRequestsResponse, ListTagsResponse, LocalLoginRequest, LocalLoginResponse,
     MutationResponse, Organization, ProfileResponse, PullRequest,
@@ -587,6 +588,17 @@ impl RemoteClient {
         remote_project_id: Uuid,
     ) -> Result<ResolvedOrganizationEnvVarsResponse, RemoteClientError> {
         self.get_authed(&format!("/v1/projects/{remote_project_id}/env-vars"))
+            .await
+    }
+
+    /// Fetches the owning organization's commit identity for a remote project
+    /// the caller can access. Applied to every workspace worktree created
+    /// against that project.
+    pub async fn get_project_commit_identity(
+        &self,
+        remote_project_id: Uuid,
+    ) -> Result<GetOrganizationCommitIdentityResponse, RemoteClientError> {
+        self.get_authed(&format!("/v1/projects/{remote_project_id}/commit-identity"))
             .await
     }
 

@@ -59,7 +59,7 @@ use executors::{
     profile::{ExecutorConfig, ExecutorConfigs, ExecutorProfile},
 };
 use futures::{FutureExt, StreamExt, TryStreamExt, stream::select};
-use git::GitService;
+use git::{GitService, WorktreeCommitIdentity};
 use serde_json::json;
 use services::services::{
     analytics::AnalyticsContext,
@@ -4289,29 +4289,24 @@ impl LocalContainerService {
         .await
     }
 
-    /// Resolve organization-level env vars for a workspace by mapping it to
-    /// its remote project and fetching the decrypted values from the remote
-    /// server. The mapping is tried in order of cost: the `remote_project_id`
-    /// persisted on the workspace row (set at creation for issue-linked
-    /// workspaces and on link/unlink), the legacy workspace → task → local
-    /// project chain, and finally the remote server's own workspace record
-    /// (persisted back onto the row once found). Returns an empty map when the
-    /// workspace isn't linked to a remote project, no remote client is
-    /// configured, or the fetch fails — org env vars are best-effort and must
-    /// never block a workspace from starting.
-    async fn resolve_org_env_vars_inner(&self, workspace: &Workspace) -> HashMap<String, String> {
-        let Some(remote_client) = self.remote_client.as_ref() else {
-            return HashMap::new();
-        };
-
+    /// Map a workspace to its remote project. Tried in order of cost: the
+    /// `remote_project_id` persisted on the workspace row (set at creation for
+    /// issue-linked workspaces and on link/unlink), the legacy workspace →
+    /// task → local project chain, and finally the remote server's own
+    /// workspace record (persisted back onto the row once found).
+    ///
+    /// `Ok(None)` means the workspace is not linked to a remote project;
+    /// `Err(())` means the mapping could not be determined (already logged).
+    async fn resolve_remote_project_id(
+        &self,
+        remote_client: &RemoteClient,
+        workspace: &Workspace,
+    ) -> Result<Option<Uuid>, ()> {
         let mut remote_project_id =
             match Workspace::get_remote_project_id(&self.db.pool, workspace.id).await {
                 Ok(id) => id,
                 Err(e) => {
-                    tracing::warn!(
-                        ?e,
-                        "Failed to load workspace remote project while resolving org env vars"
-                    );
+                    tracing::warn!(?e, "Failed to load workspace remote project");
                     None
                 }
             };
@@ -4324,55 +4319,64 @@ impl LocalContainerService {
                     Ok(Some(project)) => project.remote_project_id,
                     Ok(None) => None,
                     Err(e) => {
-                        tracing::warn!(?e, "Failed to load project while resolving org env vars");
+                        tracing::warn!(?e, "Failed to load project for workspace");
                         None
                     }
                 },
                 Ok(None) => None,
                 Err(e) => {
-                    tracing::warn!(?e, "Failed to load task while resolving org env vars");
+                    tracing::warn!(?e, "Failed to load task for workspace");
                     None
                 }
             };
         }
 
-        let fetch = async {
-            let remote_project_id = match remote_project_id {
-                Some(id) => id,
-                None => {
-                    // Workspace-anchored flows link workspaces to remote
-                    // projects without a local task/project record; ask the
-                    // remote for the mapping and persist it so later spawns
-                    // skip this round-trip.
-                    match remote_client.get_workspace_by_local_id(workspace.id).await {
-                        Ok(remote_ws) => {
-                            if let Err(e) = Workspace::set_remote_project_id(
-                                &self.db.pool,
-                                workspace.id,
-                                Some(remote_ws.project_id),
-                            )
-                            .await
-                            {
-                                tracing::warn!(
-                                    ?e,
-                                    "Failed to persist remote project id on workspace"
-                                );
-                            }
-                            remote_ws.project_id
-                        }
-                        // Not linked to a remote workspace — local-only.
-                        Err(RemoteClientError::Http { status: 404, .. }) => return None,
-                        Err(e) => {
-                            tracing::warn!(
-                                ?e,
-                                "Failed to resolve remote workspace while resolving org env vars"
-                            );
-                            return None;
-                        }
-                    }
-                }
-            };
+        if remote_project_id.is_some() {
+            return Ok(remote_project_id);
+        }
 
+        // Workspace-anchored flows link workspaces to remote projects without
+        // a local task/project record; ask the remote for the mapping and
+        // persist it so later lookups skip this round-trip.
+        match remote_client.get_workspace_by_local_id(workspace.id).await {
+            Ok(remote_ws) => {
+                if let Err(e) = Workspace::set_remote_project_id(
+                    &self.db.pool,
+                    workspace.id,
+                    Some(remote_ws.project_id),
+                )
+                .await
+                {
+                    tracing::warn!(?e, "Failed to persist remote project id on workspace");
+                }
+                Ok(Some(remote_ws.project_id))
+            }
+            // Not linked to a remote workspace — local-only.
+            Err(RemoteClientError::Http { status: 404, .. }) => Ok(None),
+            Err(e) => {
+                tracing::warn!(?e, "Failed to resolve remote workspace");
+                Err(())
+            }
+        }
+    }
+
+    /// Resolve organization-level env vars for a workspace by mapping it to
+    /// its remote project and fetching the decrypted values from the remote
+    /// server. Returns an empty map when the workspace isn't linked to a
+    /// remote project, no remote client is configured, or the fetch fails —
+    /// org env vars are best-effort and must never block a workspace from
+    /// starting.
+    async fn resolve_org_env_vars_inner(&self, workspace: &Workspace) -> HashMap<String, String> {
+        let Some(remote_client) = self.remote_client.as_ref() else {
+            return HashMap::new();
+        };
+
+        let fetch = async {
+            let remote_project_id = self
+                .resolve_remote_project_id(remote_client, workspace)
+                .await
+                .ok()
+                .flatten()?;
             match remote_client.get_project_env_vars(remote_project_id).await {
                 Ok(resp) => Some(resp),
                 Err(e) => {
@@ -4407,6 +4411,84 @@ impl LocalContainerService {
                 }
             })
             .collect()
+    }
+
+    /// The organization's commit identity for a workspace. `Some(None)` means
+    /// the workspace has no organization identity (unlinked, or none set) and
+    /// any previously applied one should be removed; `None` means it could not
+    /// be determined (signed out, remote unreachable) and the worktrees should
+    /// be left as they are.
+    async fn resolve_org_commit_identity(
+        &self,
+        workspace: &Workspace,
+    ) -> Option<Option<WorktreeCommitIdentity>> {
+        let remote_client = self.remote_client.as_ref()?;
+        let fetch = async {
+            let Some(remote_project_id) = self
+                .resolve_remote_project_id(remote_client, workspace)
+                .await
+                .ok()?
+            else {
+                return Some(None);
+            };
+            match remote_client
+                .get_project_commit_identity(remote_project_id)
+                .await
+            {
+                Ok(resp) => Some(resp.commit_identity.map(|identity| WorktreeCommitIdentity {
+                    name: identity.name,
+                    email: identity.email,
+                    allowed_emails: identity.allowed_emails,
+                })),
+                Err(e) => {
+                    tracing::warn!(?e, %remote_project_id, "Failed to fetch org commit identity");
+                    None
+                }
+            }
+        };
+        match tokio::time::timeout(ORG_ENV_FETCH_TIMEOUT, fetch).await {
+            Ok(resolved) => resolved,
+            Err(_) => {
+                tracing::warn!("Timed out fetching org commit identity from remote");
+                None
+            }
+        }
+    }
+
+    /// Write the organization's commit identity into each of the workspace's
+    /// worktrees and install its pre-commit check. Runs when a workspace is
+    /// created and before every execution, so an identity set or changed
+    /// later reaches existing workspaces on their next turn. Best-effort: a
+    /// failure is logged and never blocks the workspace.
+    async fn apply_org_commit_identity<'a>(
+        &self,
+        workspace: &Workspace,
+        workspace_dir: &Path,
+        repo_names: impl IntoIterator<Item = &'a str>,
+    ) {
+        let Some(identity) = self.resolve_org_commit_identity(workspace).await else {
+            return;
+        };
+        let worktrees: Vec<PathBuf> = repo_names
+            .into_iter()
+            .map(|name| workspace_dir.join(name))
+            .collect();
+        let applied = tokio::task::spawn_blocking(move || {
+            let git = GitService::new();
+            for worktree in worktrees {
+                if let Err(e) = git.apply_worktree_commit_identity(&worktree, identity.as_ref()) {
+                    tracing::warn!(
+                        ?e,
+                        worktree = %worktree.display(),
+                        "Failed to apply org commit identity"
+                    );
+                }
+            }
+        })
+        .await;
+        if let Err(e) = applied {
+            tracing::warn!(?e, "Org commit identity task failed");
+        }
     }
 }
 
@@ -4951,6 +5033,14 @@ impl ContainerService for LocalContainerService {
         Self::create_workspace_config_files(&created_workspace.workspace_dir, &repositories)
             .await?;
         record_base_status(&created_workspace.workspace_dir, &workspace_inputs).await;
+        self.apply_org_commit_identity(
+            workspace,
+            &created_workspace.workspace_dir,
+            workspace_inputs
+                .iter()
+                .map(|input| input.repo.name.as_str()),
+        )
+        .await;
 
         Workspace::update_container_ref(
             &self.db.pool,
@@ -5580,6 +5670,12 @@ impl ContainerService for LocalContainerService {
         if !org_env_vars.is_empty() {
             env.merge(&org_env_vars);
         }
+        self.apply_org_commit_identity(
+            workspace,
+            &current_dir,
+            repos.iter().map(|repo| repo.name.as_str()),
+        )
+        .await;
         let inherited_path = std::env::var_os("PATH").unwrap_or_default();
         env.merge(&workspace_go_environment(
             &current_dir,
@@ -6717,6 +6813,15 @@ async fn create_cluster_workspace(
         )
         .await?;
         record_base_status(&created_workspace.workspace_dir, &workspace_inputs).await;
+        service
+            .apply_org_commit_identity(
+                workspace,
+                &created_workspace.workspace_dir,
+                workspace_inputs
+                    .iter()
+                    .map(|input| input.repo.name.as_str()),
+            )
+            .await;
         let container_ref = created_workspace
             .workspace_dir
             .to_string_lossy()
