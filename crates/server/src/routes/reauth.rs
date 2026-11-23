@@ -74,9 +74,11 @@ async fn run(
     let discovery_deadline = started_at + clamp_wait(MAX_WAIT_SECS);
     let deadline = started_at + clamp_wait(request.wait_secs);
     let reports = match request.target.as_deref() {
-        Some(target) => match target
-            .parse::<ReauthTargetId>()
-            .and_then(|id| reauth::start_listed(id, trigger))
+        Some(target) => match async {
+            let id = target.parse::<ReauthTargetId>()?;
+            reauth::start_listed(id, trigger).await
+        }
+        .await
         {
             Ok(report) => vec![report],
             Err(e) => return ResponseJson(ApiResponse::error(&e.to_string())),

@@ -382,6 +382,7 @@ describe('dashboard summary', () => {
   it('groups targets by system in a fixed order', () => {
     const groups = groupTargetsByKind([
       target({ id: 'sgsc:dp', kind: 'sgsc' }),
+      target({ id: 'mcp-gateway:sgsc-mcp', kind: 'mcp_gateway' }),
       target({ id: 'cli-tool:az', kind: 'cli_tool' }),
       target({ id: 'aws-sso:a' }),
     ]);
@@ -389,6 +390,7 @@ describe('dashboard summary', () => {
       'aws_sso',
       'cli_tool',
       'sgsc',
+      'mcp_gateway',
     ]);
     expect(groupTargetsByKind([target()]).map(([kind]) => kind)).toEqual([
       'aws_sso',

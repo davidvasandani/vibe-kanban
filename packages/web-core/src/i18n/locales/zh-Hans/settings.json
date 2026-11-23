@@ -949,7 +949,8 @@
       "kind": {
         "aws_sso": "AWS SSO",
         "cli_tool": "CLI 工具",
-        "sgsc": "sgsc-mcp 网关"
+        "sgsc": "sgsc-mcp 网关",
+        "mcp_gateway": "MCP gateway OAuth"
       }
     },
     "aws": {

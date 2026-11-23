@@ -140,16 +140,16 @@ pub async fn list(
 
 #[derive(Deserialize)]
 pub struct CancelWakeupPath {
-    pub id: Uuid,
+    pub wakeup_id: Uuid,
 }
 
 pub async fn cancel(
     Extension(workspace): Extension<Workspace>,
     State(deployment): State<DeploymentImpl>,
-    Path(CancelWakeupPath { id }): Path<CancelWakeupPath>,
+    Path(CancelWakeupPath { wakeup_id }): Path<CancelWakeupPath>,
 ) -> Result<Json<ApiResponse<bool>>, ApiError> {
     let pool = &deployment.db().pool;
-    let row = Wakeup::find(pool, id)
+    let row = Wakeup::find(pool, wakeup_id)
         .await?
         .filter(|w| w.workspace_id == workspace.id)
         .ok_or_else(|| ApiError::BadRequest("Wake-up does not belong to workspace".into()))?;
@@ -416,22 +416,35 @@ mod tests {
     async fn cancellation_path_accepts_nested_workspace_and_wakeup_ids() {
         use tower::ServiceExt;
         let id = Uuid::new_v4();
-        let router =
-            axum::Router::new().route(
-                "/api/workspaces/{workspace_id}/execution/wakeups/{id}/cancel",
-                axum::routing::post(
-                    |Path(CancelWakeupPath { id }): Path<CancelWakeupPath>| async move {
-                        id.to_string()
-                    },
+        let workspace_id = Uuid::new_v4();
+        #[derive(Deserialize)]
+        struct WorkspacePath {
+            id: Uuid,
+        }
+        // Match the production parent capture: both the workspace middleware
+        // and the cancellation handler extract parameters from this route.
+        let router = axum::Router::new().nest(
+            "/api/workspaces/{id}",
+            axum::Router::new().nest(
+                "/execution",
+                axum::Router::new().route(
+                    "/wakeups/{wakeup_id}/cancel",
+                    axum::routing::post(
+                        move |Path(workspace): Path<WorkspacePath>,
+                              Path(CancelWakeupPath { wakeup_id }): Path<CancelWakeupPath>| async move {
+                            assert_eq!(workspace.id, workspace_id);
+                            wakeup_id.to_string()
+                        },
+                    ),
                 ),
-            );
+            ),
+        );
         let response = router
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
                     .uri(format!(
-                        "/api/workspaces/{}/execution/wakeups/{id}/cancel",
-                        Uuid::new_v4()
+                        "/api/workspaces/{workspace_id}/execution/wakeups/{id}/cancel"
                     ))
                     .body(axum::body::Body::empty())
                     .unwrap(),

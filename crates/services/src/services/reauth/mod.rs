@@ -18,6 +18,8 @@
 
 pub mod acli;
 pub mod aws;
+pub mod gateway;
+pub mod gateway_browser;
 pub mod sgsc;
 pub mod sweep;
 
@@ -60,6 +62,8 @@ pub enum ReauthTargetId {
     CliTool(CliToolId),
     /// One sgsc-mcp gateway backend (`dp`, `sf`, …).
     Sgsc(String),
+    /// An active gateway OAuth connection; names are resolved by the provider.
+    McpGateway(String),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -144,6 +148,11 @@ impl FromStr for ReauthTargetId {
                 }
                 Ok(Self::CliTool(id))
             }
+            "mcp-gateway"
+                if !name.is_empty() && name.len() <= 256 && !name.chars().any(char::is_control) =>
+            {
+                Ok(Self::McpGateway(name.to_string()))
+            }
             "sgsc" => {
                 validate_backend(name)?;
                 Ok(Self::Sgsc(name.to_string()))
@@ -168,6 +177,7 @@ impl fmt::Display for ReauthTargetId {
                 write!(f, "cli-tool:{wire}")
             }
             Self::Sgsc(name) => write!(f, "sgsc:{name}"),
+            Self::McpGateway(name) => write!(f, "mcp-gateway:{name}"),
         }
     }
 }
@@ -182,6 +192,7 @@ pub enum ReauthKind {
     AwsSso,
     CliTool,
     Sgsc,
+    McpGateway,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -434,6 +445,8 @@ fn redact_line(line: &str) -> String {
 // ---------------------------------------------------------------------------
 
 struct Target {
+    /// May be due while still authenticated; never falsify authentication state.
+    renewal_due: bool,
     id: ReauthTargetId,
     kind: ReauthKind,
     label: String,
@@ -551,6 +564,7 @@ async fn discover_cli_tools() -> Vec<Target> {
                 ""
             };
             Target {
+                renewal_due: false,
                 id: ReauthTargetId::CliTool(id),
                 kind: ReauthKind::CliTool,
                 label: format!("{}{scope_note}", status.display_name),
@@ -627,6 +641,7 @@ fn aws_target(
         _ => String::new(),
     };
     Target {
+        renewal_due: false,
         label: format!(
             "AWS SSO · {name} ({members} profile{})",
             if members == 1 { "" } else { "s" }
@@ -674,6 +689,7 @@ fn discover_sgsc() -> Vec<Target> {
     sgsc_backends()
         .into_iter()
         .map(|backend| Target {
+            renewal_due: false,
             label: format!("sgsc-mcp · {backend}"),
             id: ReauthTargetId::Sgsc(backend),
             kind: ReauthKind::Sgsc,
@@ -730,11 +746,43 @@ async fn discover(listing: bool) -> Vec<Target> {
                 aws_targets_unprobed("the AWS status check did not finish in time; state unknown")
             })
     };
-    let (tools, aws) = tokio::join!(discover_cli_tools(), aws);
+    let (tools, aws, gateway) = tokio::join!(discover_cli_tools(), aws, discover_gateway());
     let mut all = aws;
     all.extend(tools);
     all.extend(discover_sgsc());
+    all.extend(gateway);
     all
+}
+
+fn gateway_target(target: gateway::GatewayTarget) -> Target {
+    Target {
+        id: ReauthTargetId::McpGateway(target.name),
+        kind: ReauthKind::McpGateway,
+        label: target.label,
+        swept: true,
+        auth_state: target.auth_state,
+        auth_message: target.auth_message,
+        renewal_due: target.renewal_due,
+    }
+}
+
+async fn discover_gateway() -> Vec<Target> {
+    let Some(provider) = gateway::provider() else {
+        return Vec::new();
+    };
+    match provider.targets().await {
+        Ok(targets) => targets.into_iter().map(gateway_target).collect(),
+        Err(error) => {
+            tracing::warn!(%error, "MCP gateway re-auth target discovery failed");
+            Vec::new()
+        }
+    }
+}
+
+fn needs_renewal(target: &Target) -> bool {
+    target.swept
+        && (target.auth_state == ReauthAuthState::Unauthenticated
+            || (target.auth_state == ReauthAuthState::Authenticated && target.renewal_due))
 }
 
 fn status_of(target: Target, states: &HashMap<ReauthTargetId, TargetState>) -> ReauthTargetStatus {
@@ -787,7 +835,7 @@ async fn expired_swept_targets(trigger: ReauthTrigger) -> Vec<ReauthTargetId> {
     with_registry(|states| {
         targets
             .into_iter()
-            .filter(|t| t.swept && t.auth_state == ReauthAuthState::Unauthenticated)
+            .filter(needs_renewal)
             .filter(|t| selectable(states.get(&t.id), trigger, now))
             .map(|t| t.id)
             .collect()
@@ -815,13 +863,17 @@ fn selectable(state: Option<&TargetState>, trigger: ReauthTrigger, now: Instant)
 /// The listed target `id` stands for. Only listed targets may start: a run
 /// nobody can see could neither be polled nor, once refused, reset from
 /// Settings. An AWS profile resolves to the scope target discovery lists.
-fn canonicalize(id: ReauthTargetId) -> Result<ReauthTargetId, ReauthError> {
+async fn canonicalize(id: ReauthTargetId) -> Result<ReauthTargetId, ReauthError> {
     let unlisted = |id: &ReauthTargetId| {
         ReauthError::InvalidTarget(format!(
             "{id} is not a re-auth target on this host (see list_reauth_targets)"
         ))
     };
     match &id {
+        ReauthTargetId::McpGateway(name) => gateway::required()?
+            .canonicalize(name)
+            .await
+            .map(ReauthTargetId::McpGateway),
         ReauthTargetId::CliTool(_) => Ok(id),
         ReauthTargetId::Sgsc(backend) => {
             if sgsc_backends().iter().any(|b| b == backend) {
@@ -848,11 +900,11 @@ fn canonicalize(id: ReauthTargetId) -> Result<ReauthTargetId, ReauthError> {
 
 /// Start (or join) a run of a listed target. Returns immediately; the run is
 /// owned by a detached task and outlives the request.
-pub fn start_listed(
+pub async fn start_listed(
     id: ReauthTargetId,
     trigger: ReauthTrigger,
 ) -> Result<ReauthRunReport, ReauthError> {
-    Ok(start(canonicalize(id)?, trigger))
+    Ok(start(canonicalize(id).await?, trigger))
 }
 
 /// Start (or join) a run of `id`. Returns immediately; the run is owned by a
@@ -873,7 +925,7 @@ fn start(id: ReauthTargetId, trigger: ReauthTrigger) -> ReauthRunReport {
     }
 }
 
-/// Start every swept target that is currently unauthenticated.
+/// Start every swept target that is unauthenticated or due for proactive renewal.
 ///
 /// All targets are claimed up front (so each reports `running` at once), but
 /// one task runs them strictly one after another. Every browser engine needs
@@ -1121,6 +1173,10 @@ async fn run_engine(
     progress: &Progress,
 ) -> Result<Option<String>, ReauthError> {
     match id {
+        ReauthTargetId::McpGateway(name) => gateway::required()?
+            .renew(name, progress)
+            .await
+            .map(|()| None),
         ReauthTargetId::AwsSession(_) | ReauthTargetId::AwsProfile(_) => {
             aws::run(id, progress).await.map(|()| None)
         }
@@ -1195,6 +1251,12 @@ const VERIFY_PROFILES: usize = 5;
 /// The independent check. Command exit is never proof of authentication.
 async fn verify(id: &ReauthTargetId) -> Result<(), String> {
     match id {
+        ReauthTargetId::McpGateway(name) => {
+            gateway::required()
+                .map_err(|e| e.to_string())?
+                .verify(name)
+                .await
+        }
         ReauthTargetId::CliTool(tool) => {
             let status = cli_tools::status(*tool).await;
             if status.auth_state == CliToolAuthState::Authenticated {
@@ -1244,6 +1306,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn gateway_discovery_keeps_authentication_and_renewal_due_separate() {
+        for (state, due, expected) in [
+            (ReauthAuthState::Authenticated, false, false),
+            (ReauthAuthState::Authenticated, true, true),
+            (ReauthAuthState::Unauthenticated, false, true),
+            (ReauthAuthState::Unknown, true, false),
+            (ReauthAuthState::NotConfigured, true, false),
+        ] {
+            let target = gateway_target(gateway::GatewayTarget {
+                name: "sgsc-mcp".into(),
+                label: "sgsc-mcp".into(),
+                auth_state: state,
+                auth_message: Some("probe evidence".into()),
+                renewal_due: due,
+            });
+            assert_eq!(needs_renewal(&target), expected);
+            let status = status_of(target, &HashMap::new());
+            assert_eq!(status.id, "mcp-gateway:sgsc-mcp");
+            assert_eq!(status.kind, ReauthKind::McpGateway);
+            assert!(status.swept);
+            assert_eq!(status.auth_state, state);
+            assert_eq!(status.auth_message.as_deref(), Some("probe evidence"));
+        }
+        assert!(uses_entra(&ReauthTargetId::McpGateway("sgsc-mcp".into())));
+    }
+
+    #[test]
     fn target_ids_round_trip_and_validate() {
         for wire in [
             "aws-sso:sweetgreen",
@@ -1252,11 +1341,15 @@ mod tests {
             "cli-tool:graph-powershell-1.0",
             "cli-tool:acli",
             "sgsc:dp",
+            "mcp-gateway:sgsc-mcp",
+            "mcp-gateway:4ad38e08-d5a0-55cc-9bc7-fd37dbb24f90",
         ] {
             let id: ReauthTargetId = wire.parse().unwrap();
             assert_eq!(id.to_string(), wire);
         }
         for bad in [
+            "mcp-gateway:",
+            "mcp-gateway:bad\nname",
             "sgsc:DP",
             "sgsc:../x",
             "sgsc:",

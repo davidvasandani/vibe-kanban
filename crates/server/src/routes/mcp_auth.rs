@@ -658,6 +658,7 @@ async fn exchange_and_store(
             cf_access_client_id,
             cf_access_client_secret,
             existing_gateway_token,
+            redirect_uri: exchange.redirect_uri,
         },
     )
     .await?;

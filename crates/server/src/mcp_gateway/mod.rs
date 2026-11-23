@@ -27,6 +27,7 @@ use uuid::Uuid;
 use crate::DeploymentImpl;
 
 mod proxy;
+pub(crate) mod reauth;
 
 static SECRETS: OnceLock<Result<McpGatewaySecretStore, String>> = OnceLock::new();
 static REFRESH_LOCKS: LazyLock<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
@@ -50,6 +51,8 @@ pub(crate) struct StoredCredentials {
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
     pub resource: String,
+    #[serde(default)]
+    pub redirect_uri: Option<String>,
     pub cf_access_client_id: Option<String>,
     pub cf_access_client_secret: Option<String>,
 }
@@ -145,9 +148,10 @@ async fn proxy_request(
     match refresh_credentials(&deployment, &connection, &credentials).await {
         Ok(refreshed) => {
             credentials = refreshed;
-            proxy::forward(&prepared, &connection, &credentials).await
+            let response = proxy::forward(&prepared, &connection, &credentials).await;
+            reauth::annotate_auth_error(&deployment, &connection, response).await
         }
-        Err(_) => first,
+        Err(_) => reauth::annotate_auth_error(&deployment, &connection, first).await,
     }
 }
 
@@ -222,6 +226,17 @@ async fn refresh_credentials(
     .await?;
     credentials.access_token = tokens.access_token;
     credentials.refresh_token = tokens.refresh_token;
+    let expires_at = reauth::token_expiry(tokens.expires_in, &credentials.access_token);
+    persist_credentials(deployment, &current, &credentials, expires_at).await?;
+    Ok(credentials)
+}
+
+async fn persist_credentials(
+    deployment: &DeploymentImpl,
+    current: &McpGatewayConnection,
+    credentials: &StoredCredentials,
+    expires_at: Option<String>,
+) -> Result<(), String> {
     let raw =
         serde_json::to_vec(&credentials).map_err(|_| "credential update failed".to_string())?;
     let encrypted = secret_store()
@@ -231,11 +246,12 @@ async fn refresh_credentials(
     let updated = sqlx::query(
         r#"UPDATE mcp_gateway_connections
            SET encrypted_credentials = ?, credential_version = credential_version + 1,
-               status = 'connected', last_error_code = NULL,
+               status = 'connected', last_error_code = NULL, expires_at = ?,
                updated_at = datetime('now', 'subsec')
            WHERE id = ? AND credential_version = ? AND status != 'disconnected'"#,
     )
     .bind(encrypted)
+    .bind(expires_at)
     .bind(&current.id)
     .bind(current.credential_version)
     .execute(&deployment.db().pool)
@@ -244,7 +260,7 @@ async fn refresh_credentials(
     if updated.rows_affected() != 1 {
         return Err("credential changed concurrently".to_string());
     }
-    Ok(credentials)
+    Ok(())
 }
 
 fn bearer(headers: &axum::http::HeaderMap) -> Option<&str> {
@@ -278,6 +294,7 @@ pub(crate) struct NewOAuthConnection<'a> {
     pub cf_access_client_id: Option<String>,
     pub cf_access_client_secret: Option<String>,
     pub existing_gateway_token: Option<String>,
+    pub redirect_uri: String,
 }
 
 pub(crate) async fn store_oauth_connection(
@@ -297,6 +314,7 @@ pub(crate) async fn store_oauth_connection(
         cf_access_client_id,
         cf_access_client_secret,
         existing_gateway_token,
+        redirect_uri,
     } = connection;
     let parsed = reqwest::Url::parse(upstream_url)
         .ok()
@@ -318,7 +336,9 @@ pub(crate) async fn store_oauth_connection(
         URL_SAFE_NO_PAD.encode(random)
     });
     let token_hash = Sha256::digest(gateway_token.as_bytes());
+    let expires_at = reauth::token_expiry(tokens.expires_in, &tokens.access_token);
     let credentials = StoredCredentials {
+        redirect_uri: Some(redirect_uri),
         access_token: tokens.access_token,
         refresh_token: tokens.refresh_token,
         token_endpoint: Some(token_endpoint),
@@ -346,12 +366,13 @@ pub(crate) async fn store_oauth_connection(
     sqlx::query(
         r#"INSERT INTO mcp_gateway_connections
            (id, owner_user_id, machine_id, server_name, upstream_url, transport,
-            auth_kind, gateway_token_hash, encrypted_credentials, status, connected_at)
-           VALUES (?, ?, ?, ?, ?, ?, 'oauth', ?, ?, 'connected', datetime('now', 'subsec'))
+            auth_kind, gateway_token_hash, encrypted_credentials, expires_at, status, connected_at)
+           VALUES (?, ?, ?, ?, ?, ?, 'oauth', ?, ?, ?, 'connected', datetime('now', 'subsec'))
            ON CONFLICT(id) DO UPDATE SET
              server_name=excluded.server_name, upstream_url=excluded.upstream_url,
              transport=excluded.transport, gateway_token_hash=excluded.gateway_token_hash,
              encrypted_credentials=excluded.encrypted_credentials,
+             expires_at=excluded.expires_at,
              credential_version=mcp_gateway_connections.credential_version+1,
              status='connected', last_error_code=NULL,
              connected_at=datetime('now', 'subsec'), updated_at=datetime('now', 'subsec')
@@ -365,6 +386,7 @@ pub(crate) async fn store_oauth_connection(
     .bind(transport)
     .bind(token_hash.as_slice())
     .bind(encrypted)
+    .bind(expires_at)
     .execute(&deployment.db().pool)
     .await
     .map_err(|_| "Failed to store shared MCP connection".to_string())?;
