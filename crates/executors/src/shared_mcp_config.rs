@@ -17,6 +17,33 @@ use crate::{
     profile::{ExecutorConfigs, ExecutorProfileId},
 };
 
+pub const ATLASSIAN_ROVO_SERVER_NAME: &str = "atlassian_rovo";
+pub const ATLASSIAN_MCP_LEGACY_URL: &str = "https://mcp.atlassian.com/v1/mcp";
+pub const ATLASSIAN_MCP_URL: &str = "https://mcp.atlassian.com/v2/mcp";
+
+/// Return the desired upstream for a server while recognizing only the exact
+/// Atlassian Rovo v1 endpoint. This is intentionally server-name-aware: URL
+/// version migration must never become a generic rewrite rule.
+pub fn canonical_upstream_url_for_server(server_name: &str, upstream_url: &str) -> String {
+    if server_name == ATLASSIAN_ROVO_SERVER_NAME
+        && reqwest::Url::parse(upstream_url).ok().as_ref()
+            == reqwest::Url::parse(ATLASSIAN_MCP_LEGACY_URL).ok().as_ref()
+    {
+        ATLASSIAN_MCP_URL.to_string()
+    } else {
+        upstream_url.to_string()
+    }
+}
+
+pub fn equivalent_upstream_urls_for_server(server_name: &str, left: &str, right: &str) -> bool {
+    let canonical = |url: &str| {
+        reqwest::Url::parse(&canonical_upstream_url_for_server(server_name, url))
+            .ok()
+            .map(|url| url.to_string())
+    };
+    canonical(left).is_some_and(|left| canonical(right).as_deref() == Some(left.as_str()))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct SharedMcpProfile {
     pub executor: BaseCodingAgent,
@@ -902,6 +929,9 @@ fn exact_env_template(value: &str) -> Option<&str> {
 
 fn canonical_definition_for_server(name: &str, entry: &Value) -> McpServerDefinition {
     let definition = canonical_definition(entry);
+    if let Some(migrated) = migrated_atlassian_native_entry(name, entry) {
+        return canonical_definition(&migrated);
+    }
     if name != "slack" || !is_legacy_bundled_slack_definition(&definition) {
         return definition;
     }
@@ -910,6 +940,31 @@ fn canonical_definition_for_server(name: &str, entry: &Value) -> McpServerDefini
         return definition;
     };
     migrate_bundled_slack_definition(definition, canonical_definition(current_entry))
+}
+
+fn migrated_atlassian_native_entry(name: &str, entry: &Value) -> Option<Value> {
+    if name != ATLASSIAN_ROVO_SERVER_NAME {
+        return None;
+    }
+    let object = entry.as_object()?;
+    let url_key = if object.get("url").and_then(Value::as_str).is_some() {
+        "url"
+    } else if object.get("httpUrl").and_then(Value::as_str).is_some() {
+        "httpUrl"
+    } else {
+        return None;
+    };
+    let current = object.get(url_key)?.as_str()?;
+    let migrated = canonical_upstream_url_for_server(name, current);
+    if migrated == current {
+        return None;
+    }
+    let mut entry = entry.clone();
+    entry
+        .as_object_mut()
+        .expect("cloned MCP entry remains an object")
+        .insert(url_key.to_string(), Value::String(migrated));
+    Some(entry)
 }
 
 fn migrate_bundled_slack_definition(
@@ -1222,6 +1277,15 @@ pub fn plan_servers_for_executor(
                     .clone();
                 next.remove(legacy_name);
                 next.insert(server.name.clone(), entry);
+                affected.push(server.name.clone());
+                continue;
+            }
+            if !server.native_overrides.contains_key(&executor)
+                && let Some(entry) = current.get(&server.name)
+                && let Some(migrated) = migrated_atlassian_native_entry(&server.name, entry)
+                && canonical_definition_for_server(&server.name, entry) == server.definition
+            {
+                next.insert(server.name.clone(), migrated);
                 affected.push(server.name.clone());
                 continue;
             }
@@ -2289,6 +2353,118 @@ SLACK_MCP_XOXP_TOKEN = "{token}"
             suggested_server_identifier("  Rovo...Cloud!  "),
             "rovo_cloud"
         );
+    }
+
+    #[test]
+    fn atlassian_endpoint_migration_is_exact_and_server_aware() {
+        assert_eq!(
+            canonical_upstream_url_for_server(ATLASSIAN_ROVO_SERVER_NAME, ATLASSIAN_MCP_LEGACY_URL),
+            ATLASSIAN_MCP_URL
+        );
+        for (name, url) in [
+            ("another_server", ATLASSIAN_MCP_LEGACY_URL),
+            (
+                ATLASSIAN_ROVO_SERVER_NAME,
+                "https://mcp.atlassian.com/v1/mcp/",
+            ),
+            (
+                ATLASSIAN_ROVO_SERVER_NAME,
+                "https://mcp.atlassian.com/v1/mcp?x=1",
+            ),
+            (ATLASSIAN_ROVO_SERVER_NAME, "https://example.com/v1/mcp"),
+            (ATLASSIAN_ROVO_SERVER_NAME, ATLASSIAN_MCP_URL),
+        ] {
+            assert_eq!(canonical_upstream_url_for_server(name, url), url);
+        }
+        assert!(equivalent_upstream_urls_for_server(
+            ATLASSIAN_ROVO_SERVER_NAME,
+            ATLASSIAN_MCP_LEGACY_URL,
+            ATLASSIAN_MCP_URL,
+        ));
+        assert!(!equivalent_upstream_urls_for_server(
+            "another_server",
+            ATLASSIAN_MCP_LEGACY_URL,
+            ATLASSIAN_MCP_URL,
+        ));
+    }
+
+    #[test]
+    fn saving_atlassian_v1_clones_native_entry_and_changes_only_url() {
+        for entry in [
+            json!({
+                "url": ATLASSIAN_MCP_LEGACY_URL,
+                "http_headers": {"Authorization": "Bearer credential"},
+                "custom_native_field": "preserve"
+            }),
+            json!({
+                "type": "remote",
+                "url": ATLASSIAN_MCP_LEGACY_URL,
+                "enabled": false,
+                "custom_native_field": "preserve"
+            }),
+        ] {
+            let snapshots = vec![snapshot(
+                BaseCodingAgent::Codex,
+                HashMap::from([(ATLASSIAN_ROVO_SERVER_NAME.to_string(), entry.clone())]),
+            )];
+            let response = reconcile_snapshots(snapshots.clone());
+            assert_eq!(
+                response.servers[0].definition.value["url"],
+                ATLASSIAN_MCP_URL
+            );
+            let request = SharedMcpWriteRequest {
+                servers: vec![SharedMcpServerInput {
+                    name: ATLASSIAN_ROVO_SERVER_NAME.to_string(),
+                    display_name: Some("Atlassian Rovo".to_string()),
+                    definition: response.servers[0].definition.clone(),
+                    assignments: vec![BaseCodingAgent::Codex],
+                    native_overrides: HashMap::new(),
+                }],
+                removed_servers: Vec::new(),
+                resolved_conflicts: Vec::new(),
+            };
+
+            validate_write_request_against_snapshots(&request, &snapshots).unwrap();
+            let (next, affected) =
+                plan_servers_for_executor(BaseCodingAgent::Codex, &snapshots[0].servers, &request)
+                    .unwrap();
+            let mut expected = entry;
+            expected["url"] = Value::String(ATLASSIAN_MCP_URL.to_string());
+            assert_eq!(next[ATLASSIAN_ROVO_SERVER_NAME], expected);
+            assert_eq!(affected, vec![ATLASSIAN_ROVO_SERVER_NAME]);
+        }
+    }
+
+    #[test]
+    fn saving_atlassian_v2_is_idempotent() {
+        let entry = json!({
+            "url": ATLASSIAN_MCP_URL,
+            "http_headers": {"Authorization": "Bearer credential"}
+        });
+        let response = reconcile_snapshots(vec![snapshot(
+            BaseCodingAgent::Codex,
+            HashMap::from([(ATLASSIAN_ROVO_SERVER_NAME.to_string(), entry.clone())]),
+        )]);
+        let request = SharedMcpWriteRequest {
+            servers: vec![SharedMcpServerInput {
+                name: ATLASSIAN_ROVO_SERVER_NAME.to_string(),
+                display_name: Some("Atlassian Rovo".to_string()),
+                definition: response.servers[0].definition.clone(),
+                assignments: vec![BaseCodingAgent::Codex],
+                native_overrides: HashMap::new(),
+            }],
+            removed_servers: Vec::new(),
+            resolved_conflicts: Vec::new(),
+        };
+
+        let (next, affected) = plan_servers_for_executor(
+            BaseCodingAgent::Codex,
+            &HashMap::from([(ATLASSIAN_ROVO_SERVER_NAME.to_string(), entry.clone())]),
+            &request,
+        )
+        .unwrap();
+        assert_eq!(next[ATLASSIAN_ROVO_SERVER_NAME], entry);
+        assert!(affected.is_empty());
     }
 
     #[test]

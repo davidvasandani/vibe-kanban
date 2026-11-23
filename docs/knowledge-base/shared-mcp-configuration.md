@@ -3,7 +3,8 @@
 Contributing tasks: `a898-allow-mcp-server`, `4ae2-add-a-shared-mcp`,
 `c3fb-add-slack-mcp-se`, `76d1-vk-mcp-ux`, `d893-fix-slack-mcp`,
 `067cb434-mcp-tools`, `4daf-gmail-mcp`, `vk/a5f8-concat-repeating`,
-`967a-migrate-slack-mc`, `VAS-356`, `vk/802c-register-servicenow`, `vk/975e-migrate-personal`
+`967a-migrate-slack-mc`, `VAS-356`, `vk/802c-register-servicenow`,
+`vk/975e-migrate-personal`, `c90e-update-atlassian`
 
 Vibe Kanban derives shared MCP settings from each base executor's native config
 file. There is no separate registry: the native files remain the source consumed
@@ -173,6 +174,23 @@ the replacement from the current catalog; and preserve the stored credential.
 Do not generally equate a mutable `latest` launcher with a pinned artifact or
 ignore extra fields. Once the user saves, normal shared materialization writes
 the current pinned definition to every assigned native profile.
+
+Remote HTTP endpoint changes need the same exact, server-aware treatment, but
+they have two persistence locations. A direct native definition can be
+presented as the new desired URL during reconciliation, then updated only on an
+explicit settings save. Clone its raw native entry and replace only the exact
+legacy URL so credentials, disabled state, and client-only fields survive. A
+gateway-backed definition exposes only its loopback URL to shared settings; its
+real upstream lives in the encrypted gateway row. Update that upstream during a
+user-initiated reconnect while retaining the assigned gateway UUID and local
+capability. Agent-native OAuth must persist the migrated URL with the new token,
+not authenticate against the new resource and leave the old URL on disk.
+
+Keep URL equivalence narrow. The Atlassian Rovo v1-to-v2 transition matches the
+canonical `atlassian_rovo` identifier and exact old URL. Assignment matching may
+treat those two URLs as one logical upstream during the transition, but it must
+not generalise path-version rewriting to other server names, hosts, queries, or
+fragments.
 
 For a clustered deployment, a catalog environment override can replace the
 bundled Slack stdio launcher with a URL-only Streamable HTTP definition. The
