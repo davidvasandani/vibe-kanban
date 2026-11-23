@@ -480,6 +480,14 @@ const PLAN_TEMPLATE: &str =
     include_str!("../../../../../assets/speckit/templates/plan-template.md");
 const TASKS_TEMPLATE: &str =
     include_str!("../../../../../assets/speckit/templates/tasks-template.md");
+#[cfg(test)]
+const UPSTREAM_BASELINE: &str = include_str!("../../../../../assets/speckit/UPSTREAM.md");
+const HISTORICAL_SPEC_TEMPLATE: &str =
+    include_str!("../../../../../assets/speckit/historical/spec-template-pre-v1.4.3.md");
+const HISTORICAL_PLAN_TEMPLATE: &str =
+    include_str!("../../../../../assets/speckit/historical/plan-template-pre-v1.4.3.md");
+const HISTORICAL_TASKS_TEMPLATE: &str =
+    include_str!("../../../../../assets/speckit/historical/tasks-template-pre-v1.4.3.md");
 
 /// Where the constitution lives relative to the spec-host repo root.
 pub const CONSTITUTION_REL_PATH: &str = ".specify/memory/constitution.md";
@@ -532,9 +540,8 @@ impl CommandContext {
 }
 
 /// The host-side scaffold (constitution + templates) as
-/// (path relative to the host repo root, content) pairs. These are
-/// **skip-if-exists**: operator edits (especially the constitution) survive
-/// re-runs.
+/// (path relative to the host repo root, content) pairs. The constitution is
+/// skip-if-exists; templates upgrade only from exact known defaults.
 fn host_scaffold_files() -> Vec<(PathBuf, String)> {
     vec![
         (
@@ -554,6 +561,17 @@ fn host_scaffold_files() -> Vec<(PathBuf, String)> {
             TASKS_TEMPLATE.to_string(),
         ),
     ]
+}
+
+/// The exact previously shipped defaults that may be upgraded in place.
+/// Unknown bytes are operator-owned and must never be overwritten.
+fn historical_scaffold_default(rel: &Path) -> Option<&'static str> {
+    match rel.to_str()? {
+        ".specify/templates/spec-template.md" => Some(HISTORICAL_SPEC_TEMPLATE),
+        ".specify/templates/plan-template.md" => Some(HISTORICAL_PLAN_TEMPLATE),
+        ".specify/templates/tasks-template.md" => Some(HISTORICAL_TASKS_TEMPLATE),
+        _ => None,
+    }
 }
 
 /// The command files as (path relative to the agent cwd, content) pairs.
@@ -715,7 +733,8 @@ fn ensure_feature_dir_owner(host_root: &Path, ctx: &CommandContext) -> io::Resul
 /// per-task feature-dir pointer, and the `/speckit.*` command files (under the
 /// agent's effective cwd) exist.
 ///
-/// - Constitution + templates are **skip-if-exists** (operator edits survive).
+/// - Constitution is **skip-if-exists**. Templates upgrade only when their
+///   bytes equal a known historical default (operator edits survive).
 /// - The pointer is the only per-task state. It is rewritten on mismatch and
 ///   git-excluded, so it never shows up in `git status`.
 /// - Command files are task-agnostic and **overwritten on content mismatch**.
@@ -732,7 +751,14 @@ pub fn ensure_scaffold(host_root: &Path, agent_cwd: &Path, ctx: &CommandContext)
     }
     for (rel, content) in host_scaffold_files() {
         let path = host_root.join(&rel);
-        if path.exists() {
+        let should_write = match std::fs::read_to_string(&path) {
+            Ok(existing) => {
+                existing != content && historical_scaffold_default(&rel) == Some(existing.as_str())
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => true,
+            Err(error) => return Err(error),
+        };
+        if !should_write {
             continue;
         }
         write_with_parents(&path, &content)?;
@@ -1183,6 +1209,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn bundled_scaffold_records_v1_4_3_and_uses_vk_paths() {
+        assert!(UPSTREAM_BASELINE.contains("release: `v1.4.3`"));
+        assert!(UPSTREAM_BASELINE.contains("commit: `980b3d027f4bd7958c35f97f618d854b41320e3f`"));
+        for template in [SPEC_TEMPLATE, PLAN_TEMPLATE, TASKS_TEMPLATE] {
+            assert!(template.contains("<FEATURE_DIR>"));
+            assert!(!template.contains("[###-feature"));
+            assert!(!template.contains("__SPECKIT_COMMAND_"));
+        }
+        assert!(SPEC_TEMPLATE.contains("User Scenarios & Testing *(mandatory)*"));
+        assert!(PLAN_TEMPLATE.contains("GATE: Must pass before Phase 0 research"));
+        assert!(TASKS_TEMPLATE.contains("Format: `[ID] [P?] [Story] Description`"));
+    }
+
     fn git(dir: &Path, args: &[&str]) -> String {
         let out = std::process::Command::new("git")
             .arg("-C")
@@ -1283,6 +1323,76 @@ mod tests {
             std::fs::read_to_string(&cmd_path).unwrap(),
             command_file(SpecKitStage::Specify, &ctx)
         );
+    }
+
+    #[test]
+    fn scaffold_upgrades_exact_historical_templates() {
+        let d = TmpDir::new("scaffold-template-upgrade");
+        let host_root = d.path().join("backend");
+        let cwd = d.path().to_path_buf();
+        let ctx = multi_ctx();
+
+        write_with_parents(
+            &host_root.join(".specify/templates/spec-template.md"),
+            HISTORICAL_SPEC_TEMPLATE,
+        )
+        .unwrap();
+        write_with_parents(
+            &host_root.join(".specify/templates/plan-template.md"),
+            HISTORICAL_PLAN_TEMPLATE,
+        )
+        .unwrap();
+        write_with_parents(
+            &host_root.join(".specify/templates/tasks-template.md"),
+            HISTORICAL_TASKS_TEMPLATE,
+        )
+        .unwrap();
+
+        ensure_scaffold(&host_root, &cwd, &ctx).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(host_root.join(".specify/templates/spec-template.md")).unwrap(),
+            SPEC_TEMPLATE
+        );
+        assert_eq!(
+            std::fs::read_to_string(host_root.join(".specify/templates/plan-template.md")).unwrap(),
+            PLAN_TEMPLATE
+        );
+        assert_eq!(
+            std::fs::read_to_string(host_root.join(".specify/templates/tasks-template.md"))
+                .unwrap(),
+            TASKS_TEMPLATE
+        );
+    }
+
+    #[test]
+    fn scaffold_preserves_customized_template() {
+        let d = TmpDir::new("scaffold-template-custom");
+        let host_root = d.path().join("backend");
+        let cwd = d.path().to_path_buf();
+        let custom = format!("{HISTORICAL_SPEC_TEMPLATE}\nOperator note.\n");
+        let path = host_root.join(".specify/templates/spec-template.md");
+        write_with_parents(&path, &custom).unwrap();
+
+        ensure_scaffold(&host_root, &cwd, &multi_ctx()).unwrap();
+
+        assert_eq!(std::fs::read_to_string(path).unwrap(), custom);
+    }
+
+    #[test]
+    fn scaffold_does_not_replace_non_utf8_template() {
+        let d = TmpDir::new("scaffold-template-non-utf8");
+        let host_root = d.path().join("backend");
+        let cwd = d.path().to_path_buf();
+        let bytes = [0xff, 0xfe, 0xfd];
+        let path = host_root.join(".specify/templates/spec-template.md");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+
+        let error = ensure_scaffold(&host_root, &cwd, &multi_ctx()).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
     }
 
     #[test]
