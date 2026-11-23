@@ -36,7 +36,8 @@ use executors::{
     mcp_oauth,
     profile::{ExecutorConfigs, ExecutorProfileId},
     shared_mcp_config::{
-        McpTransportKind, canonical_definition, load_native_snapshots, materialize_definition,
+        McpTransportKind, canonical_definition, canonical_upstream_url_for_server,
+        equivalent_upstream_urls_for_server, load_native_snapshots, materialize_definition,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -316,6 +317,7 @@ async fn start(
         };
         url = connection.upstream_url;
     }
+    url = canonical_upstream_url_for_server(&payload.server_name, &url);
 
     {
         let mut flows = FLOWS.write().await;
@@ -628,7 +630,7 @@ async fn exchange_and_store(
     )
     .await?;
     if !shared_gateway {
-        return persist_token(executor, &server_name, &tokens.access_token).await;
+        return persist_token(executor, &server_name, &upstream_url, &tokens.access_token).await;
     }
     let upstream_url = reqwest::Url::parse(&upstream_url)
         .map_err(|_| "Configured MCP server URL is invalid".to_string())?
@@ -689,6 +691,7 @@ fn oauth_connection_id(
 
 fn assignment_matches_gateway(
     entry: &serde_json::Value,
+    server_name: &str,
     upstream_url: &str,
     gateway_path: &str,
 ) -> bool {
@@ -697,7 +700,10 @@ fn assignment_matches_gateway(
         .or_else(|| entry.get("httpUrl"))
         .and_then(serde_json::Value::as_str)
         .and_then(|url| reqwest::Url::parse(url).ok())
-        .is_some_and(|url| url.path() == gateway_path || url.as_str() == upstream_url)
+        .is_some_and(|url| {
+            url.path() == gateway_path
+                || equivalent_upstream_urls_for_server(server_name, url.as_str(), upstream_url)
+        })
 }
 
 async fn persist_gateway_assignments(
@@ -720,7 +726,7 @@ async fn persist_gateway_assignments(
         let Some(existing) = snapshot.servers.get(server_name) else {
             continue;
         };
-        if !assignment_matches_gateway(existing, upstream_url, &gateway_path) {
+        if !assignment_matches_gateway(existing, server_name, upstream_url, &gateway_path) {
             continue;
         }
         let Some(config_path) = snapshot.config_path.as_ref() else {
@@ -873,6 +879,7 @@ fn html_escape(s: &str) -> String {
 async fn persist_token(
     executor: BaseCodingAgent,
     server_name: &str,
+    upstream_url: &str,
     access_token: &str,
 ) -> Result<(), String> {
     let (config_path, mcpc) = agent_config_path(executor)?;
@@ -886,6 +893,7 @@ async fn persist_token(
     let obj = entry
         .as_object_mut()
         .ok_or_else(|| format!("MCP server `{server_name}` entry is not an object"))?;
+    align_native_oauth_url(obj, server_name, upstream_url);
     let header_key = if executor == BaseCodingAgent::Codex {
         "http_headers"
     } else {
@@ -907,6 +915,37 @@ async fn persist_token(
         .await
         .map_err(|e| format!("failed to write agent config: {e}"))?;
     secure_token_file(&config_path).await
+}
+
+fn align_native_oauth_url(
+    entry: &mut serde_json::Map<String, serde_json::Value>,
+    server_name: &str,
+    upstream_url: &str,
+) {
+    let url_key = if entry
+        .get("url")
+        .and_then(serde_json::Value::as_str)
+        .is_some()
+    {
+        "url"
+    } else if entry
+        .get("httpUrl")
+        .and_then(serde_json::Value::as_str)
+        .is_some()
+    {
+        "httpUrl"
+    } else {
+        return;
+    };
+    let current = entry[url_key]
+        .as_str()
+        .expect("selected native OAuth URL is a string");
+    let migrated = canonical_upstream_url_for_server(server_name, current);
+    if migrated != current
+        && equivalent_upstream_urls_for_server(server_name, &migrated, upstream_url)
+    {
+        entry.insert(url_key.to_string(), serde_json::Value::String(migrated));
+    }
 }
 
 #[cfg(unix)]
@@ -980,8 +1019,18 @@ mod tests {
             json!({"url": configured, "http_headers": {"Authorization": "Bearer fixture"}}),
             json!({"httpUrl": configured}),
         ] {
-            assert!(assignment_matches_gateway(&entry, upstream, &path));
-            assert!(!assignment_matches_gateway(&entry, upstream, &wrong_path));
+            assert!(assignment_matches_gateway(
+                &entry,
+                "atlassian_rovo",
+                upstream,
+                &path
+            ));
+            assert!(!assignment_matches_gateway(
+                &entry,
+                "atlassian_rovo",
+                upstream,
+                &wrong_path
+            ));
         }
     }
 
@@ -1018,6 +1067,7 @@ mod tests {
         ] {
             assert!(assignment_matches_gateway(
                 &json!({"url": url}),
+                "server",
                 upstream,
                 &path
             ));
@@ -1029,8 +1079,62 @@ mod tests {
             json!({"url": "invalid"}),
             json!({}),
         ] {
-            assert!(!assignment_matches_gateway(&entry, upstream, &path));
+            assert!(!assignment_matches_gateway(
+                &entry, "server", upstream, &path
+            ));
         }
+    }
+
+    #[test]
+    fn atlassian_v1_assignment_matches_v2_reconnect_only_for_rovo() {
+        let path = format!("/mcp-gateway/{}", Uuid::new_v4());
+        let entry = json!({"url": "https://mcp.atlassian.com/v1/mcp"});
+
+        assert!(assignment_matches_gateway(
+            &entry,
+            "atlassian_rovo",
+            "https://mcp.atlassian.com/v2/mcp",
+            &path,
+        ));
+        assert!(!assignment_matches_gateway(
+            &entry,
+            "another_server",
+            "https://mcp.atlassian.com/v2/mcp",
+            &path,
+        ));
+    }
+
+    #[test]
+    fn native_atlassian_oauth_persists_the_migrated_endpoint_with_the_token() {
+        for key in ["url", "httpUrl"] {
+            let mut entry = json!({(key): "https://mcp.atlassian.com/v1/mcp"})
+                .as_object()
+                .unwrap()
+                .clone();
+            align_native_oauth_url(
+                &mut entry,
+                "atlassian_rovo",
+                "https://mcp.atlassian.com/v2/mcp",
+            );
+            assert_eq!(
+                entry[key],
+                serde_json::Value::String("https://mcp.atlassian.com/v2/mcp".to_string())
+            );
+        }
+
+        let mut unrelated = json!({"url": "https://mcp.atlassian.com/v1/mcp"})
+            .as_object()
+            .unwrap()
+            .clone();
+        align_native_oauth_url(
+            &mut unrelated,
+            "another_server",
+            "https://mcp.atlassian.com/v2/mcp",
+        );
+        assert_eq!(
+            unrelated["url"],
+            serde_json::Value::String("https://mcp.atlassian.com/v1/mcp".to_string())
+        );
     }
 
     #[test]
