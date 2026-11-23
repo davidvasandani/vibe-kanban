@@ -62,6 +62,7 @@ jobs:
               # skips the job entirely and reads as a pass — this list had
               # drifted to 15 of 33 workspace members (`crates/mcp` among the
               # omissions), which is the exact trap its own comment warned about.
+              - 'scripts/test-gateway-oauth-redirect.mjs'
               - 'crates/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
@@ -200,6 +201,13 @@ jobs:
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Test gateway OAuth redirect capture
+        run: node --test scripts/test-gateway-oauth-redirect.mjs
 
       - name: Run Cargo tests
         run: cargo nextest run --workspace --exclude vibe-kanban-tauri

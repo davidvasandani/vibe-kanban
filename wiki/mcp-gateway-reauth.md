@@ -18,6 +18,8 @@ Stored `expires_in`, or JWT `exp` as a scheduling hint, selects authenticated en
 
 Use the refresh grant first. Missing or explicitly rejected refresh grants can fall back to the shared `vk-entra` browser profile; token endpoint outages cannot. Preserve the original callback URI and granted scopes. Older records infer the callback from the configured public OAuth base or local server port.
 
+Playwright routing sees only the first URL in an HTTP redirect chain. Observe request events as well as routing so the exact localhost callback can be captured even when navigation ends with connection refused. Validate the captured callback and OAuth state before accepting it; remove both handlers in finally. Live sgsc SSO reproduced this redirect behavior.
+
 BrowserSession execute calls have isolated route-handler lifetimes. Callback interception, navigation and waiting must happen in one execute call, with route cleanup in finally. Check exact callback origin/path and unique matching state/code before accepting an authorization code or classifying callback errors. Close the gateway browser session before warming the shared Entra session to avoid profile-lock contention.
 
 Consent is a target-specific refusal. Definitive Entra account refusals from state-validated callbacks or text observed on HTTPS login.microsoftonline.com use the shared account refusal latch. Acquire that latch only for browser fallback: an unrelated Entra refusal must not block refresh-token renewal. Unknown pages/timeouts are failures, not evidence that human action is required.
