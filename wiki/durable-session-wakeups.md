@@ -117,9 +117,32 @@ control and recorded errors. Condition notifications identify that they are
 waiting for a completion receipt. A terminal cancelled record is not displayed
 as a successful trigger.
 
+## Chat refresh after a wakeup
+
+Wakeups use normal follow-up executions and the shared session process stream.
+An open chat can first discover a turn already completed after reconnect or
+browser suspension. `useConversationHistory` must handle that terminal-first
+discovery as well as observed running→terminal transitions. Initial history is
+loaded once, so relying only on the transition silently hides the new turn.
+
+Use previously observed process IDs to distinguish new terminal turns from
+known older turns intentionally left outside the lazy history window. Fetch
+new terminal turns through the existing settled-log reader and preserve stable
+entry keys. Do not add wakeup-specific polling or reload all historical logs.
+If a fetch fails, update the existing history recovery control even when no
+entries changed; otherwise the user can have neither the turn nor a retry.
+
+Async fetch and stream results must check the scope generation and current
+process membership before committing. This prevents old-session output or
+removed executions from returning after a delayed response. Tests should drive
+an already initialized conversation through running and terminal-first external
+turns, older-history pagination, failed-fetch recovery, scope changes and removal.
+
 ## Contributed by
 
 - vk/5ae4-pollers-add-a-ti
 
 - VAS-910 (`vk/e8d6-wake-ups-an-auto`)
 - vk/d5c5-scheduled-wakeup
+
+- vk/227e-scheduled-wake-u
