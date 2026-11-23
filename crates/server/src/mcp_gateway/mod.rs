@@ -53,6 +53,8 @@ pub(crate) struct StoredCredentials {
     pub resource: String,
     #[serde(default)]
     pub redirect_uri: Option<String>,
+    #[serde(default)]
+    pub scope: Option<String>,
     pub cf_access_client_id: Option<String>,
     pub cf_access_client_secret: Option<String>,
 }
@@ -145,7 +147,7 @@ async fn proxy_request(
     ) {
         return first;
     }
-    match refresh_credentials(&deployment, &connection, &credentials).await {
+    match refresh_credentials(&deployment.db().pool, &connection, &credentials).await {
         Ok(refreshed) => {
             credentials = refreshed;
             let response = proxy::forward(&prepared, &connection, &credentials).await;
@@ -160,9 +162,19 @@ fn gateway_peer_allowed(peer: IpAddr, allowed_workers: &HashSet<IpAddr>) -> bool
 }
 
 async fn refresh_credentials(
-    deployment: &DeploymentImpl,
+    pool: &sqlx::SqlitePool,
     original: &McpGatewayConnection,
     stale: &StoredCredentials,
+) -> Result<StoredCredentials, String> {
+    let store = secret_store().map_err(|_| "secret storage unavailable".to_string())?;
+    refresh_credentials_with_store(pool, original, stale, store).await
+}
+
+async fn refresh_credentials_with_store(
+    pool: &sqlx::SqlitePool,
+    original: &McpGatewayConnection,
+    stale: &StoredCredentials,
+    store: &McpGatewaySecretStore,
 ) -> Result<StoredCredentials, String> {
     let lock = {
         let mut locks = REFRESH_LOCKS.lock().await;
@@ -173,10 +185,10 @@ async fn refresh_credentials(
     };
     let _guard = lock.lock().await;
     let current = McpGatewayConnection::find_bound(
-        &deployment.db().pool,
+        pool,
         &original.id,
-        deployment.user_id(),
-        deployment.user_id(),
+        &original.owner_user_id,
+        &original.machine_id,
     )
     .await
     .map_err(|_| "refresh state unavailable".to_string())?
@@ -185,13 +197,12 @@ async fn refresh_credentials(
         .encrypted_credentials
         .as_deref()
         .ok_or_else(|| "shared connection is disconnected".to_string())?;
-    let raw = secret_store()
-        .map_err(|_| "secret storage unavailable".to_string())?
+    let raw = store
         .decrypt(envelope, binding(&current).as_bytes())
         .map_err(|_| "stored credential unavailable".to_string())?;
     let mut credentials: StoredCredentials =
         serde_json::from_slice(&raw).map_err(|_| "stored credential unavailable".to_string())?;
-    if credentials.access_token != stale.access_token {
+    if current.credential_version != original.credential_version || credentials.access_token != stale.access_token {
         return Ok(credentials);
     }
     let refresh_token = credentials
@@ -227,20 +238,30 @@ async fn refresh_credentials(
     credentials.access_token = tokens.access_token;
     credentials.refresh_token = tokens.refresh_token;
     let expires_at = reauth::token_expiry(tokens.expires_in, &credentials.access_token);
-    persist_credentials(deployment, &current, &credentials, expires_at).await?;
+    persist_credentials_with_store(pool, &current, &credentials, expires_at, store).await?;
     Ok(credentials)
 }
 
 async fn persist_credentials(
-    deployment: &DeploymentImpl,
+    pool: &sqlx::SqlitePool,
     current: &McpGatewayConnection,
     credentials: &StoredCredentials,
     expires_at: Option<String>,
 ) -> Result<(), String> {
+    let store = secret_store().map_err(|_| "secret storage unavailable".to_string())?;
+    persist_credentials_with_store(pool, current, credentials, expires_at, store).await
+}
+
+async fn persist_credentials_with_store(
+    pool: &sqlx::SqlitePool,
+    current: &McpGatewayConnection,
+    credentials: &StoredCredentials,
+    expires_at: Option<String>,
+    store: &McpGatewaySecretStore,
+) -> Result<(), String> {
     let raw =
         serde_json::to_vec(&credentials).map_err(|_| "credential update failed".to_string())?;
-    let encrypted = secret_store()
-        .map_err(|_| "secret storage unavailable".to_string())?
+    let encrypted = store
         .encrypt(&raw, binding(&current).as_bytes())
         .map_err(|_| "credential update failed".to_string())?;
     let updated = sqlx::query(
@@ -248,13 +269,16 @@ async fn persist_credentials(
            SET encrypted_credentials = ?, credential_version = credential_version + 1,
                status = 'connected', last_error_code = NULL, expires_at = ?,
                updated_at = datetime('now', 'subsec')
-           WHERE id = ? AND credential_version = ? AND status != 'disconnected'"#,
+           WHERE id = ? AND credential_version = ? AND status != 'disconnected'
+             AND owner_user_id = ? AND machine_id = ?"#,
     )
     .bind(encrypted)
     .bind(expires_at)
     .bind(&current.id)
     .bind(current.credential_version)
-    .execute(&deployment.db().pool)
+    .bind(&current.owner_user_id)
+    .bind(&current.machine_id)
+    .execute(pool)
     .await
     .map_err(|_| "credential update failed".to_string())?;
     if updated.rows_affected() != 1 {
@@ -339,6 +363,7 @@ pub(crate) async fn store_oauth_connection(
     let expires_at = reauth::token_expiry(tokens.expires_in, &tokens.access_token);
     let credentials = StoredCredentials {
         redirect_uri: Some(redirect_uri),
+        scope: tokens.scope,
         access_token: tokens.access_token,
         refresh_token: tokens.refresh_token,
         token_endpoint: Some(token_endpoint),

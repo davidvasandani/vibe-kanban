@@ -240,6 +240,7 @@ mod tests {
         };
         let credentials = StoredCredentials {
             redirect_uri: None,
+            scope: None,
             access_token: "upstream-secret".into(),
             refresh_token: None,
             token_endpoint: None,

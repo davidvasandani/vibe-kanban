@@ -743,6 +743,15 @@ pub async fn refresh_access_token(
         .await
         .map_err(|_| "token endpoint returned invalid JSON".to_string())?;
     if !status.is_success() {
+        // Only allowlisted OAuth codes leave this boundary; remote descriptions
+        // can contain secrets. Distinguish rejected grants from outages so the
+        // gateway never launches browser login for a token-endpoint timeout.
+        if let Some(
+            error @ ("invalid_grant" | "invalid_token" | "invalid_client" | "unauthorized_client"),
+        ) = value.get("error").and_then(Value::as_str)
+        {
+            return Err(format!("token refresh rejected: {error}"));
+        }
         return Err(format!("token refresh failed (HTTP {})", status.as_u16()));
     }
     Ok(OAuthTokenSet {
