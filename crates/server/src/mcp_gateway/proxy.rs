@@ -100,7 +100,7 @@ pub async fn forward(
     }
 }
 
-async fn validated_client(raw_url: &str) -> Result<reqwest::Client, ()> {
+pub(super) async fn validated_client(raw_url: &str) -> Result<reqwest::Client, ()> {
     let url = reqwest::Url::parse(raw_url).map_err(|_| ())?;
     let host = url
         .host_str()
@@ -127,6 +127,7 @@ async fn validated_client(raw_url: &str) -> Result<reqwest::Client, ()> {
     }
     reqwest::Client::builder()
         .no_proxy()
+        .connect_timeout(std::time::Duration::from_secs(10))
         .redirect(Policy::none())
         .resolve_to_addrs(&host, &addresses)
         .build()
@@ -238,6 +239,8 @@ mod tests {
             last_error_code: None,
         };
         let credentials = StoredCredentials {
+            redirect_uri: None,
+            scope: None,
             access_token: "upstream-secret".into(),
             refresh_token: None,
             token_endpoint: None,

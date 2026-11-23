@@ -12,7 +12,7 @@ const WAIT_SECS: u32 = 50;
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct McpReauthenticateRequest {
     #[schemars(
-        description = "Target id from list_reauth_targets, e.g. `aws-sso:<session>`, `cli-tool:az`, `cli-tool:acli`, `sgsc:dp`. Omit to repair every expired target the sweep covers (sgsc backends must be named)."
+        description = "Target id from list_reauth_targets, e.g. `aws-sso:<session>`, `cli-tool:az`, `cli-tool:acli`, `mcp-gateway:sgsc-mcp`, `sgsc:dp`. Omit to repair every expired target the sweep covers (sgsc backends must be named)."
     )]
     target: Option<String>,
 }
@@ -41,7 +41,7 @@ fn any_running(runs: &serde_json::Value) -> bool {
 #[tool_router(router = reauth_tools_router, vis = "pub")]
 impl McpServer {
     #[tool(
-        description = "List the credentials Vibe Kanban can re-authenticate unattended (AWS SSO scopes, Entra CLIs such as az, the Atlassian CLI, sgsc-mcp gateway backends), each with its current auth state and last run."
+        description = "List the credentials Vibe Kanban can re-authenticate unattended (AWS SSO scopes, Entra CLIs such as az, the Atlassian CLI, MCP gateway entry credentials, sgsc-mcp backends), each with its current auth state and last run."
     )]
     async fn list_reauth_targets(&self) -> Result<CallToolResult, ErrorData> {
         let url = self.url("/api/reauth/targets");
@@ -69,7 +69,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Re-authenticate an expired credential with no human involved, then retry your command. Call it when a command fails with: AWS `The SSO session associated with this profile has expired` / `Error loading SSO Token` / `Token has expired and refresh failed`; az `InteractionRequired`, `TokenCreatedWithOutdatedPolicies`, `AADSTS50173`; acli `unauthorized: use 'acli confluence auth login'`; or an sgsc-mcp `reauth_required` / `Connect <provider> to continue` result (pass `sgsc:<backend>`, e.g. `sgsc:dp` for Snowflake, `sgsc:sf` for Salesforce). Waits up to 50 s; if a run is still `running`, poll list_reauth_runs instead of calling this again. A `refused` outcome needs the operator: do not retry it."
+        description = "Re-authenticate an expired credential with no human involved, then retry your command. Call it when a command fails with: AWS `The SSO session associated with this profile has expired` / `Error loading SSO Token` / `Token has expired and refresh failed`; az `InteractionRequired`, `TokenCreatedWithOutdatedPolicies`, `AADSTS50173`; acli `unauthorized: use 'acli confluence auth login'`; MCP gateway `token_expired` / `invalid_token` (pass the response reauth_target, e.g. `mcp-gateway:sgsc-mcp`, or find it with list_reauth_targets); or an sgsc-mcp `reauth_required` / `Connect <provider> to continue` result (pass `sgsc:<backend>`, e.g. `sgsc:dp` for Snowflake, `sgsc:sf` for Salesforce; these repair backend grants, not gateway credentials). After gateway renewal retry; if tools remain absent call refresh_mcp_tools, or restart_session if refresh is unsupported (Claude Code). Waits up to 50 s; if a run is still `running`, poll list_reauth_runs instead of calling this again. A `refused` outcome needs the operator: do not retry it."
     )]
     async fn reauthenticate(
         &self,

@@ -178,7 +178,15 @@ inventory so configured-but-absent servers end in `not_registered` instead of
 `RECOVERY_LADDER` (`src/task_server/handler.rs`) is appended to the
 instructions in every mode.
 
-First the agent reads the error. When it carries `"vk_reported": true`, the
+First the agent reads the error. For a gateway 401 with `token_expired` or
+`invalid_token`, call `reauthenticate` with the response's `reauth_target`
+(for example `mcp-gateway:sgsc-mcp`), or use `list_reauth_targets` when absent.
+Poll `list_reauth_runs` while running, then retry after success. If tools remain
+absent, call `refresh_mcp_tools`, or `restart_session` when refresh is unsupported
+(Claude Code). A `refused` result names the required human action. Backend targets
+such as `sgsc:dp` repair a backend grant rather than the gateway entry credential.
+
+When the error carries `"vk_reported": true`, the
 backend answered and explained the failure (authentication, an org token that
 is configured but unavailable, a merge refusal, GitHub's own message). No rung
 can fix that, so the agent acts on the message and quotes it. The ladder is

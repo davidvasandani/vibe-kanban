@@ -175,7 +175,7 @@ pub fn router() -> Router<DeploymentImpl> {
             "/wakeups",
             get(crate::wakeups::list).post(crate::wakeups::schedule),
         )
-        .route("/wakeups/{id}/cancel", post(crate::wakeups::cancel))
+        .route("/wakeups/{wakeup_id}/cancel", post(crate::wakeups::cancel))
         .route("/pollers", get(list_pollers))
         .route("/pollers/start", post(start_poller))
         .route(

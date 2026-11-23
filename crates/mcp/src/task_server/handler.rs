@@ -12,7 +12,14 @@ use super::{McpMode, McpServer};
 /// the ladder only promises what they can fix (transport and tool discovery),
 /// and errors the backend explained (`vk_reported`) skip it.
 pub(crate) const RECOVERY_LADDER: &str = "If a Vibe Kanban tool call fails, read the error \
-     first. With \"vk_reported\": true, Vibe Kanban itself answered and explained the failure \
+     first. For an MCP gateway 401 with token_expired or invalid_token, call 'reauthenticate' \
+     with the response's reauth_target (for example mcp-gateway:sgsc-mcp); if it is absent, \
+     call 'list_reauth_targets' to identify the gateway entry. Poll 'list_reauth_runs' while \
+     the run is running. After success, retry; if tools remain absent, call 'refresh_mcp_tools' \
+     with workspace_id and session_id, or 'restart_session' if refresh is unsupported \
+     (including Claude Code). A refused outcome requires the named human action. \
+     sgsc:dp repairs the Snowflake backend grant, not the gateway credential. \
+     With \"vk_reported\": true, Vibe Kanban itself answered and explained the failure \
      (authentication, an org token that is configured but unavailable, configuration, a merge \
      refusal, GitHub's own message): refreshing or restarting cannot fix that, so act on the \
      message (fix the cause, retry later when it says so, or fall back at once) and quote it in \

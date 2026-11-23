@@ -834,7 +834,8 @@
       "kind": {
         "aws_sso": "AWS SSO",
         "cli_tool": "CLI tools",
-        "sgsc": "sgsc-mcp gateway"
+        "sgsc": "sgsc-mcp gateway",
+        "mcp_gateway": "MCP gateway OAuth"
       }
     },
     "aws": {

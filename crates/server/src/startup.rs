@@ -157,6 +157,7 @@ pub async fn initialize_deployment(
     }
 
     let deployment = DeploymentImpl::new(shutdown).await?;
+    crate::mcp_gateway::reauth::register(deployment.clone());
     // Subscribe before anything below can start (and fail) a coding-agent
     // turn — e.g. resuming interrupted runs — since a broadcast sent with no
     // receiver is lost. The consumer checks the (default-off) setting per

@@ -949,7 +949,8 @@
       "kind": {
         "aws_sso": "AWS SSO",
         "cli_tool": "Herramientas CLI",
-        "sgsc": "Pasarela sgsc-mcp"
+        "sgsc": "Pasarela sgsc-mcp",
+        "mcp_gateway": "MCP gateway OAuth"
       }
     },
     "aws": {

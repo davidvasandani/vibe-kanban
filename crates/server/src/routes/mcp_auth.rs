@@ -185,6 +185,7 @@ struct ExchangeInputs {
     revocation_endpoint: Option<String>,
     resource: String,
     redirect_uri: String,
+    requested_scope: String,
 }
 
 #[derive(Debug)]
@@ -418,6 +419,7 @@ async fn start(
             revocation_endpoint: meta.revocation_endpoint,
             resource: meta.resource,
             redirect_uri,
+            requested_scope: meta.scopes_supported.join(" "),
         }),
         executor: query.executor,
         server_name: payload.server_name,
@@ -619,7 +621,7 @@ async fn exchange_and_store(
         existing_gateway_token,
         existing_gateway_id,
     } = context;
-    let tokens = mcp_oauth::exchange_token_set(
+    let mut tokens = mcp_oauth::exchange_token_set(
         &exchange.oauth_client,
         &exchange.token_endpoint,
         &exchange.client_id,
@@ -629,6 +631,8 @@ async fn exchange_and_store(
         &exchange.resource,
     )
     .await?;
+    // RFC 6749 permits omission when the granted scope equals the request.
+    tokens.scope.get_or_insert(exchange.requested_scope);
     if !shared_gateway {
         return persist_token(executor, &server_name, &upstream_url, &tokens.access_token).await;
     }
@@ -658,6 +662,7 @@ async fn exchange_and_store(
             cf_access_client_id,
             cf_access_client_secret,
             existing_gateway_token,
+            redirect_uri: exchange.redirect_uri,
         },
     )
     .await?;

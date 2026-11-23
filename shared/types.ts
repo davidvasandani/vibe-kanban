@@ -866,7 +866,7 @@ export type AwsProfileImportRequest = { session_name: string, region: string, ou
 
 export type AwsProfileImportResult = { created: Array<string>, updated: Array<string>, };
 
-export type ReauthKind = "aws_sso" | "cli_tool" | "sgsc";
+export type ReauthKind = "aws_sso" | "cli_tool" | "sgsc" | "mcp_gateway";
 
 export type ReauthAuthState = "authenticated" | "unauthenticated" | "unknown" | "not_configured";
 

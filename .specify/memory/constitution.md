@@ -1600,3 +1600,13 @@ III/VI (one pure module, one consumer and two columns on the existing
 wake-up table, not a new scheduler). Use Vibe Kanban's constitution and task
 feature directory; the workspace command's homelab prefix is a shared
 pipeline default.
+
+## Review: vk/9784-auto-auth-renew
+
+Applied `/speckit.constitution`. II, III, VI, IX and XII require tested OAuth
+contracts, reuse of the gateway and reauth machinery, secret redaction,
+independent authentication verification and serialized credential replacement.
+Preserve owner/machine bindings and stable agent capabilities. Network failures
+are not proof of expired credentials; human-required refusals remain distinct
+from retryable failures. No new principle is needed. Task artifacts use
+specs/vk/9784-auto-auth-renew; older task paths in command templates are stale.

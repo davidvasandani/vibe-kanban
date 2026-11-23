@@ -118,6 +118,7 @@ const KIND_ORDER: ReauthTargetStatus['kind'][] = [
   'aws_sso',
   'cli_tool',
   'sgsc',
+  'mcp_gateway',
 ];
 
 /** Targets grouped by system, in a fixed order, empty groups dropped. */
