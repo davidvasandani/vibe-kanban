@@ -1093,38 +1093,44 @@ mod tests {
     #[test]
     fn atlassian_v1_assignment_matches_v2_reconnect_only_for_rovo() {
         let path = format!("/mcp-gateway/{}", Uuid::new_v4());
-        let entry = json!({"url": "https://mcp.atlassian.com/v1/mcp"});
-
-        assert!(assignment_matches_gateway(
-            &entry,
-            "atlassian_rovo",
-            "https://mcp.atlassian.com/v2/mcp",
-            &path,
-        ));
-        assert!(!assignment_matches_gateway(
-            &entry,
-            "another_server",
-            "https://mcp.atlassian.com/v2/mcp",
-            &path,
-        ));
+        for legacy in [
+            "https://mcp.atlassian.com/v1/mcp",
+            "https://mcp.atlassian.com/v1/mcp/authv2",
+        ] {
+            let entry = json!({"url": legacy});
+            assert!(assignment_matches_gateway(
+                &entry,
+                "atlassian_rovo",
+                "https://mcp.atlassian.com/v2/mcp",
+                &path,
+            ));
+            assert!(!assignment_matches_gateway(
+                &entry,
+                "another_server",
+                "https://mcp.atlassian.com/v2/mcp",
+                &path,
+            ));
+        }
     }
 
     #[test]
     fn native_atlassian_oauth_persists_the_migrated_endpoint_with_the_token() {
-        for key in ["url", "httpUrl"] {
-            let mut entry = json!({(key): "https://mcp.atlassian.com/v1/mcp"})
-                .as_object()
-                .unwrap()
-                .clone();
-            align_native_oauth_url(
-                &mut entry,
-                "atlassian_rovo",
-                "https://mcp.atlassian.com/v2/mcp",
-            );
-            assert_eq!(
-                entry[key],
-                serde_json::Value::String("https://mcp.atlassian.com/v2/mcp".to_string())
-            );
+        for legacy in [
+            "https://mcp.atlassian.com/v1/mcp",
+            "https://mcp.atlassian.com/v1/mcp/authv2",
+        ] {
+            for key in ["url", "httpUrl"] {
+                let mut entry = json!({(key): legacy}).as_object().unwrap().clone();
+                align_native_oauth_url(
+                    &mut entry,
+                    "atlassian_rovo",
+                    "https://mcp.atlassian.com/v2/mcp",
+                );
+                assert_eq!(
+                    entry[key],
+                    serde_json::Value::String("https://mcp.atlassian.com/v2/mcp".to_string())
+                );
+            }
         }
 
         let mut unrelated = json!({"url": "https://mcp.atlassian.com/v1/mcp"})
