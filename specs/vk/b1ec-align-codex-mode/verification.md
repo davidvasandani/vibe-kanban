@@ -25,3 +25,11 @@
 - Docs: `wiki/executor-model-catalogs.md`, `wiki/INDEX.md`, constitution
   review note, this spec directory.
 - Homelab: not modified.
+
+## Post-upgrade runtime (2026-11-25)
+
+| Check | Result |
+| --- | --- |
+| VK executor (`Codex::spawn` + `spawn_follow_up`, protocol crates 0.144.1) vs 0.171.0, `gpt-6.2-sol` | Both turns succeeded on the same thread. A 0.155.1 control run behaved identically, with no new decode warnings |
+| Nix-built think `pkgs.codex` 0.171.0 `model/list` | All 10 visible IDs present |
+| Deployed `VIBE_CODEX_COMMAND` (think1) | `codex-0.171.0`. `gpt-6.2-astra`, `gpt-6.2-sol`, `gpt-6.1-sol` OK |

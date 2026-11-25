@@ -75,9 +75,7 @@ Resolved in `clarifications.md`:
   Astra > Sol > Terra > Luna). The task names this order and makes the
   user-facing selector authoritative.
 
-Remaining (a ship gate, not an implementation blocker):
-
-- [NEEDS CLARIFICATION: The deployed Codex 0.155.1 rejects all four new models
-  (`model_not_found`). May the catalog merge before the homelab Codex runtime
-  is upgraded? Until the operator answers, implementation and review proceed
-  on the branch and the PR is not merged.]
+- Ship gate: resolved 2026-11-25. The operator chose "upgrade first". Homelab
+  davidvasandani/homelab#1815 moved every Codex pin to 0.171.0 and was merged
+  and deployed, and the deployed runtime runs the new models
+  (`clarifications.md` Q5).

@@ -19,4 +19,4 @@ changes.
 
 ## Phase 4: Review & ship gate
 - [x] T006 Run the independent Codex review of the diff and iterate. Record it in `specs/vk/b1ec-align-codex-mode/review.md` (depends on T003–T005)
-- [ ] T007 Open the PR. Merge only after an explicit operator decision on the deployed-CLI gate (spec open question) (depends on T006)
+- [x] T007 Open the PR. Merge only after an explicit operator decision on the deployed-CLI gate (spec open question) (depends on T006)

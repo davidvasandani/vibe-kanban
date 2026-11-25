@@ -34,7 +34,7 @@ visible model is excluded.
 existing catalog and the screenshot. App-server labels are inconsistent
 (`GPT-6.2-Astra` vs `GPT-6.1 Terra`); the ID is the contract.
 
-### Q5. May this merge while the deployed CLI (0.155.1) rejects the new models? — OPEN
+### Q5. May this merge while the deployed CLI (0.155.1) rejects the new models? — RESOLVED
 
 Evidence: `codex exec -m gpt-6.2-sol` on 0.155.1 returns 400
 `model_not_found` / `model_not_in_accessible_catalog` (re-checked 2026-11-25).
@@ -44,3 +44,9 @@ this task excludes.
 **Interim decision:** implement, test and review on the branch, and open the
 PR. Do not merge without an explicit operator decision (merge anyway, or
 upgrade the homelab Codex runtime first).
+
+**Final decision (operator, 2026-11-25):** upgrade first, then merge. Homelab
+PR davidvasandani/homelab#1815 relocked `codex-cli-nix` and bumped
+`pkgs/codex` to 0.171.0, and raised the CI version floor to 0.171.0. After it
+deployed, `VIBE_CODEX_COMMAND` on think1 is `codex-0.171.0`, and
+`gpt-6.2-astra` and `gpt-6.2-sol` ran through it.

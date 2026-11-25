@@ -92,3 +92,6 @@ bump (the npx pin is Renovate-managed and the deployment overrides it anyway).
 
 > Update 2026-11-25: decision 2 was resolved in favour of the screenshot order
 > (`clarifications.md` Q1). Decision 1 remains open as the merge gate.
+
+> Update 2026-11-25: decision 1 was resolved by upgrading homelab Codex to 0.171.0
+> first (davidvasandani/homelab#1815, deployed).
