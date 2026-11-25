@@ -18,5 +18,5 @@ changes.
 - [x] T005 [P] Refresh the `executor-model-catalogs` entry in `wiki/INDEX.md` (depends on T002)
 
 ## Phase 4: Review & ship gate
-- [ ] T006 Run the independent Codex review of the diff and iterate. Record it in `specs/vk/b1ec-align-codex-mode/review.md` (depends on T003–T005)
+- [x] T006 Run the independent Codex review of the diff and iterate. Record it in `specs/vk/b1ec-align-codex-mode/review.md` (depends on T003–T005)
 - [ ] T007 Open the PR. Merge only after an explicit operator decision on the deployed-CLI gate (spec open question) (depends on T006)
