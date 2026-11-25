@@ -89,3 +89,6 @@ bump (the npx pin is Renovate-managed and the deployment overrides it anyway).
    accept failing entries until then?
 2. Ordering: screenshot order (as specified) or 0.171.0 TUI/backend-priority
    order?
+
+> Update 2026-11-25: decision 2 was resolved in favour of the screenshot order
+> (`clarifications.md` Q1). Decision 1 remains open as the merge gate.
