@@ -74,6 +74,26 @@ mod tests {
             actual,
             vec![
                 (
+                    "gpt-6.2-astra",
+                    "GPT-6.2 Astra",
+                    vec!["low", "medium", "high", "xhigh", "max", "ultra"],
+                ),
+                (
+                    "gpt-6.2-sol",
+                    "GPT-6.2 Sol",
+                    vec!["low", "medium", "high", "xhigh", "max", "ultra"],
+                ),
+                (
+                    "gpt-6.1-sol",
+                    "GPT-6.1 Sol",
+                    vec!["low", "medium", "high", "xhigh", "max", "ultra"],
+                ),
+                (
+                    "gpt-6.1-terra",
+                    "GPT-6.1 Terra",
+                    vec!["low", "medium", "high", "xhigh", "max", "ultra"],
+                ),
+                (
                     "gpt-6-astra",
                     "GPT-6 Astra",
                     vec!["low", "medium", "high", "xhigh", "max", "ultra"],
@@ -1100,6 +1120,30 @@ impl StandardCodingAgentExecutor for Codex {
             model_selector: ModelSelectorConfig {
                 model_aliases: Default::default(),
                 models: vec![
+                    ModelInfo {
+                        id: "gpt-6.2-astra".to_string(),
+                        name: "GPT-6.2 Astra".to_string(),
+                        provider_id: None,
+                        reasoning_options: ultra_reasoning_options.clone(),
+                    },
+                    ModelInfo {
+                        id: "gpt-6.2-sol".to_string(),
+                        name: "GPT-6.2 Sol".to_string(),
+                        provider_id: None,
+                        reasoning_options: ultra_reasoning_options.clone(),
+                    },
+                    ModelInfo {
+                        id: "gpt-6.1-sol".to_string(),
+                        name: "GPT-6.1 Sol".to_string(),
+                        provider_id: None,
+                        reasoning_options: ultra_reasoning_options.clone(),
+                    },
+                    ModelInfo {
+                        id: "gpt-6.1-terra".to_string(),
+                        name: "GPT-6.1 Terra".to_string(),
+                        provider_id: None,
+                        reasoning_options: ultra_reasoning_options.clone(),
+                    },
                     ModelInfo {
                         id: "gpt-6-astra".to_string(),
                         name: "GPT-6 Astra".to_string(),
