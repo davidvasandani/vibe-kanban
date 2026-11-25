@@ -79,7 +79,9 @@ contributed to it.
   discovery is the authoritative source for model pickers. Verify current IDs
   and reasoning boundaries against provider sources, keep Default implicit,
   test exact ordered catalogs, and keep catalog refreshes separate from managed
-  CLI upgrades. Claude upgrades must align the npm launcher, catalog and
+  CLI upgrades. Codex's target is the current selector: the backend gates
+  `model/list` and model acceptance by CLI `client_version`, so read the latest
+  CLI's list and smoke-test new IDs on the deployed CLI before shipping. Claude upgrades must align the npm launcher, catalog and
   context mapping. Advertise versioned IDs only, and resolve legacy aliases
   through `model_aliases` read from the pinned binary. A CLI bump can move
   several aliases at once (2.1.322: `fable`/`sonnet`/`haiku` → Fable 5.2,

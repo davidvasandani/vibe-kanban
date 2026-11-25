@@ -13,14 +13,31 @@ returns visible/hidden state and supported reasoning efforts, while OpenAI's
 official latest-model resolver and model reference cover newly announced models
 that an older pinned CLI may not yet list.
 
-Treat those sources as different compatibility boundaries. The public API's
-latest family can lead the ChatGPT catalog used by the pinned Codex CLI. For a
-Vibe Kanban picker refresh, initialize the exact deployed app-server and query
-`model/list` with hidden entries included. Advertise only its visible entries,
-and derive reasoning options from each returned capability record. For Codex
-0.155.1 this avoided prematurely advertising API-only GPT-6.2 IDs and exposed a
-real picker drift instead: GPT-6 Sol and Luna were missing, GPT-6 Astra lacked
-`ultra`, and two older entries were no longer visible.
+Treat those sources as different compatibility boundaries. The picker's
+target is the **current user-facing Codex selector**, not the deployed CLI's
+list. The ChatGPT backend filters `model/list` *and* model acceptance by the
+caller's `client_version`, so an old pinned CLI sees an old catalog. PR #404
+read `model/list` from the deployed 0.155.1 and called GPT-6.2 "API-only".
+The newer models were in fact ChatGPT-Codex models gated to newer clients
+(`vk/b1ec-align-codex-mode`).
+
+To refresh, download the latest `@openai/codex` into its own directory and
+run its `app-server`. Use a scoped `CODEX_HOME` with `auth.json` symlinked to
+the shared credential, so token rotation and the shared `models_cache.json`
+stay untouched. Then `initialize` and query `model/list` with
+`includeHidden: true`. Advertise only visible entries (`gpt-reserve` and
+`codex-auto-review` are hidden), and take efforts from each record's
+`supportedReasoningEfforts`. Then smoke-test every new ID with a one-word
+`codex exec` on the **deployed** CLI (`$VIBE_CODEX_COMMAND`). An old client
+gets `400 model_not_found` / `model_not_in_accessible_catalog`. In that case
+the homelab `pkgs.codex` runtime must be upgraded before the catalog ships;
+that is an operator decision outside this repository. In November 2026,
+0.155.1 rejected gpt-6.2-* and gpt-6.1-*, while 0.171.0 listed and ran them.
+
+Order is a judgement call. The Codex TUI `/model` picker renders backend
+`priority` (6.2 Sol, 6.2 Astra, 6.1 Terra, 6.1 Sol, …). The selector the
+operator supplied orders by version, then tier Astra > Sol > Terra > Luna, and
+VK follows that. Re-check both on the next refresh.
 
 Keep the catalog newest-first and distinguish the infrastructure-provided
 Default choice from explicit model entries. When a supplied picker reference is
@@ -117,6 +134,7 @@ can't change the map. Before changing the catalog, check the turn's log for
 
 - `vk/094a-update-chatgpt-m`
 - `vk/3ffa-upgrade-codex-mo`
+- `vk/b1ec-align-codex-mode`
 
 - `vk/129c-update-to-opus-5`
 - `vk/6823-model-menu`
