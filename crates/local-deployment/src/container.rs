@@ -3172,12 +3172,11 @@ impl LocalContainerService {
             return Ok(false);
         }
         let recovery = ExecutionWorkerJob::recovery(pool, process.id).await?;
-        if let Some(owner) = recovery.coordinator_id {
-            if Some(owner) != self.cluster_config.coordinator_id
-                || job.dispatch_state == ExecutionWorkerDispatchState::Pending
-            {
-                return Ok(false);
-            }
+        if let Some(owner) = recovery.coordinator_id
+            && (Some(owner) != self.cluster_config.coordinator_id
+                || job.dispatch_state == ExecutionWorkerDispatchState::Pending)
+        {
+            return Ok(false);
         }
         if self.msg_stores.read().await.contains_key(&process.id) {
             return Ok(false);

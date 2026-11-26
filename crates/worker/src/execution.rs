@@ -3687,7 +3687,10 @@ mod worktree_preflight_tests {
             .await
             .expect_err("an unreadable workspace must not be treated as having no repositories");
 
-        assert!(matches!(error, ExecutionError::WorktreeUnusable { .. }));
+        assert!(
+            matches!(error, ExecutionError::WorkspaceRead { path, source }
+            if path == missing && source.kind() == std::io::ErrorKind::NotFound)
+        );
     }
 
     /// The production defect, seen from the worker: a worktree pointing at
