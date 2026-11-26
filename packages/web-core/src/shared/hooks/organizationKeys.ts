@@ -7,4 +7,6 @@ export const organizationKeys = {
   invitations: (orgId: string) =>
     ['organizations', orgId, 'invitations'] as const,
   envVars: (orgId: string) => ['organizations', orgId, 'env-vars'] as const,
+  commitIdentity: (orgId: string) =>
+    ['organizations', orgId, 'commit-identity'] as const,
 };

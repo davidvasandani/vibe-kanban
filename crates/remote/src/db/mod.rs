@@ -19,6 +19,7 @@ pub mod jira_sync;
 pub mod notifications;
 pub mod oauth;
 pub mod oauth_accounts;
+pub mod organization_commit_identities;
 pub mod organization_env_vars;
 pub mod organization_members;
 pub mod organizations;

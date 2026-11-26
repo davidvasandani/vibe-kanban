@@ -44,6 +44,7 @@ pub mod issues;
 mod jira_sync;
 pub mod notifications;
 mod oauth;
+mod organization_commit_identity;
 mod organization_env_vars;
 pub(crate) mod organization_members;
 mod organizations;
@@ -124,6 +125,7 @@ pub fn router(state: AppState) -> Router {
         .merge(projects::router())
         .merge(organizations::router())
         .merge(global_search::router())
+        .merge(organization_commit_identity::router())
         .merge(organization_env_vars::router())
         .merge(organization_members::protected_router())
         .merge(oauth::protected_router())

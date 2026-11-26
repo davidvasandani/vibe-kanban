@@ -61,6 +61,9 @@ import {
   CreateOrganizationEnvVarRequest,
   CreateOrganizationEnvVarResponse,
   ListOrganizationEnvVarsResponse,
+  GetOrganizationCommitIdentityResponse,
+  OrganizationCommitIdentity,
+  UpsertOrganizationCommitIdentityRequest,
   ListOrganizationsResponse,
   OrganizationEnvVar,
   UpdateOrganizationEnvVarRequest,
@@ -1869,6 +1872,42 @@ export const organizationsApi = {
   deleteEnvVar: async (orgId: string, envVarId: string): Promise<void> => {
     const response = await makeRemoteRequest(
       `/v1/organizations/${orgId}/env-vars/${envVarId}`,
+      { method: 'DELETE' }
+    );
+    return handleRemoteResponse<void>(response);
+  },
+
+  getCommitIdentity: async (
+    orgId: string
+  ): Promise<OrganizationCommitIdentity | null> => {
+    const response = await makeRemoteRequest(
+      `/v1/organizations/${orgId}/commit-identity`
+    );
+    const result =
+      await handleRemoteResponse<GetOrganizationCommitIdentityResponse>(
+        response
+      );
+    return result.commit_identity;
+  },
+
+  upsertCommitIdentity: async (
+    orgId: string,
+    data: UpsertOrganizationCommitIdentityRequest
+  ): Promise<OrganizationCommitIdentity> => {
+    const response = await makeRemoteRequest(
+      `/v1/organizations/${orgId}/commit-identity`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      }
+    );
+    return handleRemoteResponse<OrganizationCommitIdentity>(response);
+  },
+
+  deleteCommitIdentity: async (orgId: string): Promise<void> => {
+    const response = await makeRemoteRequest(
+      `/v1/organizations/${orgId}/commit-identity`,
       { method: 'DELETE' }
     );
     return handleRemoteResponse<void>(response);
