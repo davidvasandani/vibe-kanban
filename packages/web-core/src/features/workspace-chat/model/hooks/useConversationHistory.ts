@@ -299,6 +299,10 @@ export const useConversationHistory = ({
   // This emits its own events as they are streamed
   const loadRunningAndEmit = useCallback(
     (executionProcess: ExecutionProcess): Promise<void> => {
+      const generation = scopeGenerationRef.current;
+      const isCurrent = () =>
+        generation === scopeGenerationRef.current &&
+        executionProcesses.current.some((p) => p.id === executionProcess.id);
       return new Promise((resolve, reject) => {
         let url = '';
         if (executionProcess.executor_action.typ.type === 'ScriptRequest') {
@@ -308,6 +312,11 @@ export const useConversationHistory = ({
         }
         const controller = streamJsonPatchEntries<PatchType>(url, {
           onEntries(entries) {
+            if (!isCurrent()) {
+              controller.close();
+              resolve();
+              return;
+            }
             const patchesWithKey = entries.map((entry, index) =>
               patchWithKey(
                 entry,
@@ -325,7 +334,13 @@ export const useConversationHistory = ({
             emitEntries(displayedExecutionProcesses.current, 'running', false);
           },
           onFinished: () => {
-            emitEntries(displayedExecutionProcesses.current, 'running', false);
+            if (isCurrent()) {
+              emitEntries(
+                displayedExecutionProcesses.current,
+                'running',
+                false
+              );
+            }
             controller.close();
             resolve();
           },
@@ -342,7 +357,13 @@ export const useConversationHistory = ({
   // Sometimes it can take a few seconds for the stream to start, wrap the loadRunningAndEmit method
   const loadRunningAndEmitWithBackoff = useCallback(
     async (executionProcess: ExecutionProcess) => {
+      const generation = scopeGenerationRef.current;
       for (let i = 0; i < 20; i++) {
+        if (
+          generation !== scopeGenerationRef.current ||
+          !executionProcesses.current.some((p) => p.id === executionProcess.id)
+        )
+          return;
         try {
           await loadRunningAndEmit(executionProcess);
           break;
@@ -549,6 +570,9 @@ export const useConversationHistory = ({
     setLoadEarlierError(null);
     setHasEvictableHistory(false);
     emitEntries(displayedExecutionProcesses.current, 'initial', true);
+    return () => {
+      scopeGenerationRef.current += 1;
+    };
   }, [scopeKey, emitEntries]);
 
   useEffect(() => {
@@ -633,14 +657,18 @@ export const useConversationHistory = ({
 
     const processesToReload: ExecutionProcess[] = [];
 
-    for (const process of executionProcessesRaw) {
+    for (const process of executionProcesses.current) {
       const previousStatus = previousStatusMapRef.current.get(process.id);
       const currentStatus = process.status;
 
       if (
-        previousStatus === ExecutionProcessStatus.running &&
         currentStatus !== ExecutionProcessStatus.running &&
-        displayedExecutionProcesses.current[process.id]
+        ((previousStatus === ExecutionProcessStatus.running &&
+          displayedExecutionProcesses.current[process.id]) ||
+          // A wakeup may finish while discovery is disconnected. It has no
+          // running→terminal transition here, but is still a new chat turn.
+          // Known unloaded IDs remain lazy older history.
+          (previousStatus === undefined && loadedInitialEntries.current))
       ) {
         processesToReload.push(process);
       }
@@ -650,14 +678,19 @@ export const useConversationHistory = ({
 
     if (processesToReload.length === 0) return;
 
+    const generation = scopeGenerationRef.current;
     (async () => {
       let anyUpdated = false;
 
       for (const process of processesToReload) {
+        if (generation !== scopeGenerationRef.current) return;
         let entries: PatchType[];
         try {
-          // Bypass the cache: this turn was running when it was last read.
+          // Bypass the cache: the turn is new or was last read running.
           const result = await loadSettledProcessEntries(process);
+          if (generation !== scopeGenerationRef.current) return;
+          if (!executionProcesses.current.some((p) => p.id === process.id))
+            continue;
           entries = result.entries;
           if (result.complete) {
             settledEntriesCacheRef.current.set(process.id, entries);
@@ -680,11 +713,20 @@ export const useConversationHistory = ({
         anyUpdated = true;
       }
 
+      if (generation !== scopeGenerationRef.current) return;
       if (anyUpdated) {
         emitEntries(displayedExecutionProcesses.current, 'running', false);
       }
+      // Failed discoveries remain reachable through the existing history retry
+      // control, even when every previous turn was already loaded.
+      setHasEarlierHistory(hasUnloadedHistoricProcesses());
     })();
-  }, [idStatusKey, executionProcessesRaw, emitEntries]);
+  }, [
+    idStatusKey,
+    executionProcessesRaw,
+    emitEntries,
+    hasUnloadedHistoricProcesses,
+  ]);
 
   // If an execution process is removed, remove it from the state
   useEffect(() => {

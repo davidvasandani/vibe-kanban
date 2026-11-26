@@ -5,9 +5,9 @@ use cluster_protocol::{
     CancellationRequest, CancellationStatus, CodexRolloutArtifact, CodexRolloutManifest,
     CodexRolloutManifestRequest, CodexRolloutReadRequest, CodexRolloutStageRequest,
     CodexRolloutStageResult, CodexRolloutVerification, CodexRolloutVerifyRequest, DispatchAccepted,
-    EventAcknowledgement, EventBatch, ExecutionDispatch, ExecutionQuiescenceRequest,
-    ExecutionQuiescenceStatus, InteractionResponse, JobSummary, McpRefreshRequest,
-    PreviewHttpRequest, PreviewHttpResponse, QuarantineRequest, TerminalClose,
+    DispatchReadiness, EventAcknowledgement, EventBatch, ExecutionDispatch,
+    ExecutionQuiescenceRequest, ExecutionQuiescenceStatus, InteractionResponse, JobSummary,
+    McpRefreshRequest, PreviewHttpRequest, PreviewHttpResponse, QuarantineRequest, TerminalClose,
     TerminalCreateRequest, TerminalCreated, TerminalInput, TerminalOutputBatch, TerminalResize,
     WorkerMcpRefreshResult,
 };
@@ -39,6 +39,12 @@ pub enum WorkerClientError {
     Rejected { status: StatusCode, message: String },
     #[error("worker reported a dispatch digest conflict")]
     DigestConflict,
+    #[error("worker refused dispatch before execution: {0}")]
+    DispatchRefused(String),
+    #[error("workspace readiness is temporarily unavailable: {0}")]
+    ReadinessTransient(String),
+    #[error("worker rejected execution before launch: {0}")]
+    DispatchRejected(String),
     #[error(
         "worker event replay gap: requested after {requested_after}, earliest retained is {earliest_available}"
     )]
@@ -60,21 +66,6 @@ pub enum WorkerClientError {
     MalformedResponse(String),
 }
 
-impl WorkerClientError {
-    /// The worker's own reason when it answered `503`: it is live but is not
-    /// admitting new work (memory/IO pressure, or draining for a release).
-    /// That is a temporary refusal a client can recover from, unlike a
-    /// transport fault or a rejected request.
-    pub fn service_unavailable_reason(&self) -> Option<&str> {
-        match self {
-            Self::Rejected { status, message } if *status == StatusCode::SERVICE_UNAVAILABLE => {
-                Some(message)
-            }
-            _ => None,
-        }
-    }
-}
-
 /// Far below the client's 30s default: metrics are polled on a 2s tick, so a
 /// node that has not answered in 5s has already missed its slot.
 const METRICS_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -94,6 +85,7 @@ struct WorkerHealth {
 #[derive(Debug, Deserialize)]
 struct WorkerErrorBody {
     error: Option<String>,
+    code: Option<String>,
 }
 
 #[derive(Clone)]
@@ -120,17 +112,19 @@ impl WorkerClient {
         dispatch: &ExecutionDispatch,
     ) -> Result<DispatchAccepted, WorkerClientError> {
         let path = format!("/v1/executions/{}", dispatch.execution_id);
-        let mut payload = dispatch.clone();
-        for attempt in 0..2 {
-            if attempt > 0 {
-                refresh_dispatch_authority(&mut payload, chrono::Utc::now(), Uuid::new_v4());
-            }
-            match self.post(worker_node_id, &path, &payload).await {
-                Err(error) if attempt == 0 && retryable_dispatch_error(&error) => {}
-                result => return result,
-            }
-        }
-        unreachable!("bounded dispatch retry returns on final attempt")
+        self.post(worker_node_id, &path, dispatch).await
+    }
+
+    pub async fn dispatch_readiness(
+        &self,
+        worker_node_id: Uuid,
+        request: &DispatchReadiness,
+    ) -> Result<(), WorkerClientError> {
+        let path = format!(
+            "/v1/executions/{}/readiness",
+            request.authority.correlation_id
+        );
+        self.post(worker_node_id, &path, request).await
     }
 
     pub async fn refresh_mcp(
@@ -550,15 +544,6 @@ impl WorkerClient {
     }
 }
 
-fn refresh_dispatch_authority(
-    dispatch: &mut ExecutionDispatch,
-    issued_at: chrono::DateTime<chrono::Utc>,
-    nonce: Uuid,
-) {
-    dispatch.authority.issued_at = issued_at;
-    dispatch.authority.nonce = nonce.to_string();
-}
-
 fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
     let mut rendered = error.to_string();
     let mut source = error.source();
@@ -572,18 +557,6 @@ fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
         source = cause.source();
     }
     rendered
-}
-
-fn retryable_dispatch_error(error: &WorkerClientError) -> bool {
-    match error {
-        WorkerClientError::Transport(_) => true,
-        WorkerClientError::Rejected { status, .. } => {
-            status.is_server_error()
-                || *status == StatusCode::REQUEST_TIMEOUT
-                || *status == StatusCode::TOO_MANY_REQUESTS
-        }
-        _ => false,
-    }
 }
 
 fn preview_ws_query(request: &PreviewHttpRequest) -> String {
@@ -606,13 +579,40 @@ async fn decode<T: DeserializeOwned>(response: reqwest::Response) -> Result<T, W
     if status == StatusCode::CONFLICT {
         return Err(WorkerClientError::DigestConflict);
     }
-    let message = response
-        .json::<WorkerErrorBody>()
-        .await
-        .ok()
+    let body = bounded_worker_error(response).await;
+    let code = body.as_ref().and_then(|body| body.code.clone());
+    let message: String = body
         .and_then(|body| body.error)
-        .unwrap_or_else(|| "unspecified worker error".into());
-    Err(WorkerClientError::Rejected { status, message })
+        .unwrap_or_else(|| "unspecified worker error".into())
+        .chars()
+        .take(2048)
+        .collect();
+    Err(match (status, code.as_deref()) {
+        (StatusCode::SERVICE_UNAVAILABLE, Some("admission_refused")) => {
+            WorkerClientError::DispatchRefused(message)
+        }
+        (StatusCode::SERVICE_UNAVAILABLE, Some("readiness_transient")) => {
+            WorkerClientError::ReadinessTransient(message)
+        }
+        (StatusCode::BAD_REQUEST, Some("dispatch_rejected")) => {
+            WorkerClientError::DispatchRejected(message)
+        }
+        _ => WorkerClientError::Rejected { status, message },
+    })
+}
+
+async fn bounded_worker_error(response: reqwest::Response) -> Option<WorkerErrorBody> {
+    const LIMIT: usize = 8 * 1024;
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.ok()?;
+        if bytes.len().saturating_add(chunk.len()) > LIMIT {
+            return None;
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&bytes).ok()
 }
 
 /// Buffer a response body, refusing to exceed `limit`.
@@ -674,13 +674,8 @@ fn validate_event_batch(batch: &EventBatch) -> Result<(), WorkerClientError> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
     use chrono::Utc;
-    use cluster_protocol::{
-        ExecutionEvent, ExecutionEventPayload, PROTOCOL_VERSION, PersistencePolicy,
-        RequestAuthority,
-    };
+    use cluster_protocol::{ExecutionEvent, ExecutionEventPayload};
 
     use super::*;
 
@@ -745,90 +740,5 @@ mod tests {
             validate_event_batch(&batch(&[4, 6])),
             Err(WorkerClientError::ReplayGap { .. })
         ));
-    }
-
-    #[test]
-    fn dispatch_retry_refreshes_only_replay_authority() {
-        let execution_id = Uuid::new_v4();
-        let original_time = Utc::now() - chrono::TimeDelta::seconds(1);
-        let mut dispatch = ExecutionDispatch {
-            authority: RequestAuthority {
-                protocol_version: PROTOCOL_VERSION,
-                coordinator_id: Uuid::new_v4(),
-                worker_node_id: Uuid::new_v4(),
-                correlation_id: execution_id,
-                issued_at: original_time,
-                nonce: "first".into(),
-            },
-            execution_id,
-            workspace_id: Uuid::new_v4(),
-            session_id: Uuid::new_v4(),
-            workspace_path: "/shared/workspace".into(),
-            working_directory: "/shared/workspace".into(),
-            executor_profile: "codex".into(),
-            executor_profile_config: None,
-            mcp_config_snapshot: None,
-            action: serde_json::json!({}),
-            environment: BTreeMap::new(),
-            run_reason: "test".into(),
-            timeout_seconds: None,
-            persistence: PersistencePolicy::Ordinary,
-            request_digest: "stable-digest".into(),
-        };
-        let original = dispatch.clone();
-        let retry_time = Utc::now();
-        let retry_nonce = Uuid::new_v4();
-
-        refresh_dispatch_authority(&mut dispatch, retry_time, retry_nonce);
-
-        assert_eq!(dispatch.execution_id, original.execution_id);
-        assert_eq!(dispatch.request_digest, original.request_digest);
-        assert_eq!(
-            dispatch.authority.correlation_id,
-            original.authority.correlation_id
-        );
-        assert_eq!(dispatch.authority.issued_at, retry_time);
-        assert_eq!(dispatch.authority.nonce, retry_nonce.to_string());
-    }
-
-    #[test]
-    fn dispatch_retries_only_transient_rejections() {
-        let rejected = |status| WorkerClientError::Rejected {
-            status,
-            message: "test".into(),
-        };
-        assert!(retryable_dispatch_error(&rejected(
-            StatusCode::INTERNAL_SERVER_ERROR
-        )));
-        assert!(retryable_dispatch_error(&rejected(
-            StatusCode::REQUEST_TIMEOUT
-        )));
-        assert!(retryable_dispatch_error(&rejected(
-            StatusCode::TOO_MANY_REQUESTS
-        )));
-        assert!(!retryable_dispatch_error(&rejected(StatusCode::FORBIDDEN)));
-        assert!(!retryable_dispatch_error(
-            &WorkerClientError::DigestConflict
-        ));
-    }
-
-    #[test]
-    fn only_a_503_rejection_is_a_service_unavailable_refusal() {
-        let rejected = |status| WorkerClientError::Rejected {
-            status,
-            message: "worker is draining for a release handoff".into(),
-        };
-        assert_eq!(
-            rejected(StatusCode::SERVICE_UNAVAILABLE).service_unavailable_reason(),
-            Some("worker is draining for a release handoff")
-        );
-        assert_eq!(
-            rejected(StatusCode::INTERNAL_SERVER_ERROR).service_unavailable_reason(),
-            None
-        );
-        assert_eq!(
-            WorkerClientError::DigestConflict.service_unavailable_reason(),
-            None
-        );
     }
 }

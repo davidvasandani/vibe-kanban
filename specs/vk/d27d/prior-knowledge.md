@@ -1,0 +1,2 @@
+# Prior knowledge
+wiki/auto-error-remediation.md identifies finalize_task as a convergence point for worker and local exits. Its optional remediation flow opens a separate workspace and uses in-memory rate limits, so session continuation needs a different owner. Startup can already resume interrupted coding agents. Check wiki/coordinator-restart-handoff.md and wiki/refused-execution-recovery.md and their corresponding implementations before adding any dispatch path. Preserve the distinction between killed, interrupted and indeterminate outcomes.

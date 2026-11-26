@@ -185,12 +185,15 @@ real upstream lives in the encrypted gateway row. Update that upstream during a
 user-initiated reconnect while retaining the assigned gateway UUID and local
 capability. Agent-native OAuth must persist the migrated URL with the new token,
 not authenticate against the new resource and leave the old URL on disk.
+Do not rewrite an encrypted gateway row in place: changing its storage binding
+does not obtain or validate a grant for the new OAuth resource.
 
 Keep URL equivalence narrow. The Atlassian Rovo v1-to-v2 transition matches the
-canonical `atlassian_rovo` identifier and exact old URL. Assignment matching may
-treat those two URLs as one logical upstream during the transition, but it must
-not generalise path-version rewriting to other server names, hosts, queries, or
-fragments.
+canonical `atlassian_rovo` identifier and the exact old URLs persisted by the
+supported clients: `/v1/mcp` and `/v1/mcp/authv2`. Assignment matching may treat
+those URLs and `/v2/mcp` as one logical upstream during the transition, but it
+must not generalise path-version rewriting to other server names, hosts,
+queries, or fragments.
 
 For a clustered deployment, a catalog environment override can replace the
 bundled Slack stdio launcher with a URL-only Streamable HTTP definition. The

@@ -28,7 +28,7 @@ contributed to it.
 
 - [conversation-entry-aggregation.md](conversation-entry-aggregation.md) — How chat entries collapse into thinking/diff/tool groups, same-name MCP tool runs, never grouping pending approvals, and why to extend `AGGREGATED_GROUP` rather than add a group type (`vk/d068-collapse-matchin`).
 
-- [durable-session-wakeups.md](durable-session-wakeups.md) — Timed and condition-based continuation, atomic scheduling after archive, paired origin forwarding, restart admission, cancellation and receipt safety (`vk/5ae4-pollers-add-a-ti`, `VAS-910`).
+- [durable-session-wakeups.md](durable-session-wakeups.md) — Timed and condition-based continuation, atomic scheduling after archive, paired origin forwarding, restart admission, cancellation and receipt safety, plus terminal-first chat discovery and failed-fetch recovery (`vk/5ae4-pollers-add-a-ti`, `VAS-910`, `vk/227e-scheduled-wake-u`).
 
 - [tracked-background-subtasks.md](tracked-background-subtasks.md) — Durable child workspaces, exact parent continuation, launch-failure boundaries, replay identity and delegation limits (`vk/5de6-background-jobs`).
 
@@ -79,12 +79,17 @@ contributed to it.
   discovery is the authoritative source for model pickers. Verify current IDs
   and reasoning boundaries against provider sources, keep Default implicit,
   test exact ordered catalogs, and keep catalog refreshes separate from managed
-  CLI upgrades. Claude upgrades must align the npm launcher, catalog and
+  CLI upgrades. Codex's target is the current selector: the backend gates
+  `model/list` and model acceptance by CLI `client_version`, so read the latest
+  CLI's list and smoke-test new IDs on the deployed CLI before shipping. Claude upgrades must align the npm launcher, catalog and
   context mapping. Advertise versioned IDs only, and resolve legacy aliases
   through `model_aliases` read from the pinned binary. A CLI bump can move
   several aliases at once (2.1.322: `fable`/`sonnet`/`haiku` → Fable 5.2,
   Sonnet 5.5, Haiku 5.5). Diff the whole table, advertise every alias target,
   and derive effort and 1M support from the binary's capability records.
+  Catalog rebuilds must carry over models the binary still lists (Opus 4.8
+  was dropped and restored). A `claude-opus-4-8` 404 after
+  `model_refusal_fallback` is the CLI's own refusal retry, not the picker.
 - [model-picker-preferences.md](model-picker-preferences.md) — Per-agent
   picker preferences on `ExecutorProfile` (serde, merge, reserved keys).
   Hiding keeps the selection visible. Invalidate `['user-system']` so stale
@@ -341,7 +346,8 @@ contributed to it.
   with every id form normalized to one placeholder (`vk/7e4f-auto-error-remed`).
   Credit/usage errors are excluded before reservation and remote side effects;
   classify full error evidence and preserve Claude failed-result diagnostics
-  (`vk/723d-don-t-run-auto-f`).
+  (`vk/723d-don-t-run-auto-f`). Claude's `5-hour` window limit is matched by an
+  explicit qualifier list, never "any word" (`vk/e0b5-auto-fix-persist`).
 - [coordinator-nfs-load.md](coordinator-nfs-load.md) — Diagnosing coordinator
   load from NFS waits (io PSI and `procs_blocked` miss it, so count D-state
   threads). Root cause was per-client summaries git sweeps. Bulk worktree scans

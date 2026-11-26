@@ -265,6 +265,10 @@ pub async fn append_log_message(session_id: Uuid, execution_id: Uuid, msg: &LogM
         .append_jsonl_line(&json_line_with_newline)
         .await
         .with_context(|| format!("append log message for execution {}", execution_id))?;
+    log_writer
+        .flush()
+        .await
+        .with_context(|| format!("flush log message for execution {}", execution_id))?;
     Ok(())
 }
 

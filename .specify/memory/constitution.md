@@ -977,6 +977,24 @@ can lead the deployed ChatGPT Codex catalog, so app-server `model/list` from the
 pinned Codex 0.155.1 binary is the compatibility authority for IDs, visibility,
 order, and reasoning levels. No new principle or version change is required.
 
+## Review: vk/b1ec-align-codex-mode
+
+Applied `/speckit.constitution`. This review supersedes the compatibility
+authority recorded for `vk/3ffa-upgrade-codex-mo`. The Codex picker target is
+now the **current user-facing Codex selector**: the latest Codex CLI's
+app-server `model/list` (`includeHidden: true`) supplies membership, hidden
+state and reasoning efforts, and the selector the operator sees supplies the
+order. Principles II (exact ordered catalog test), III/VI (change only the
+existing discovery catalog) and L (retiring an entry never strands a saved
+selection) still govern. For principle IX, the ChatGPT backend gates both the
+listed catalog and model acceptance by Codex client version. CLI 0.155.1 gets
+`model_not_found` / `model_not_in_accessible_catalog` for models that 0.171.0
+lists and runs. A picker refresh must therefore state the minimum CLI version
+it needs, and must not reach users before the deployed `VIBE_CODEX_COMMAND`
+satisfies it. That runtime is configured in the homelab repository, outside
+this repository's scope. No new numbered principle or version change is
+required.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -1610,3 +1628,34 @@ Preserve owner/machine bindings and stable agent capabilities. Network failures
 are not proof of expired credentials; human-required refusals remain distinct
 from retryable failures. No new principle is needed. Task artifacts use
 specs/vk/9784-auto-auth-renew; older task paths in command templates are stale.
+
+## Review: vk/227e-scheduled-wake-u
+
+Applied `/speckit.constitution`. Existing II, III, IV and XLIV govern this
+repair: test externally started turns, reuse execution discovery and bounded
+history reads, preserve both frontend consumers and scope stream lifetimes.
+No new principle is needed. Stale task paths in command templates resolve to
+this task's feature directory.
+
+## Review: vk/a221-restore-opus-4-8
+
+Applied `/speckit.constitution`. II, VI, IX and L govern restoring Opus 4.8 in
+the Claude Code picker. The ordered catalog test is the contract. Capabilities
+and the 1M context window come from the pinned 2.1.322 binary's catalog record,
+not from the model name. The CLI pin and alias map stay untouched. A newly
+advertised model must remain subject to the `disabled_models` display filter.
+No new principle is needed. This command's template names
+`homelab/.specify/memory/constitution.md`; that repo is outside this task, so
+the Vibe Kanban constitution was reviewed instead. Task artifacts use
+specs/vk/a221-restore-opus-4-8.
+
+## Review: vk/d27d-automatically-re
+
+II, VI, XII, XVIII, XXVIII and LX govern durable session recovery. VK must
+preserve the original session and operation under one execution owner. Reuse
+worker handoff and startup reconciliation. Require positive evidence before
+retrying refused work or resuming an interrupted step, and surface uncertain
+side effects for operator review. Bound retries, preserve their history across
+restarts, and give stop and pause precedence over recovery. Event replay is
+read-only with respect to execution. LX continues to govern transient provider
+errors in agent turns. These existing principles cover the task.

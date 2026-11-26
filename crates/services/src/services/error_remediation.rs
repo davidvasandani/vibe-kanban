@@ -227,7 +227,8 @@ static CREDIT_OR_USAGE_ERROR_RE: LazyLock<Regex> = LazyLock::new(|| {
             (?:usage|rate|billing|spending)[\s-]+limit\s+(?:has\s+been\s+|is\s+)?(?:exceeded|reached|hit) |
             exceeded\s+(?:your\s+|the\s+)?(?:current\s+)?quota |
             (?:quota|usage\s+allowance)\s+(?:has\s+been\s+|is\s+)?(?:exhausted|exceeded|depleted) |
-            you(?:['’]ve|\s+have)\s+(?:hit|reached)\s+your\s+(?:(?:usage|weekly|monthly|daily|session)\s+)?limit |
+            you(?:['’]ve|\s+have)\s+(?:hit|reached)\s+your\s+
+                (?:(?:\d+[\s-]*(?:hours?|hrs?|days?|weeks?)|hourly|usage|weekly|monthly|daily|session|opus|sonnet)\s+){0,2}limit |
             too\s+many\s+requests
         )\b",
     )
@@ -562,6 +563,14 @@ mod tests {
             "Spending limit reached",
             "Too Many Requests",
             "USAGE\nLIMIT EXCEEDED",
+            "You've hit your 5-hour limit · resets 6am (UTC)",
+            "You’ve hit your 5-hour limit",
+            "{\"type\":\"result\",\"is_error\":true,\"result\":\"You've hit your 5-hour limit · resets 6am (UTC)\"}",
+            "You have reached your 5 hour limit",
+            "You've hit your 24-hr limit",
+            "You've hit your hourly limit",
+            "You've hit your Opus weekly limit",
+            "You've reached your Sonnet limit",
         ] {
             assert!(has_credit_or_usage_error(&[error(message)]), "{message}");
         }
@@ -581,6 +590,9 @@ mod tests {
             "usage_limit_reached_handler panicked",
             "credit card validation failed",
             "permission denied",
+            "You've hit your recursion limit",
+            "you've hit your token limit",
+            "You've hit your memory limit",
             "",
         ] {
             assert!(!has_credit_or_usage_error(&[error(message)]), "{message}");

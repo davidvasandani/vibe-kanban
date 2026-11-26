@@ -838,6 +838,7 @@ fn default_discovered_options() -> crate::executor_discovery::ExecutorDiscovered
             models: [
                 ("claude-opus-5-5", "Opus 5.5"),
                 ("claude-opus-5", "Opus 5"),
+                ("claude-opus-4-8", "Opus 4.8"),
                 ("claude-sonnet-5-5", "Sonnet 5.5"),
                 ("claude-sonnet-5", "Sonnet 5"),
                 ("claude-fable-5-2", "Fable 5.2"),
@@ -1516,6 +1517,7 @@ fn context_window_for_model(model: &str) -> u32 {
             | "haiku"
             | "claude-opus-5-5"
             | "claude-opus-5"
+            | "claude-opus-4-8"
             | "claude-sonnet-5-5"
             | "claude-sonnet-5"
             | "claude-fable-5-2"
@@ -5164,7 +5166,7 @@ mod tests {
         }
         assert_eq!(
             context_window_for_model("claude-opus-4-8"),
-            DEFAULT_CLAUDE_CONTEXT_WINDOW
+            CLAUDE_1M_CONTEXT_WINDOW
         );
         assert_eq!(
             context_window_for_model("claude-opus-5"),
@@ -5243,9 +5245,10 @@ mod tests {
     fn test_claude_discovered_catalog_is_versioned_and_defaults_to_opus_5_5() {
         let options = super::default_discovered_options();
         let efforts = ["low", "medium", "high", "xhigh", "max"];
-        let expected: [(&str, &str, &[&str]); 9] = [
+        let expected: [(&str, &str, &[&str]); 10] = [
             ("claude-opus-5-5", "Opus 5.5", &efforts),
             ("claude-opus-5", "Opus 5", &efforts),
+            ("claude-opus-4-8", "Opus 4.8", &efforts),
             ("claude-sonnet-5-5", "Sonnet 5.5", &efforts),
             ("claude-sonnet-5", "Sonnet 5", &efforts),
             ("claude-fable-5-2", "Fable 5.2", &efforts),

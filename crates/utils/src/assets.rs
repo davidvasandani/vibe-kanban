@@ -4,7 +4,12 @@ use rust_embed::RustEmbed;
 const PROJECT_ROOT: &str = env!("CARGO_MANIFEST_DIR");
 
 pub fn asset_dir() -> std::path::PathBuf {
-    let path = if cfg!(debug_assertions) {
+    let isolated_data_dir = std::env::var_os("VK_DATA_DIR")
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_absolute());
+    let path = if let Some(path) = isolated_data_dir {
+        path
+    } else if cfg!(debug_assertions) {
         std::path::PathBuf::from(PROJECT_ROOT).join("../../dev_assets")
     } else {
         prod_asset_dir_path()

@@ -18,6 +18,8 @@ Stored `expires_in`, or JWT `exp` as a scheduling hint, selects authenticated en
 
 Use the refresh grant first. Missing or explicitly rejected refresh grants can fall back to the shared `vk-entra` browser profile; token endpoint outages cannot. Preserve the original callback URI and granted scopes. Older records infer the callback from the configured public OAuth base or local server port.
 
+Playwright routing sees only the first URL in an HTTP redirect chain. Observe request events as well as routing so the exact localhost callback can be captured even when navigation ends with connection refused. Validate the captured callback and OAuth state before accepting it; remove both handlers in finally. Live sgsc SSO reproduced this redirect behavior.
+
 BrowserSession execute calls have isolated route-handler lifetimes. Callback interception, navigation and waiting must happen in one execute call, with route cleanup in finally. Check exact callback origin/path and unique matching state/code before accepting an authorization code or classifying callback errors. Close the gateway browser session before warming the shared Entra session to avoid profile-lock contention.
 
 Consent is a target-specific refusal. Definitive Entra account refusals from state-validated callbacks or text observed on HTTPS login.microsoftonline.com use the shared account refusal latch. Acquire that latch only for browser fallback: an unrelated Entra refusal must not block refresh-token renewal. Unknown pages/timeouts are failures, not evidence that human action is required.
@@ -31,6 +33,10 @@ Gateway JSON authentication errors include `reauth_target` while preserving upst
 ## Verification boundary
 
 The regression fixture forces expiry, concurrently refreshes the entry, verifies initialize succeeds, and asserts that the agent capability hash remains unchanged. It also covers stale writes, disconnects, cross-upstream reconnects, retained refresh grants, and transport classification. Browser interception has mock coverage; this is not evidence of a live provider SSO success.
+
+## Startup cloning
+
+ClientInfo is cloned into the gateway provider before the server binds its listener. Its one-time listener values must be shared through Arc<OnceLock<_>>; cloning a bare OnceLock snapshots the empty state and leaves legacy OAuth browser fallback permanently unable to discover its callback port. A regression test clones before initialization and checks both the main and preview listener values. Live deployment exposed this after an upstream refresh grant was rejected.
 
 ## Contributed by
 

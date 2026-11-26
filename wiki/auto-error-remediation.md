@@ -53,7 +53,17 @@ handmade error entries looked correct while Claude could still start auto-fix.
 The regression test now runs actual result events through `ClaudeLogProcessor`
 and the admission classifier, including successful prose mentioning credits.
 
-Contributed by `vk/723d-don-t-run-auto-f`.
+**Claude limit wordings seen so far** (each is a fixture): `You've hit your
+usage limit`, `You've hit your limit · resets 5pm`, `You have reached your
+weekly limit`, and `You've hit your 5-hour limit · resets 6am (UTC)`. The last
+one slipped through and filed a false auto-fix, because the qualifier list
+before `limit` had only single words. That list is now explicit and admits up to
+two entries: a numeric window (`5-hour`, `5 hour`, `24-hr`, `N days/weeks`),
+`hourly`, `usage/weekly/monthly/daily/session`, and the model scopes
+`opus/sonnet`. Never widen it to "any word": `hit your recursion/token/memory
+limit` is a real code diagnostic and stays a negative fixture.
+
+Contributed by `vk/723d-don-t-run-auto-f`, `vk/e0b5-auto-fix-persist`.
 
 ## Guards: reserve before I/O, fail closed
 

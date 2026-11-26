@@ -287,6 +287,13 @@ pub enum PersistencePolicy {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DispatchReadiness {
+    pub authority: RequestAuthority,
+    pub workspace_path: String,
+    pub working_directory: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DispatchAccepted {
     pub execution_id: Uuid,
     pub worker_job_id: Uuid,

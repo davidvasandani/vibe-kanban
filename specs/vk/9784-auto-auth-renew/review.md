@@ -28,3 +28,11 @@
 Durable validation on the completed implementation passed all 10 gateway tests, all 34 reauthentication tests, and `pnpm run check` (frontend and both backend workspaces). GitHub CI also passed backend tests, remote tests, schema checks and frontend checks. Lint identified one needless borrow in credential persistence; removed it without changing behavior and reran lint/CI. Their final status is recorded on PR #407 before merge.
 
 Independent Codex review found no actionable regressions. Formatting and official type generation completed. The knowledge page and index are committed. PR: https://github.com/davidvasandani/vibe-kanban/pull/407. Merge and live verification remain gated on final checks; fixture success does not establish live SSO or deployment success.
+
+## Live deployment follow-up
+
+PR #407 deployed successfully. Live discovery lists mcp-gateway:sgsc-mcp and Cloudflare as swept with unauthenticated state. Their rejected refresh grants exposed Gateway callback port unavailable in browser fallback. The provider holds a pre-bind clone of ClientInfo; bare OnceLock cloning snapshots its empty state. Share those cells through Arc and test clone-before-initialization to repair the fallback without hardcoding ports or changing callback identity. Live renewal remains pending the follow-up deployment.
+
+## Redirect-chain follow-up
+
+PR #408 deployed and resolved the callback port. Live sgsc SSO now redirects to localhost, but Playwright route interception misses URLs after HTTP redirects, producing ERR_CONNECTION_REFUSED. A live read-only browser diagnostic confirmed that request events capture the callback while the route handler does not. Add exact-origin/path request observation alongside routing; retain state validation and remove both handlers in finally. No gateway token changed during diagnostics.

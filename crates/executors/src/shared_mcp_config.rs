@@ -19,16 +19,20 @@ use crate::{
 
 pub const ATLASSIAN_ROVO_SERVER_NAME: &str = "atlassian_rovo";
 pub const ATLASSIAN_MCP_LEGACY_URL: &str = "https://mcp.atlassian.com/v1/mcp";
+pub const ATLASSIAN_MCP_LEGACY_AUTHV2_URL: &str = "https://mcp.atlassian.com/v1/mcp/authv2";
 pub const ATLASSIAN_MCP_URL: &str = "https://mcp.atlassian.com/v2/mcp";
 
-/// Return the desired upstream for a server while recognizing only the exact
-/// Atlassian Rovo v1 endpoint. This is intentionally server-name-aware: URL
-/// version migration must never become a generic rewrite rule.
+/// Return the desired upstream for a server while recognizing the exact legacy
+/// Atlassian Rovo endpoints that were persisted by supported OAuth flows. This
+/// is intentionally server-name-aware: URL version migration must never become
+/// a generic rewrite rule.
 pub fn canonical_upstream_url_for_server(server_name: &str, upstream_url: &str) -> String {
-    if server_name == ATLASSIAN_ROVO_SERVER_NAME
-        && reqwest::Url::parse(upstream_url).ok().as_ref()
-            == reqwest::Url::parse(ATLASSIAN_MCP_LEGACY_URL).ok().as_ref()
-    {
+    let parsed = reqwest::Url::parse(upstream_url).ok();
+    let legacy = [ATLASSIAN_MCP_LEGACY_URL, ATLASSIAN_MCP_LEGACY_AUTHV2_URL]
+        .into_iter()
+        .filter_map(|url| reqwest::Url::parse(url).ok())
+        .any(|url| Some(&url) == parsed.as_ref());
+    if server_name == ATLASSIAN_ROVO_SERVER_NAME && legacy {
         ATLASSIAN_MCP_URL.to_string()
     } else {
         upstream_url.to_string()
@@ -2361,8 +2365,16 @@ SLACK_MCP_XOXP_TOKEN = "{token}"
             canonical_upstream_url_for_server(ATLASSIAN_ROVO_SERVER_NAME, ATLASSIAN_MCP_LEGACY_URL),
             ATLASSIAN_MCP_URL
         );
+        assert_eq!(
+            canonical_upstream_url_for_server(
+                ATLASSIAN_ROVO_SERVER_NAME,
+                ATLASSIAN_MCP_LEGACY_AUTHV2_URL
+            ),
+            ATLASSIAN_MCP_URL
+        );
         for (name, url) in [
             ("another_server", ATLASSIAN_MCP_LEGACY_URL),
+            ("another_server", ATLASSIAN_MCP_LEGACY_AUTHV2_URL),
             (
                 ATLASSIAN_ROVO_SERVER_NAME,
                 "https://mcp.atlassian.com/v1/mcp/",
@@ -2400,6 +2412,11 @@ SLACK_MCP_XOXP_TOKEN = "{token}"
                 "type": "remote",
                 "url": ATLASSIAN_MCP_LEGACY_URL,
                 "enabled": false,
+                "custom_native_field": "preserve"
+            }),
+            json!({
+                "url": ATLASSIAN_MCP_LEGACY_AUTHV2_URL,
+                "http_headers": {"Authorization": "Bearer credential"},
                 "custom_native_field": "preserve"
             }),
         ] {

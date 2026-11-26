@@ -75,6 +75,14 @@ fn silent_script(authorize_url: &str, redirect: &url::Url, email: &str) -> Strin
         r#"
 const matches = url => url.origin === {origin} && url.pathname === {path};
 let callback = null;
+// Playwright only routes the first URL in an HTTP redirect chain. Observe
+// requests too so a redirect to loopback is captured even if no listener is
+// running there and goto rejects with ERR_CONNECTION_REFUSED.
+const observe = request => {{
+    const url = new URL(request.url());
+    if (matches(url)) callback = request.url();
+}};
+page.on('request', observe);
 const handler = async route => {{
     callback = route.request().url();
     await route.fulfill({{status: 200, contentType: 'text/html', body: '<p>Sign-in completed.</p>'}});
@@ -115,7 +123,10 @@ try {{
         await page.waitForTimeout(250);
     }}
     return {{kind: 'timeout', entra_text: lastEntraText}};
-}} finally {{ await page.unroute(matches, handler); }}
+}} finally {{
+    page.off('request', observe);
+    await page.unroute(matches, handler);
+}}
 "#
     )
 }
