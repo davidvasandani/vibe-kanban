@@ -37,7 +37,7 @@ use executors::{
     executors::BaseCodingAgent,
     profile::ExecutorConfig,
 };
-use serde_json::{Value, json};
+use serde_json::json;
 use services::services::{config::Config, container::ContainerService};
 use sqlx::SqlitePool;
 use tokio::{
@@ -319,7 +319,7 @@ async fn status(pool: &SqlitePool, case: &str) -> Option<Status> {
         .map(|process| process.status)
 }
 
-async fn wait_for(mut condition: impl AsyncFnMut() -> bool) {
+async fn wait_for<F: Future<Output = bool>>(mut condition: impl FnMut() -> F) {
     timeout(Duration::from_secs(25), async {
         while !condition().await {
             sleep(Duration::from_millis(25)).await;
@@ -369,11 +369,11 @@ async fn recovers_across_two_isolated_coordinator_restarts() {
         .with_state(worker.clone());
     let listener = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     let mut first = coordinator(root, &endpoint, true);
-    wait_for(async || root.join("seeded").exists()).await;
+    wait_for(|| async root.join("seeded").exists()).await;
     let pool = SqlitePool::connect(&format!("sqlite://{}/data/db.v2.sqlite", root.display()))
         .await
         .unwrap();
-    wait_for(async || {
+    wait_for(|| async {
         worker.attempts("safe") == (1, 1)
             && worker.effects("uncertain") == 1
             && status(&pool, "stopped").await == Some(Status::Killed)
@@ -398,8 +398,8 @@ async fn recovers_across_two_isolated_coordinator_restarts() {
     worker.finish("completed").await;
     worker.boot.store(2, SeqCst);
     let mut second = coordinator(root, &endpoint, false);
-    wait_for(async || worker.second_boot_inventory.load(SeqCst) >= 4).await;
-    wait_for(async || {
+    wait_for(|| async worker.second_boot_inventory.load(SeqCst) >= 4).await;
+    wait_for(|| async {
         worker
             .recorded
             .lock()
@@ -415,9 +415,9 @@ async fn recovers_across_two_isolated_coordinator_restarts() {
     second.kill().await.unwrap();
     worker.boot.store(3, SeqCst);
     let mut third = coordinator(root, &endpoint, false);
-    wait_for(async || status(&pool, "safe").await == Some(Status::Completed)).await;
+    wait_for(|| async status(&pool, "safe").await == Some(Status::Completed)).await;
     worker.finish("survivor").await;
-    wait_for(async || {
+    wait_for(|| async {
         status(&pool, "survivor").await == Some(Status::Completed)
             && status(&pool, "completed").await == Some(Status::Completed)
             && status(&pool, "uncertain").await == Some(Status::Indeterminate)
@@ -476,7 +476,7 @@ async fn recovers_across_two_isolated_coordinator_restarts() {
         ("completed", NOTICE),
         ("notice-fail", NOTICE),
     ] {
-        wait_for(async || history(&pool, root, case).await.contains(message)).await;
+        wait_for(|| async history(&pool, root, case).await.contains(message)).await;
     }
     third.kill().await.unwrap();
     listener.abort();
@@ -600,16 +600,16 @@ async fn coordinator_process() {
             )
             .await
             .unwrap();
-            let deployment = deployment.clone();
+            let dispatch_deployment = deployment.clone();
             let execution = process.clone();
             tokio::spawn(async move {
-                if deployment
+                if dispatch_deployment
                     .container()
                     .dispatch_execution(&workspace, &execution, &action)
                     .await
                     .is_ok()
                 {
-                    deployment
+                    dispatch_deployment
                         .container()
                         .start_execution_log_pipeline(&workspace, &execution, &action, true)
                         .await;
@@ -620,7 +620,7 @@ async fn coordinator_process() {
                 let root = root.clone();
                 let base_url = base_url.clone();
                 tokio::spawn(async move {
-                    wait_for(async || {
+                    wait_for(|| async {
                         ExecutionWorkerJob::recovery(&deployment.db().pool, process.id)
                             .await
                             .is_ok_and(|recovery| recovery.readiness_attempts == 1)
