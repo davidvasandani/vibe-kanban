@@ -955,7 +955,18 @@ impl StandardCodingAgentExecutor for ClaudeCode {
             });
 
         match follow_up_start(status, session_id, reset_to_message_id) {
-            FollowUpStart::Resume(args) => {
+            FollowUpStart::Resume(mut args) => {
+                // An older transcript may have captured its disposable HOME in the
+                // system prompt. Render the prompt against the worker's memory root.
+                const MEMORY_ROOT: &str = "CLAUDE_CODE_REMOTE_MEMORY_DIR";
+                if vars
+                    .get(MEMORY_ROOT)
+                    .cloned()
+                    .or_else(|| std::env::var(MEMORY_ROOT).ok())
+                    .is_some_and(|root| !root.is_empty())
+                {
+                    args.push("--system-prompt-snapshot=off".into());
+                }
                 let command_parts = command_builder.build_follow_up(&args)?;
                 self.spawn_internal(current_dir, prompt, command_parts, env, None)
                     .await

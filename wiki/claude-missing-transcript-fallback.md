@@ -57,3 +57,9 @@ Claude's default 30-day cleanup before homelab raised retention on
 
 - vk/9f5d-no-conversation
 - vk/7c99-add-new-claude-m
+
+## Project memory on Linux workers
+
+Task VAS-962. Each execution can get a disposable HOME containing its own MCP settings. Linux workers set `CLAUDE_CODE_REMOTE_MEMORY_DIR` to the persistent account's `.claude` directory. Claude appends the project key and memory directory. This keeps the advertised path usable after the execution home disappears.
+
+Claude Code 2.1.322 also saves the original system prompt in the transcript. For an existing session, configuring the memory root alone can leave the deleted path in that saved message. The executor passes `--system-prompt-snapshot=off` on managed resumes. When upgrading the CLI, test a pre-change transcript under a fresh HOME and inspect both the system message for the current path and the dynamic input for a newly written MEMORY.md entry.
