@@ -896,6 +896,8 @@ fn executor_config_for_auto_resume(action: &ExecutorAction) -> Option<ExecutorCo
 
 #[derive(Debug, Error)]
 pub enum ContainerError {
+    #[error("{0}")]
+    DispatchOutcomeUnknown(String),
     #[error("Session {0} already has an active coding execution")]
     SessionBusy(Uuid),
     #[error(transparent)]
@@ -932,6 +934,21 @@ pub enum ContainerError {
     WorkerUnavailable(#[from] super::cluster::WorkerUnavailable),
     #[error(transparent)]
     Other(#[from] AnyhowError), // Catches any unclassified errors
+}
+
+/// Inventory can establish ownership after a reply is lost. A pending row
+/// has no accepted job ID yet, so the worker supplies it in that case.
+pub fn matching_worker_dispatch<'a>(
+    known: &ExecutionWorkerJob,
+    workspace_id: Uuid,
+    inventory: &'a [cluster_protocol::JobSummary],
+) -> Option<&'a cluster_protocol::JobSummary> {
+    inventory.iter().find(|summary| {
+        summary.execution_id == known.execution_process_id
+            && summary.workspace_id == workspace_id
+            && summary.request_digest == known.request_digest
+            && (known.accepted_at.is_none() || summary.worker_job_id == known.worker_job_id)
+    })
 }
 
 /// Run reasons whose running processes `archive_workspace` stops.
@@ -1119,6 +1136,12 @@ pub trait ContainerService {
     /// [`Self::cleanup_orphan_executions`]. The default (no cluster) has none.
     async fn reattach_worker_executions(&self) {}
 
+    async fn recover_worker_dispatches(&self) {}
+
+    async fn has_worker_log_writer(&self, _execution_id: Uuid) -> bool {
+        false
+    }
+
     /// Offered the raw-log writer task of each execution. The default detaches
     /// it. A container that hands executions off across a restart keeps it,
     /// so shutdown can wait until the writer has flushed before persisting
@@ -1180,7 +1203,10 @@ pub trait ContainerService {
             }
         }
 
-        if spawn_raw_writer && !execution_process::writes_own_raw_log(execution_process) {
+        if spawn_raw_writer
+            && !execution_process::writes_own_raw_log(execution_process)
+            && !self.has_worker_log_writer(execution_process.id).await
+        {
             let writer = execution_process::spawn_stream_raw_logs_to_storage(
                 self.msg_stores().clone(),
                 self.db().clone(),
@@ -3005,11 +3031,14 @@ pub trait ContainerService {
                     execution_id = %execution_process.id,
                     "Execution start gave up: it was stopped before it launched"
                 );
-            } else if let Err(update_error) = ExecutionProcess::update_completion(
+            } else if let Err(update_error) = ExecutionProcess::complete_if_running(
                 &self.db().pool,
                 execution_process.id,
-                ExecutionProcessStatus::Failed,
-                None,
+                if matches!(start_error, ContainerError::DispatchOutcomeUnknown(_)) {
+                    ExecutionProcessStatus::Indeterminate
+                } else {
+                    ExecutionProcessStatus::Failed
+                },
             )
             .await
             {

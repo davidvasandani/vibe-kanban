@@ -1648,3 +1648,14 @@ No new principle is needed. This command's template names
 `homelab/.specify/memory/constitution.md`; that repo is outside this task, so
 the Vibe Kanban constitution was reviewed instead. Task artifacts use
 specs/vk/a221-restore-opus-4-8.
+
+## Review: vk/d27d-automatically-re
+
+II, VI, XII, XVIII, XXVIII and LX govern durable session recovery. VK must
+preserve the original session and operation under one execution owner. Reuse
+worker handoff and startup reconciliation. Require positive evidence before
+retrying refused work or resuming an interrupted step, and surface uncertain
+side effects for operator review. Bound retries, preserve their history across
+restarts, and give stop and pause precedence over recovery. Event replay is
+read-only with respect to execution. LX continues to govern transient provider
+errors in agent turns. These existing principles cover the task.

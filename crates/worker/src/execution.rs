@@ -110,8 +110,35 @@ pub enum ExecutionError {
     UnderPressure(PressureRefusal),
     #[error("workspace contains a worktree this node cannot use: {detail}")]
     WorktreeUnusable { detail: String },
+    #[error("could not read workspace {path}: {source}")]
+    WorkspaceRead {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error(transparent)]
     Recovery(#[from] RecoveryError),
+}
+
+impl ExecutionError {
+    pub(crate) fn is_transient_workspace_check(&self) -> bool {
+        let source = match self {
+            Self::PathAuthority(PathAuthorityError::WorkspacePathUnavailable {
+                source, ..
+            })
+            | Self::WorkspaceRead { source, .. } => source,
+            _ => return false,
+        };
+        matches!(
+            source.kind(),
+            std::io::ErrorKind::Interrupted
+                | std::io::ErrorKind::WouldBlock
+                | std::io::ErrorKind::TimedOut
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::NotConnected
+                | std::io::ErrorKind::StaleNetworkFileHandle
+        )
+    }
 }
 
 #[derive(Clone)]
@@ -502,6 +529,26 @@ impl ExecutionSupervisor {
 
     /// Accepts a dispatch exactly once per execution ID. Replays with the same
     /// digest return the existing job; a different digest is never started.
+    pub(crate) async fn check_dispatch_readiness(
+        &self,
+        workspace_path: &str,
+        working_directory: &str,
+    ) -> Result<(), ExecutionError> {
+        self.check_admission()?;
+        let workspace_path = self
+            .path_authority
+            .authorize_workspace_path(workspace_path)?;
+        authorize_working_directory(&workspace_path, working_directory, &self.path_authority)?;
+        verify_worktrees_are_usable(&workspace_path, self.path_authority.shared_root()).await
+    }
+
+    fn check_admission(&self) -> Result<(), ExecutionError> {
+        if self.admission_draining.load(Ordering::Acquire) {
+            return Err(ExecutionError::Draining);
+        }
+        self.pressure.check().map_err(ExecutionError::UnderPressure)
+    }
+
     pub async fn dispatch(
         &self,
         dispatch: ExecutionDispatch,
@@ -515,14 +562,7 @@ impl ExecutionSupervisor {
             }
             return Ok(existing.accepted().await);
         }
-        if self.admission_draining.load(Ordering::Acquire) {
-            return Err(ExecutionError::Draining);
-        }
-        // A thrashing node wedges what it admits; refuse new work until the
-        // pressure subsides. Replays of accepted work returned above.
-        self.pressure
-            .check()
-            .map_err(ExecutionError::UnderPressure)?;
+        self.check_admission()?;
         self.admitting.fetch_add(1, Ordering::AcqRel);
         let admission = ExecutionAdmission(self.admitting.clone());
         if self.admission_draining.load(Ordering::Acquire) {
@@ -1699,14 +1739,12 @@ async fn verify_worktrees_are_usable(
     workspace_path: &Path,
     shared_root: &Path,
 ) -> Result<(), ExecutionError> {
-    let repo_names = discover_repo_names(workspace_path).await.map_err(|e| {
-        ExecutionError::WorktreeUnusable {
-            detail: format!(
-                "could not enumerate repositories in {}: {e}",
-                workspace_path.display()
-            ),
-        }
-    })?;
+    let repo_names = discover_repo_names(workspace_path)
+        .await
+        .map_err(|source| ExecutionError::WorkspaceRead {
+            path: workspace_path.to_owned(),
+            source,
+        })?;
 
     let mut unusable = Vec::new();
     for name in repo_names {
@@ -2897,6 +2935,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn npm_upgrade_notice_is_output_for_success_and_failure() {
+        let (_temp, supervisor, workspace) = fixture();
+        let notice = "npm notice New major version of npm available! 10.9.2 -> 11.6.0";
+        for (code, expected) in [(0, JobState::Completed), (17, JobState::Failed)] {
+            let script = format!("printf '%s\n' '{notice}' >&2; exit {code}");
+            let request = dispatch(&workspace, &format!("npm-notice-{code}"), &script);
+            let id = request.execution_id;
+            supervisor.dispatch(request).await.unwrap();
+            let summary = wait_terminal(&supervisor, id).await;
+            assert_eq!(summary.state, expected);
+            assert_eq!(summary.terminal.unwrap().exit_code, Some(code));
+            let output = supervisor
+                .events(id, 0)
+                .await
+                .unwrap()
+                .events
+                .into_iter()
+                .filter_map(|event| match event.payload {
+                    ExecutionEventPayload::Stderr { data_base64 } => {
+                        Some(BASE64_STANDARD.decode(data_base64).unwrap())
+                    }
+                    _ => None,
+                })
+                .flatten()
+                .collect::<Vec<_>>();
+            assert_eq!(String::from_utf8(output).unwrap().trim(), notice);
+        }
+    }
+
+    #[tokio::test]
     async fn streams_stdout_stderr_and_records_terminal_evidence() {
         let (_temp, supervisor, workspace) = fixture();
         let request = dispatch(&workspace, "output", "printf hello; printf error >&2");
@@ -3258,7 +3326,18 @@ mod tests {
         let accepted = dispatch(&workspace, "accepted-before-drain", "sleep 0.2");
         supervisor.dispatch(accepted.clone()).await.unwrap();
 
+        supervisor
+            .check_dispatch_readiness(workspace.to_str().unwrap(), ".")
+            .await
+            .unwrap();
+        assert_eq!(supervisor.inventory().await.len(), 1);
         draining.store(true, Ordering::Release);
+        assert!(matches!(
+            supervisor
+                .check_dispatch_readiness(workspace.to_str().unwrap(), ".")
+                .await,
+            Err(ExecutionError::Draining)
+        ));
         assert!(supervisor.dispatch(accepted).await.is_ok());
         assert!(matches!(
             supervisor
@@ -3608,7 +3687,10 @@ mod worktree_preflight_tests {
             .await
             .expect_err("an unreadable workspace must not be treated as having no repositories");
 
-        assert!(matches!(error, ExecutionError::WorktreeUnusable { .. }));
+        assert!(
+            matches!(error, ExecutionError::WorkspaceRead { path, source }
+            if path == missing && source.kind() == std::io::ErrorKind::NotFound)
+        );
     }
 
     /// The production defect, seen from the worker: a worktree pointing at

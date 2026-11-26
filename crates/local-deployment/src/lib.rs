@@ -91,6 +91,7 @@ pub struct LocalDeployment {
     ssh_config: Arc<russh::server::Config>,
     pty: PtyService,
     pr_sync_notify: Arc<Notify>,
+    _coordinator_lock: Option<Arc<std::fs::File>>,
 }
 
 #[derive(Debug, Clone)]
@@ -102,6 +103,29 @@ struct PendingHandoff {
 #[async_trait]
 impl Deployment for LocalDeployment {
     async fn new(shutdown: CancellationToken) -> Result<Self, DeploymentError> {
+        let cluster_config = ClusterConfig::from_env()
+            .map_err(|error| DeploymentError::Other(anyhow::anyhow!(error)))?;
+        // Recovery assumes exclusive ownership of the coordinator's SQLite
+        // database. The OS releases this lock even when the process is killed.
+        let coordinator_lock = if cluster_config.enabled {
+            let path = utils::assets::asset_dir().join("coordinator.lock");
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&path)
+                .map_err(|error| DeploymentError::Other(error.into()))?;
+            file.try_lock().map_err(|error| {
+                DeploymentError::Other(anyhow::anyhow!(
+                    "Could not lock coordinator data directory ({}): {error}",
+                    path.display()
+                ))
+            })?;
+            Some(Arc::new(file))
+        } else {
+            None
+        };
+
         // Run one-time process logs migration from DB to filesystem
         services::services::execution_process::migrate_execution_logs_to_files()
             .await
@@ -159,8 +183,6 @@ impl Deployment for LocalDeployment {
         };
 
         let file = FileService::new(db.clone().pool)?;
-        let cluster_config = ClusterConfig::from_env()
-            .map_err(|error| DeploymentError::Other(anyhow::anyhow!(error)))?;
         let worker_registry = WorkerRegistry::new(db.pool.clone(), cluster_config.clone());
         let worker_scheduler = WorkerScheduler::new(&cluster_config);
         {
@@ -407,6 +429,7 @@ impl Deployment for LocalDeployment {
             ssh_config,
             pty,
             pr_sync_notify,
+            _coordinator_lock: coordinator_lock,
         };
 
         Ok(deployment)

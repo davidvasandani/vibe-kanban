@@ -18,11 +18,12 @@ use chrono::Utc;
 use cluster_protocol::{
     CancellationRequest, CodexRolloutArtifact, CodexRolloutManifestRequest,
     CodexRolloutReadRequest, CodexRolloutStageRequest, CodexRolloutStageResult,
-    CodexRolloutVerification, CodexRolloutVerifyRequest, DispatchAccepted, EventAcknowledgement,
-    EventBatch, ExecutionDispatch, ExecutionQuiescenceRequest, ExecutionQuiescenceStatus,
-    InteractionResponse, JobSummary, McpRefreshRequest, PROTOCOL_VERSION, PreviewHttpRequest,
-    PreviewHttpResponse, QuarantineRequest, RequestAuthority, TerminalClose, TerminalCreateRequest,
-    TerminalCreated, TerminalInput, TerminalOutputBatch, TerminalResize, WorkerMcpRefreshResult,
+    CodexRolloutVerification, CodexRolloutVerifyRequest, DispatchAccepted, DispatchReadiness,
+    EventAcknowledgement, EventBatch, ExecutionDispatch, ExecutionQuiescenceRequest,
+    ExecutionQuiescenceStatus, InteractionResponse, JobSummary, McpRefreshRequest,
+    PROTOCOL_VERSION, PreviewHttpRequest, PreviewHttpResponse, QuarantineRequest, RequestAuthority,
+    TerminalClose, TerminalCreateRequest, TerminalCreated, TerminalInput, TerminalOutputBatch,
+    TerminalResize, WorkerMcpRefreshResult,
 };
 use ed25519_dalek::{Signature, VerifyingKey};
 use executors::executors::codex::{codex_home, rollout_transfer::CodexRolloutStore};
@@ -201,6 +202,10 @@ fn build_router(state: WorkerApiState) -> Router {
             get(proxy_preview_ws),
         )
         .route("/v1/executions/{execution_id}", post(dispatch))
+        .route(
+            "/v1/executions/{execution_id}/readiness",
+            post(dispatch_readiness),
+        )
         .route("/v1/executions/{execution_id}/events", get(events))
         .route("/v1/executions/{execution_id}/ack", post(acknowledge))
         .route("/v1/executions/{execution_id}/cancel", post(cancel))
@@ -555,6 +560,31 @@ async fn metrics(
     Json(state.metrics.since(query.after))
 }
 
+async fn dispatch_readiness(
+    State(state): State<WorkerApiState>,
+    Path(execution_id): Path<Uuid>,
+    Json(payload): Json<DispatchReadiness>,
+) -> Result<Json<()>, WorkerApiError> {
+    validate_authority(&state, &payload.authority).await?;
+    if payload.authority.correlation_id != execution_id {
+        return Err(WorkerApiError::BadRequest(
+            "readiness target mismatch".into(),
+        ));
+    }
+    state
+        .supervisor
+        .check_dispatch_readiness(&payload.workspace_path, &payload.working_directory)
+        .await
+        .map_err(|error| {
+            if error.is_transient_workspace_check() {
+                WorkerApiError::ReadinessTransient(error)
+            } else {
+                error.into()
+            }
+        })?;
+    Ok(Json(()))
+}
+
 async fn dispatch(
     State(state): State<WorkerApiState>,
     Path(execution_id): Path<Uuid>,
@@ -571,7 +601,13 @@ async fn dispatch(
         .dispatch(payload)
         .await
         .map(Json)
-        .map_err(Into::into)
+        .map_err(|error| match error {
+            ExecutionError::Draining
+            | ExecutionError::UnderPressure(_)
+            | ExecutionError::SessionBusy { .. }
+            | ExecutionError::DigestConflict { .. } => error.into(),
+            _ => WorkerApiError::DispatchRejected(error),
+        })
 }
 
 async fn refresh_mcp(
@@ -810,6 +846,8 @@ enum WorkerApiError {
     Forbidden,
     BadRequest(String),
     Execution(ExecutionError),
+    ReadinessTransient(ExecutionError),
+    DispatchRejected(ExecutionError),
 }
 
 impl From<ExecutionError> for WorkerApiError {
@@ -820,6 +858,14 @@ impl From<ExecutionError> for WorkerApiError {
 
 impl IntoResponse for WorkerApiError {
     fn into_response(self) -> Response {
+        let code = match &self {
+            Self::Execution(ExecutionError::Draining | ExecutionError::UnderPressure(_)) => {
+                Some("admission_refused")
+            }
+            Self::ReadinessTransient(_) => Some("readiness_transient"),
+            Self::DispatchRejected(_) => Some("dispatch_rejected"),
+            _ => None,
+        };
         let (status, message) = match self {
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, "invalid request signature".into()),
             Self::Forbidden => (StatusCode::FORBIDDEN, "request authority rejected".into()),
@@ -837,9 +883,15 @@ impl IntoResponse for WorkerApiError {
             Self::Execution(error @ ExecutionError::UnderPressure(_)) => {
                 (StatusCode::SERVICE_UNAVAILABLE, error.to_string())
             }
+            Self::ReadinessTransient(error) => (StatusCode::SERVICE_UNAVAILABLE, error.to_string()),
+            Self::DispatchRejected(error) => (StatusCode::BAD_REQUEST, error.to_string()),
             Self::Execution(error) => (StatusCode::BAD_REQUEST, error.to_string()),
         };
-        (status, Json(serde_json::json!({"error": message}))).into_response()
+        (
+            status,
+            Json(serde_json::json!({"error": message, "code": code})),
+        )
+            .into_response()
     }
 }
 

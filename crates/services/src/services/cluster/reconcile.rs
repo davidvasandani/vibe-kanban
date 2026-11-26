@@ -107,6 +107,13 @@ impl ExecutionReconciler {
                 }
                 continue;
             };
+            let recovery =
+                ExecutionWorkerJob::recovery(&self.db.pool, summary.execution_id).await?;
+            if recovery.coordinator_id.is_some() {
+                // The startup container path owns these claims, including
+                // acceptance lost before the worker job ID could be recorded.
+                continue;
+            }
             if known.worker_node_id != worker.id
                 || known.worker_job_id != summary.worker_job_id
                 || known.request_digest != summary.request_digest
@@ -132,6 +139,13 @@ impl ExecutionReconciler {
 
         for execution_id in expected.keys() {
             if !reported_ids.contains(execution_id) {
+                if ExecutionWorkerJob::recovery(&self.db.pool, *execution_id)
+                    .await?
+                    .coordinator_id
+                    .is_some()
+                {
+                    continue;
+                }
                 self.mark_indeterminate(*execution_id).await?;
                 report.jobs_missing += 1;
             }

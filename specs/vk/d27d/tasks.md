@@ -1,0 +1,5 @@
+- [ ] T001 [P] Add durable retry claims and evidence in crates/db/src/models/execution_worker_job.rs and an accompanying migration.
+- [ ] T002 [P] Validate positive executor ownership and safe checkpoints for continuation in crates/services/src/services/container.rs.
+- [ ] T003 Use T001 to implement bounded typed refusal recovery and history in crates/local-deployment/src/container.rs. Check stop/pause before launch and classify process failures independently of npm output.
+- [ ] T004 Recover unfinished claims after worker reattachment in crates/server/src/startup.rs. Surface uncertain and exhausted work for review.
+- [ ] T005 Demonstrate replay, inactive controls and two service restarts with executable integration coverage in crates/server/tests/. Verify visible evidence and exact effect counts.
