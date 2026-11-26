@@ -369,7 +369,7 @@ async fn recovers_across_two_isolated_coordinator_restarts() {
         .with_state(worker.clone());
     let listener = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     let mut first = coordinator(root, &endpoint, true);
-    wait_for(|| async root.join("seeded").exists()).await;
+    wait_for(|| async { root.join("seeded").exists() }).await;
     let pool = SqlitePool::connect(&format!("sqlite://{}/data/db.v2.sqlite", root.display()))
         .await
         .unwrap();
@@ -398,7 +398,7 @@ async fn recovers_across_two_isolated_coordinator_restarts() {
     worker.finish("completed").await;
     worker.boot.store(2, SeqCst);
     let mut second = coordinator(root, &endpoint, false);
-    wait_for(|| async worker.second_boot_inventory.load(SeqCst) >= 4).await;
+    wait_for(|| async { worker.second_boot_inventory.load(SeqCst) >= 4 }).await;
     wait_for(|| async {
         worker
             .recorded
@@ -415,7 +415,7 @@ async fn recovers_across_two_isolated_coordinator_restarts() {
     second.kill().await.unwrap();
     worker.boot.store(3, SeqCst);
     let mut third = coordinator(root, &endpoint, false);
-    wait_for(|| async status(&pool, "safe").await == Some(Status::Completed)).await;
+    wait_for(|| async { status(&pool, "safe").await == Some(Status::Completed) }).await;
     worker.finish("survivor").await;
     wait_for(|| async {
         status(&pool, "survivor").await == Some(Status::Completed)
@@ -476,7 +476,7 @@ async fn recovers_across_two_isolated_coordinator_restarts() {
         ("completed", NOTICE),
         ("notice-fail", NOTICE),
     ] {
-        wait_for(|| async history(&pool, root, case).await.contains(message)).await;
+        wait_for(|| async { history(&pool, root, case).await.contains(message) }).await;
     }
     third.kill().await.unwrap();
     listener.abort();
@@ -528,7 +528,9 @@ fn coordinator(root: &Path, endpoint: &str, seed: bool) -> Child {
 #[ignore = "spawned with isolated data and loopback worker by the restart test"]
 async fn coordinator_process() {
     let root = PathBuf::from(std::env::var_os("VK_RECOVERY_FIXTURE").unwrap());
-    rustls::crypto::aws_lc_rs::default_provider().install_default().unwrap();
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .unwrap();
     let seed = std::env::var("VK_RECOVERY_SEED").unwrap() == "1";
     if seed {
         let config = Config {
