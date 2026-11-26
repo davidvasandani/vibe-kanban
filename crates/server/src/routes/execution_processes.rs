@@ -566,6 +566,26 @@ async fn stop_execution_process(
     Ok(ResponseJson(ApiResponse::success(())))
 }
 
+/// Pause only a continuation still known to be unlaunched. Once the
+/// dispatch claim has been consumed, the ordinary stop endpoint owns it.
+async fn pause_execution_recovery(
+    Extension(execution_process): Extension<ExecutionProcess>,
+    State(deployment): State<DeploymentImpl>,
+) -> Result<ResponseJson<ApiResponse<()>>, ApiError> {
+    if !ExecutionWorkerJob::stop_pending_recovery(
+        &deployment.db().pool,
+        execution_process.id,
+        &ExecutionProcessStatus::Interrupted,
+    )
+    .await?
+    {
+        return Err(ApiError::Conflict(
+            "Execution has no pending recovery to pause.".into(),
+        ));
+    }
+    Ok(ResponseJson(ApiResponse::success(())))
+}
+
 async fn stream_execution_processes_by_session_ws(
     ws: SignedWsUpgrade,
     State(deployment): State<DeploymentImpl>,
@@ -655,6 +675,7 @@ pub(super) fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
     let workspace_id_router = Router::new()
         .route("/", get(get_execution_process_by_id))
         .route("/stop", post(stop_execution_process))
+        .route("/pause-recovery", post(pause_execution_recovery))
         .route("/repo-states", get(get_execution_process_repo_states))
         .route("/worker-job", get(get_execution_worker_job))
         .route("/messages", get(get_execution_process_messages))

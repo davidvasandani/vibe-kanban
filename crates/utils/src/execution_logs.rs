@@ -79,6 +79,10 @@ impl ExecutionLogWriter {
     pub async fn append_jsonl_line(&mut self, jsonl_line: &str) -> std::io::Result<()> {
         self.file.write_all(jsonl_line.as_bytes()).await
     }
+
+    pub async fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush().await
+    }
 }
 
 pub async fn read_execution_log_file(path: &Path) -> std::io::Result<String> {

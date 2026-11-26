@@ -179,6 +179,7 @@ pub async fn initialize_deployment(
     // instance (or it crashed). Resume following them before anything can
     // start new work in their sessions.
     deployment.container().reattach_worker_executions().await;
+    deployment.container().recover_worker_dispatches().await;
     let interrupted_creations =
         db::models::workspace::Workspace::fail_unfinished_creations(&deployment.db().pool).await?;
     if interrupted_creations > 0 {

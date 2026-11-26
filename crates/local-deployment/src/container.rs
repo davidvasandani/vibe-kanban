@@ -11,10 +11,10 @@ use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chrono::{DateTime, Utc};
 use cluster_protocol::{
-    CancellationPhase, CancellationRequest, EventAcknowledgement, ExecutionDispatch,
-    ExecutionEventPayload, InteractionRequest, InteractionResponse, JobState, JobSummary,
-    McpConfigSnapshot, McpRefreshRequest, PROTOCOL_VERSION, PersistencePolicy, RequestAuthority,
-    TerminalEvidence, TerminalState, WorkerMcpRefreshStatus,
+    CancellationPhase, CancellationRequest, DispatchReadiness, EventAcknowledgement,
+    ExecutionDispatch, ExecutionEventPayload, InteractionRequest, InteractionResponse, JobState,
+    JobSummary, McpConfigSnapshot, McpRefreshRequest, PROTOCOL_VERSION, PersistencePolicy,
+    RequestAuthority, TerminalEvidence, TerminalState, WorkerMcpRefreshStatus,
 };
 use command_group::AsyncGroupChild;
 use db::{
@@ -26,7 +26,10 @@ use db::{
             ExecutorActionField,
         },
         execution_process_repo_state::ExecutionProcessRepoState,
-        execution_worker_job::{ExecutionWorkerDispatchState, ExecutionWorkerJob},
+        execution_worker_job::{
+            DispatchRecoveryCheckpoint, DispatchRecoveryStep, ExecutionWorkerDispatchState,
+            ExecutionWorkerJob,
+        },
         project::Project,
         repo::Repo,
         scratch::{DraftFollowUpData, Scratch, ScratchType},
@@ -64,14 +67,11 @@ use serde_json::json;
 use services::services::{
     analytics::AnalyticsContext,
     approvals::{Approvals, executor_approvals::ExecutorApprovalBridge},
-    cluster::{
-        ClusterConfig, WorkerClient, WorkerClientError, WorkerUnavailable, WorkerUnavailableReason,
-        dispatch_liveness,
-    },
+    cluster::{ClusterConfig, WorkerClient, WorkerClientError, dispatch_liveness},
     config::{Config, DEFAULT_COMMIT_REMINDER_PROMPT},
     container::{
         ContainerError, ContainerRef, ContainerService, UnownedStopDecision,
-        begin_execution_launch, resolve_unowned_stop,
+        begin_execution_launch, matching_worker_dispatch, resolve_unowned_stop,
     },
     diff_stream::{self, DiffStreamHandle},
     error_remediation::ErrorRemediationEvent,
@@ -1444,6 +1444,7 @@ pub struct LocalContainerService {
     cluster_config: ClusterConfig,
     repository_admin_locks: RepositoryAdminLockManager,
     worker_client: Option<WorkerClient>,
+    coordinator_instance_id: Uuid,
 }
 
 impl LocalContainerService {
@@ -1761,6 +1762,7 @@ impl LocalContainerService {
             cluster_config,
             repository_admin_locks,
             worker_client,
+            coordinator_instance_id: Uuid::new_v4(),
         }
     }
 
@@ -3160,6 +3162,7 @@ impl LocalContainerService {
     async fn reattach_worker_execution(
         &self,
         process: &ExecutionProcess,
+        verify_inventory: bool,
     ) -> Result<bool, ContainerError> {
         let pool = &self.db.pool;
         let Some(job) = ExecutionWorkerJob::find_by_execution_id(pool, process.id).await? else {
@@ -3168,14 +3171,100 @@ impl LocalContainerService {
         if !should_hand_off_worker_job(Some(&job)) {
             return Ok(false);
         }
+        let recovery = ExecutionWorkerJob::recovery(pool, process.id).await?;
+        if let Some(owner) = recovery.coordinator_id {
+            if Some(owner) != self.cluster_config.coordinator_id
+                || job.dispatch_state == ExecutionWorkerDispatchState::Pending
+            {
+                return Ok(false);
+            }
+        }
         if self.msg_stores.read().await.contains_key(&process.id) {
             return Ok(false);
         }
         let ctx = ExecutionProcess::load_context(pool, process.id).await?;
+        let mut replay_through = None;
+        if verify_inventory && recovery.coordinator_id.is_some() {
+            let client = self
+                .worker_client
+                .as_ref()
+                .ok_or_else(|| anyhow!("Worker client missing"))?;
+            let inventory = client.inventory(job.worker_node_id).await;
+            let summary = inventory
+                .as_ref()
+                .ok()
+                .and_then(|jobs| matching_worker_dispatch(&job, ctx.workspace.id, jobs));
+            if let Some(summary) = summary {
+                replay_through = Some(summary.last_sequence);
+            } else {
+                if let Some(evidence) = job.terminal_evidence.as_ref().and_then(|evidence| {
+                    serde_json::from_value::<TerminalEvidence>(evidence.0.clone()).ok()
+                }) {
+                    let status = match evidence.state {
+                        TerminalState::Completed => ExecutionProcessStatus::Completed,
+                        TerminalState::Failed => ExecutionProcessStatus::Failed,
+                        TerminalState::Killed => ExecutionProcessStatus::Killed,
+                        TerminalState::Interrupted => ExecutionProcessStatus::Interrupted,
+                    };
+                    ExecutionProcess::update_completion(
+                        pool,
+                        process.id,
+                        status,
+                        evidence.exit_code.map(i64::from),
+                    )
+                    .await?;
+                    self.record_dispatch_diagnostic(process, "Preserved confirmed worker completion. Review the original execution for any pending follow-on actions.").await?;
+                } else {
+                    mark_remote_execution_indeterminate(&self.db, process.id).await?;
+                    self.record_dispatch_diagnostic(process, "Could not verify the original worker execution after restart. Review the assigned worker and workspace effects before retrying.").await?;
+                }
+                return Ok(false);
+            }
+            if let (Some(owner), Some(previous_instance)) =
+                (recovery.coordinator_id, recovery.coordinator_instance_id)
+                && previous_instance != self.coordinator_instance_id
+                && !ExecutionWorkerJob::take_over_dispatch(
+                    pool,
+                    process.id,
+                    owner,
+                    previous_instance,
+                    self.coordinator_instance_id,
+                    job.dispatch_state,
+                )
+                .await?
+            {
+                return Ok(false);
+            }
+            self.record_dispatch_diagnostic(process, "Verified the original worker execution after coordinator restart. Reattaching to its journal.").await?;
+        }
         let executor_action = process.executor_action().map_err(ContainerError::Other)?;
 
+        self.seed_worker_log_history(process).await;
+
+        let cursor = u64::try_from(job.last_event_sequence).unwrap_or(0);
+        if let Err(error) = self
+            .track_worker_msgs_in_store(process, job.worker_node_id, Some(cursor), replay_through)
+            .await
+        {
+            self.msg_stores.write().await.remove(&process.id);
+            return Err(error);
+        }
+        self.start_execution_log_pipeline(&ctx.workspace, process, executor_action, false)
+            .await;
+        self.spawn_execution_stage_tracker(&ctx.workspace, process)
+            .await;
+        tracing::info!(
+            execution_id = %process.id,
+            worker_node_id = %job.worker_node_id,
+            cursor,
+            "Re-attached worker-owned execution"
+        );
+        Ok(true)
+    }
+
+    async fn seed_worker_log_history(&self, process: &ExecutionProcess) {
         let history =
-            services::services::execution_process::load_raw_log_messages(pool, process.id)
+            services::services::execution_process::load_raw_log_messages(&self.db.pool, process.id)
                 .await
                 .unwrap_or_default();
         let store = Arc::new(MsgStore::new());
@@ -3199,26 +3288,6 @@ impl LocalContainerService {
                 .insert(process.id, writer);
         }
         self.msg_stores.write().await.insert(process.id, store);
-
-        let cursor = u64::try_from(job.last_event_sequence).unwrap_or(0);
-        if let Err(error) = self
-            .track_worker_msgs_in_store(process, job.worker_node_id, Some(cursor))
-            .await
-        {
-            self.msg_stores.write().await.remove(&process.id);
-            return Err(error);
-        }
-        self.start_execution_log_pipeline(&ctx.workspace, process, executor_action, false)
-            .await;
-        self.spawn_execution_stage_tracker(&ctx.workspace, process)
-            .await;
-        tracing::info!(
-            execution_id = %process.id,
-            worker_node_id = %job.worker_node_id,
-            cursor,
-            "Re-attached worker-owned execution"
-        );
-        Ok(true)
     }
 
     /// Follow a worker execution's event journal into its MsgStore.
@@ -3233,6 +3302,7 @@ impl LocalContainerService {
         execution_process: &ExecutionProcess,
         worker_node_id: Uuid,
         resume_from: Option<u64>,
+        replay_through: Option<u64>,
     ) -> Result<(), ContainerError> {
         let client = self.worker_client.clone().ok_or_else(|| {
             ContainerError::Other(anyhow!("Cluster worker client is not configured"))
@@ -3424,7 +3494,13 @@ impl LocalContainerService {
                         store.push(LogMsg::Stderr(format!(
                             "Worker output replay gap after sequence {requested_after} (earliest retained: {earliest_available}); output is incomplete; {outcome}"
                         )));
-                        container.finalize_remote_execution(execution_id).await;
+                        if replay_through.is_some() {
+                            container
+                                .finish_replayed_execution(execution_id, &store)
+                                .await;
+                        } else {
+                            container.finalize_remote_execution(execution_id).await;
+                        }
                         container.finish_msg_store(&execution_id).await;
                         break;
                     }
@@ -3751,7 +3827,13 @@ impl LocalContainerService {
                     if let Err(error) = client.acknowledge(worker_node_id, &acknowledgement).await {
                         tracing::warn!(%execution_id, "Terminal worker acknowledgement failed after persistence: {error}");
                     }
-                    container.finalize_remote_execution(execution_id).await;
+                    if replay_through.is_some_and(|sequence| cursor <= sequence) {
+                        container
+                            .finish_replayed_execution(execution_id, &store)
+                            .await;
+                    } else {
+                        container.finalize_remote_execution(execution_id).await;
+                    }
                     // Remove (and cache) from the map before pushing Finished.
                     // Historic replay (`stream_normalized_logs`) reads a
                     // resident store via `history_plus_stream()`, which chains
@@ -3857,6 +3939,16 @@ impl LocalContainerService {
         });
         self.add_exit_monitor_handle(execution_id, handle).await;
         Ok(())
+    }
+
+    async fn finish_replayed_execution(&self, execution_id: Uuid, store: &MsgStore) {
+        store.push(LogMsg::Stderr(
+            "VK restored the recorded worker outcome. Review the workspace before running any pending follow-on actions.".into(),
+        ));
+        self.exit_monitor_handles
+            .write()
+            .await
+            .remove(&execution_id);
     }
 
     async fn finalize_remote_execution(&self, execution_id: Uuid) {
@@ -4499,34 +4591,652 @@ fn failure_exit_status() -> std::process::ExitStatus {
     }
 }
 
-/// The error a rejected worker dispatch surfaces to the caller.
-///
-/// A 503 is a live worker refusing new work (memory/IO pressure, or draining):
-/// typed, so the API answers a retryable 503 naming the server and the client
-/// can offer another server or wait it out. Anything else stays opaque but
-/// names the server it was sent to.
-fn dispatch_failure_error(
-    worker_node_id: Uuid,
-    worker: Option<&WorkerNode>,
-    error: &WorkerClientError,
-) -> ContainerError {
-    let worker_hostname = worker.map(|worker| worker.hostname.as_str());
-    if let Some(detail) = error.service_unavailable_reason() {
-        return ContainerError::WorkerUnavailable(WorkerUnavailable {
-            worker: worker_hostname
-                .map(str::to_owned)
-                .unwrap_or_else(|| worker_node_id.to_string()),
-            worker_node_id: Some(worker_node_id),
-            last_heartbeat_at: worker.and_then(|worker| worker.last_heartbeat_at),
-            reason: WorkerUnavailableReason::Refusing {
-                detail: detail.to_owned(),
-            },
-        });
+impl LocalContainerService {
+    async fn settle_dispatch_error(
+        &self,
+        process: &ExecutionProcess,
+        error: &ContainerError,
+    ) -> Result<(), ContainerError> {
+        let Some(coordinator_id) = self.cluster_config.coordinator_id else {
+            return Ok(());
+        };
+        let (worker, execution) = if matches!(error, ContainerError::DispatchOutcomeUnknown(_)) {
+            (
+                ExecutionWorkerDispatchState::Indeterminate,
+                ExecutionProcessStatus::Indeterminate,
+            )
+        } else {
+            (
+                ExecutionWorkerDispatchState::Failed,
+                ExecutionProcessStatus::Failed,
+            )
+        };
+        let detail = error.to_string();
+        if ExecutionWorkerJob::settle_pending_dispatch(
+            &self.db.pool,
+            process.id,
+            coordinator_id,
+            worker,
+            execution,
+            &detail,
+        )
+        .await?
+        {
+            self.record_dispatch_diagnostic(process, &detail).await?;
+        }
+
+        Ok(())
     }
-    ContainerError::Other(anyhow!(
-        "Execution server {} ({worker_node_id}): {error}",
-        worker_hostname.unwrap_or("unknown")
-    ))
+
+    async fn reconcile_pending_dispatch(
+        &self,
+        process: &ExecutionProcess,
+        job: &ExecutionWorkerJob,
+    ) -> Result<(), ContainerError> {
+        let pool = &self.db.pool;
+        let recovery = ExecutionWorkerJob::recovery(pool, process.id).await?;
+        let ctx = ExecutionProcess::load_context(pool, process.id).await?;
+        let client = self
+            .worker_client
+            .as_ref()
+            .ok_or_else(|| anyhow!("Worker client missing"))?;
+        let inventory = client.inventory(job.worker_node_id).await.map_err(|error| {
+            ContainerError::DispatchOutcomeUnknown(format!(
+                "Could not verify the assigned worker after restart: {error}. Review the original execution before retrying."
+            ))
+        })?;
+        let matching = matching_worker_dispatch(job, ctx.workspace.id, &inventory);
+        let can_replace = matches!(
+            recovery.recovery_checkpoint,
+            DispatchRecoveryCheckpoint::Refused | DispatchRecoveryCheckpoint::Ready
+        ) && !inventory
+            .iter()
+            .any(|summary| summary.execution_id == process.id);
+        if matching.is_none() && !can_replace {
+            return Err(ContainerError::DispatchOutcomeUnknown(
+                "The original worker execution could not be verified after restart. Review worker and workspace effects before retrying.".into(),
+            ));
+        }
+
+        let (Some(owner), Some(previous_instance)) =
+            (recovery.coordinator_id, recovery.coordinator_instance_id)
+        else {
+            return Ok(());
+        };
+        if previous_instance == self.coordinator_instance_id
+            || !ExecutionWorkerJob::take_over_dispatch(
+                pool,
+                process.id,
+                owner,
+                previous_instance,
+                self.coordinator_instance_id,
+                job.dispatch_state,
+            )
+            .await?
+        {
+            return Ok(());
+        }
+
+        if let Some(summary) = matching {
+            if ExecutionWorkerJob::record_acceptance(
+                pool,
+                process.id,
+                summary.worker_job_id,
+                summary.last_sequence as i64,
+            )
+            .await?
+            {
+                self.record_dispatch_diagnostic(process, "Verified the original worker execution after coordinator restart. Reattaching to its journal.").await?;
+                self.reattach_worker_execution(process, true).await?;
+            }
+            return Ok(());
+        }
+        let action = process.executor_action()?;
+        self.dispatch_worker_execution(&ctx.workspace, process, action, job.worker_node_id, true)
+            .await
+    }
+
+    async fn dispatch_worker_execution(
+        &self,
+        workspace: &Workspace,
+        execution_process: &ExecutionProcess,
+        executor_action: &ExecutorAction,
+        worker_node_id: Uuid,
+        recovering: bool,
+    ) -> Result<(), ContainerError> {
+        if !recovering {
+            let worker = WorkerNode::find_by_id(&self.db.pool, worker_node_id).await?;
+            dispatch_liveness(worker_node_id, worker.as_ref(), Utc::now())?;
+        }
+        let coordinator_id = self.cluster_config.coordinator_id.ok_or_else(|| {
+            ContainerError::Other(anyhow!("Cluster coordinator identity is missing"))
+        })?;
+        let client = self.worker_client.as_ref().ok_or_else(|| {
+            ContainerError::Other(anyhow!("Cluster worker client is not configured"))
+        })?;
+        let workspace_path = workspace.container_ref.clone().ok_or_else(|| {
+            ContainerError::Other(anyhow!("Container ref not found for workspace"))
+        })?;
+
+        let mut environment = BTreeMap::new();
+        environment.extend(self.resolve_org_env_vars(workspace).await?);
+        // Send only workspace-relative Go state. The worker must construct PATH
+        // from its own supervised environment; coordinator Nix store paths are
+        // not necessarily valid on a heterogeneous worker.
+        environment.extend(workspace_go_environment(Path::new(&workspace_path), None));
+        environment.insert("VK_WORKSPACE_ID".into(), workspace.id.to_string());
+        environment.insert(
+            "VK_AGENT_NAME".into(),
+            executors::env::vk_agent_name(workspace.id, execution_process.session_id),
+        );
+        environment.insert(
+            "VK_SESSION_ID".into(),
+            execution_process.session_id.to_string(),
+        );
+        environment.insert("VK_WORKSPACE_BRANCH".into(), workspace.branch.clone());
+
+        let executor_config = match executor_action.typ() {
+            ExecutorActionType::CodingAgentInitialRequest(request) => {
+                Some(&request.executor_config)
+            }
+            ExecutorActionType::CodingAgentFollowUpRequest(request) => {
+                Some(&request.executor_config)
+            }
+            ExecutorActionType::ReviewRequest(request) => Some(&request.executor_config),
+            ExecutorActionType::ScriptRequest(_) => None,
+        };
+        let executor_profile = executor_config
+            .map(|config| config.profile_id().to_string())
+            .unwrap_or_else(|| "script".into());
+        // Send the definition, not just the name. A variant is user-defined data
+        // that lives only here; a worker holds the embedded defaults, which
+        // define DEFAULT and nothing else.
+        let executor_profile_config = executor_config
+            .and_then(dispatched_executor_profile)
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(anyhow::Error::from)?;
+        let mcp_config_snapshot = if let Some(config) = executor_config {
+            let profile_id = config.profile_id();
+            let agent = ExecutorConfigs::get_cached()
+                .get_coding_agent(&profile_id)
+                .ok_or_else(|| anyhow!("executor profile {profile_id} is unavailable"))?;
+            if agent.supports_mcp() {
+                let snapshot = validated_mcp_snapshot(
+                    config.executor,
+                    read_coding_agent_mcp_servers(&agent)
+                        .await
+                        .map_err(anyhow::Error::from)?
+                        .into_iter()
+                        .collect(),
+                )?;
+                Some(snapshot)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let action = serde_json::to_value(executor_action).map_err(anyhow::Error::from)?;
+        let run_reason = serde_json::to_value(&execution_process.run_reason)
+            .map_err(anyhow::Error::from)?
+            .as_str()
+            .unwrap_or("unknown")
+            .to_owned();
+        let persistence = if execution_process.run_reason.is_persistent() {
+            PersistencePolicy::Persistent
+        } else {
+            PersistencePolicy::Ordinary
+        };
+        let digest_material = serde_json::to_vec(&json!({
+            "execution_id": execution_process.id,
+            "workspace_id": workspace.id,
+            "session_id": execution_process.session_id,
+            "worker_node_id": worker_node_id,
+            "workspace_path": workspace_path,
+            "executor_profile": executor_profile,
+            // Part of the request's identity: the worker treats a dispatch with
+            // a different digest as a different request. A profile edited
+            // between two dispatches of the same execution must not be deduped
+            // into the first one's definition.
+            "executor_profile_config": executor_profile_config,
+            "mcp_config_snapshot": mcp_config_snapshot,
+            "action": action,
+            "environment": environment,
+            "run_reason": run_reason,
+            "persistence": persistence,
+        }))
+        .map_err(anyhow::Error::from)?;
+        let request_digest = format!("sha256:{:x}", Sha256::digest(digest_material));
+        let authority = RequestAuthority {
+            protocol_version: PROTOCOL_VERSION,
+            coordinator_id,
+            worker_node_id,
+            correlation_id: execution_process.id,
+            issued_at: Utc::now(),
+            nonce: Uuid::new_v4().to_string(),
+        };
+        let mut dispatch = ExecutionDispatch {
+            authority,
+            execution_id: execution_process.id,
+            workspace_id: workspace.id,
+            session_id: execution_process.session_id,
+            workspace_path: workspace_path.clone(),
+            working_directory: workspace_path,
+            executor_profile,
+            executor_profile_config,
+            mcp_config_snapshot,
+            action,
+            environment,
+            run_reason,
+            timeout_seconds: None,
+            persistence,
+            request_digest: request_digest.clone(),
+        };
+
+        let pool = &self.db.pool;
+        let execution_id = execution_process.id;
+        let job = if recovering {
+            let job = ExecutionWorkerJob::find_by_execution_id(pool, execution_id)
+                .await?
+                .ok_or_else(|| anyhow!("Recovery owner is missing"))?;
+            if job.worker_node_id != worker_node_id || job.request_digest != request_digest {
+                return Err(anyhow!(
+                    "Recovery inputs changed. Review the original action and submit it manually."
+                )
+                .into());
+            }
+            job
+        } else {
+            if !begin_execution_launch(execution_id) {
+                return Err(stopped_before_launch_error());
+            }
+            ExecutionWorkerJob::create_owned_pending(
+                pool,
+                execution_id,
+                worker_node_id,
+                &request_digest,
+                coordinator_id,
+                self.coordinator_instance_id,
+            )
+            .await?
+            .ok_or_else(stopped_before_launch_error)?
+        };
+
+        let result = if recovering {
+            self.replace_refused_dispatch(&mut dispatch, execution_process)
+                .await?
+        } else {
+            match client.dispatch(worker_node_id, &dispatch).await {
+                Err(WorkerClientError::DispatchRefused(detail))
+                    if execution_process.run_reason == ExecutionProcessRunReason::CodingAgent
+                        && matches!(
+                            executor_action.typ(),
+                            ExecutorActionType::CodingAgentInitialRequest(_)
+                                | ExecutorActionType::CodingAgentFollowUpRequest(_)
+                        )
+                        && ExecutionWorkerJob::record_refusal(
+                            pool,
+                            execution_id,
+                            self.coordinator_instance_id,
+                            &detail,
+                        )
+                        .await? =>
+                {
+                    self.replace_refused_dispatch(&mut dispatch, execution_process)
+                        .await?
+                }
+                result => result,
+            }
+        };
+        let (worker_job_id, last_sequence) = match result {
+            Ok(accepted)
+                if accepted.execution_id == execution_id
+                    && accepted.request_digest == request_digest =>
+            {
+                (accepted.worker_job_id, accepted.last_sequence)
+            }
+            Err(
+                error @ (WorkerClientError::DispatchRefused(_)
+                | WorkerClientError::DispatchRejected(_)),
+            ) => {
+                let detail = format!(
+                    "{error}. Check the assigned worker and submit the action manually once it is ready."
+                );
+                self.record_dispatch_diagnostic(execution_process, &detail)
+                    .await?;
+                return Err(anyhow!(detail).into());
+            }
+            other => {
+                let detail = match other {
+                    Ok(_) => "Worker returned mismatched dispatch acceptance".to_string(),
+                    Err(error) => error.to_string(),
+                };
+                if let Err(error) = self
+                    .record_dispatch_diagnostic(execution_process, &detail)
+                    .await
+                {
+                    tracing::warn!(%execution_id, %error, "Could not persist worker dispatch diagnostic");
+                }
+                let inventory = client.inventory(worker_node_id).await;
+                if let Some(summary) = inventory
+                    .as_ref()
+                    .ok()
+                    .and_then(|inventory| matching_worker_dispatch(&job, workspace.id, inventory))
+                {
+                    (summary.worker_job_id, summary.last_sequence)
+                } else {
+                    return Err(ContainerError::DispatchOutcomeUnknown(format!(
+                        "{detail}. Review the assigned worker and workspace effects before retrying."
+                    )));
+                }
+            }
+        };
+        if !ExecutionWorkerJob::record_acceptance(
+            pool,
+            execution_id,
+            worker_job_id,
+            last_sequence as i64,
+        )
+        .await?
+        {
+            return Err(ContainerError::DispatchOutcomeUnknown(
+                "Worker accepted execution after coordinator state changed. Review the assigned worker before retrying.".into(),
+            ));
+        }
+        if recovering {
+            self.reattach_worker_execution(execution_process, false)
+                .await?;
+            return Ok(());
+        }
+        let pending_mcp_generation = self
+            .mcp_refresh_coordinator
+            .status(execution_process.session_id)
+            .await
+            .filter(|state| {
+                state.status == McpRefreshStatus::PendingNextTurn
+                    && state.requested_at <= execution_process.started_at
+            })
+            .map(|state| state.generation);
+        if let Some(snapshot) = dispatch.mcp_config_snapshot.clone() {
+            let client = client.clone();
+            let coordinator = self.mcp_refresh_coordinator.clone();
+            let session_id = execution_process.session_id;
+            let execution_id = execution_process.id;
+            let execution_started_at = execution_process.started_at;
+            let configured_server_ids = snapshot.servers.keys().cloned().collect::<Vec<_>>();
+            let inventory_expected = snapshot.executor == BaseCodingAgent::Codex.to_string()
+                || snapshot.executor == BaseCodingAgent::ClaudeCode.to_string();
+            tokio::spawn(async move {
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+                while tokio::time::Instant::now() < deadline {
+                    let request = McpRefreshRequest {
+                        authority: RequestAuthority {
+                            protocol_version: PROTOCOL_VERSION,
+                            coordinator_id,
+                            worker_node_id,
+                            correlation_id: execution_id,
+                            issued_at: Utc::now(),
+                            nonce: Uuid::new_v4().to_string(),
+                        },
+                        execution_id,
+                        snapshot: snapshot.clone(),
+                    };
+                    if let Ok(Ok(status)) = tokio::time::timeout_at(
+                        deadline,
+                        client.mcp_status(worker_node_id, &request),
+                    )
+                    .await
+                    {
+                        match status.status {
+                            WorkerMcpRefreshStatus::Queued => {
+                                let servers = status
+                                    .servers
+                                    .into_iter()
+                                    .filter_map(|server| serde_json::from_value(server).ok())
+                                    .collect();
+                                if let Some(expected_generation) = pending_mcp_generation {
+                                    coordinator
+                                        .confirm(session_id, expected_generation, servers)
+                                        .await;
+                                } else {
+                                    coordinator
+                                        .observe_inventory(
+                                            session_id,
+                                            execution_started_at,
+                                            configured_server_ids,
+                                            servers,
+                                        )
+                                        .await;
+                                }
+                                return;
+                            }
+                            WorkerMcpRefreshStatus::Unsupported => {
+                                if inventory_expected {
+                                    if tokio::time::Instant::now() < deadline {
+                                        tokio::time::sleep_until(std::cmp::min(
+                                            deadline,
+                                            tokio::time::Instant::now() + Duration::from_secs(1),
+                                        ))
+                                        .await;
+                                    }
+                                    continue;
+                                }
+                                if let Some(expected_generation) = pending_mcp_generation {
+                                    coordinator
+                                        .fail(
+                                            session_id,
+                                            expected_generation,
+                                            McpRefreshErrorCategory::Unsupported,
+                                        )
+                                        .await;
+                                }
+                                return;
+                            }
+                            WorkerMcpRefreshStatus::MaterializationFailed
+                            | WorkerMcpRefreshStatus::ReloadFailed => {
+                                let category = if status.status
+                                    == WorkerMcpRefreshStatus::MaterializationFailed
+                                {
+                                    McpRefreshErrorCategory::MaterializationFailed
+                                } else {
+                                    McpRefreshErrorCategory::ReloadFailed
+                                };
+                                if let Some(expected_generation) = pending_mcp_generation {
+                                    coordinator
+                                        .fail(session_id, expected_generation, category)
+                                        .await;
+                                } else {
+                                    coordinator
+                                        .observe_failure(
+                                            session_id,
+                                            execution_started_at,
+                                            configured_server_ids,
+                                            category,
+                                        )
+                                        .await;
+                                }
+                                return;
+                            }
+                            WorkerMcpRefreshStatus::Busy => {}
+                        }
+                    }
+                    if tokio::time::Instant::now() < deadline {
+                        tokio::time::sleep_until(std::cmp::min(
+                            deadline,
+                            tokio::time::Instant::now() + Duration::from_secs(1),
+                        ))
+                        .await;
+                    }
+                }
+                if let Some(expected_generation) = pending_mcp_generation {
+                    coordinator
+                        .fail(
+                            session_id,
+                            expected_generation,
+                            McpRefreshErrorCategory::Timeout,
+                        )
+                        .await;
+                } else {
+                    coordinator
+                        .observe_failure(
+                            session_id,
+                            execution_started_at,
+                            configured_server_ids,
+                            McpRefreshErrorCategory::Timeout,
+                        )
+                        .await;
+                }
+            });
+        }
+        let recovery = ExecutionWorkerJob::recovery(pool, execution_id).await?;
+        if recovery.recovery_checkpoint == DispatchRecoveryCheckpoint::Replacement {
+            self.seed_worker_log_history(execution_process).await;
+            self.track_worker_msgs_in_store(execution_process, worker_node_id, Some(0), None)
+                .await?;
+        } else {
+            self.track_worker_msgs_in_store(execution_process, worker_node_id, None, None)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn record_dispatch_diagnostic(
+        &self,
+        process: &ExecutionProcess,
+        detail: &str,
+    ) -> Result<(), ContainerError> {
+        services::services::execution_process::append_log_message(
+            process.session_id,
+            process.id,
+            &LogMsg::Stderr(format!(
+                "VK dispatch recovery: {}",
+                truncate_to_char_boundary(detail, 4096)
+            )),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn replace_refused_dispatch(
+        &self,
+        dispatch: &mut ExecutionDispatch,
+        process: &ExecutionProcess,
+    ) -> Result<Result<cluster_protocol::DispatchAccepted, WorkerClientError>, ContainerError> {
+        let pool = &self.db.pool;
+        let worker_node_id = dispatch.authority.worker_node_id;
+        let client = self
+            .worker_client
+            .as_ref()
+            .ok_or_else(|| anyhow!("Worker client missing"))?;
+        let recovery = ExecutionWorkerJob::recovery(pool, process.id).await?;
+        let detail = recovery
+            .refusal_detail
+            .as_deref()
+            .ok_or_else(|| anyhow!("Worker refusal evidence missing"))?;
+        self.record_dispatch_diagnostic(
+            process,
+            &format!("Worker refused before execution: {detail}"),
+        )
+        .await?;
+        let mut attempts = recovery.readiness_attempts;
+        if recovery.recovery_checkpoint == DispatchRecoveryCheckpoint::Refused {
+            let workspace_path = Path::new(&dispatch.workspace_path);
+            let working_dir = match process.executor_action()?.typ() {
+                ExecutorActionType::CodingAgentInitialRequest(request) => request.effective_dir(workspace_path),
+                ExecutorActionType::CodingAgentFollowUpRequest(request) => request.effective_dir(workspace_path),
+                _ => return Err(anyhow!("This operation cannot be recovered. Review the original action and submit it manually.").into()),
+            };
+            loop {
+                if attempts >= 2 {
+                    return Err(anyhow!("Workspace readiness checks exhausted. Check the assigned worker and workspace path, then submit the action manually.").into());
+                }
+                if !ExecutionWorkerJob::claim_recovery_step(
+                    pool,
+                    process.id,
+                    self.coordinator_instance_id,
+                    attempts,
+                    DispatchRecoveryStep::Probe,
+                )
+                .await?
+                {
+                    return Err(stopped_before_launch_error());
+                }
+                attempts += 1;
+                self.record_dispatch_diagnostic(
+                    process,
+                    &format!("Checking workspace readiness, attempt {attempts} of 2."),
+                )
+                .await?;
+                dispatch.authority.issued_at = Utc::now();
+                dispatch.authority.nonce = Uuid::new_v4().to_string();
+                let probe = client
+                    .dispatch_readiness(
+                        worker_node_id,
+                        &DispatchReadiness {
+                            authority: dispatch.authority.clone(),
+                            workspace_path: dispatch.workspace_path.clone(),
+                            working_directory: working_dir.to_string_lossy().into_owned(),
+                        },
+                    )
+                    .await;
+                match probe {
+                    Ok(()) => {
+                        self.record_dispatch_diagnostic(
+                            process,
+                            &format!("Workspace readiness check {attempts} passed."),
+                        )
+                        .await?;
+                        if !ExecutionWorkerJob::claim_recovery_step(
+                            pool,
+                            process.id,
+                            self.coordinator_instance_id,
+                            attempts,
+                            DispatchRecoveryStep::Verify,
+                        )
+                        .await?
+                        {
+                            return Err(stopped_before_launch_error());
+                        }
+                        break;
+                    }
+                    Err(error) => {
+                        self.record_dispatch_diagnostic(
+                            process,
+                            &format!("Workspace readiness check {attempts} failed: {error}"),
+                        )
+                        .await?;
+                        let retryable = match &error {
+                            WorkerClientError::DispatchRefused(_)
+                            | WorkerClientError::ReadinessTransient(_) => true,
+                            WorkerClientError::Transport(error) => {
+                                error.is_timeout() || error.is_connect() || error.is_body()
+                            }
+                            _ => false,
+                        };
+                        if !retryable {
+                            return Err(anyhow!("Workspace readiness failed. Check the assigned worker and workspace path, then submit the action manually.").into());
+                        }
+                    }
+                }
+            }
+        }
+        self.record_dispatch_diagnostic(process, "Workspace readiness verified. Preparing one replacement dispatch of the original execution.").await?;
+        if !ExecutionWorkerJob::claim_recovery_step(
+            pool,
+            process.id,
+            self.coordinator_instance_id,
+            attempts,
+            DispatchRecoveryStep::Replace,
+        )
+        .await?
+        {
+            return Err(stopped_before_launch_error());
+        }
+        dispatch.authority.issued_at = Utc::now();
+        dispatch.authority.nonce = Uuid::new_v4().to_string();
+        Ok(client.dispatch(worker_node_id, dispatch).await)
+    }
 }
 
 #[async_trait]
@@ -5144,345 +5854,19 @@ impl ContainerService for LocalContainerService {
         // Before any worker-job record or network call: a worker the registry
         // has already written off would only cost two transport timeouts and
         // then an opaque error. Affinity stays sticky — refuse, never reroute.
-        let worker = WorkerNode::find_by_id(&self.db.pool, worker_node_id).await?;
-        dispatch_liveness(worker_node_id, worker.as_ref(), Utc::now())?;
-        let coordinator_id = self.cluster_config.coordinator_id.ok_or_else(|| {
-            ContainerError::Other(anyhow!("Cluster coordinator identity is missing"))
-        })?;
-        let client = self.worker_client.as_ref().ok_or_else(|| {
-            ContainerError::Other(anyhow!("Cluster worker client is not configured"))
-        })?;
-        let workspace_path = workspace.container_ref.clone().ok_or_else(|| {
-            ContainerError::Other(anyhow!("Container ref not found for workspace"))
-        })?;
-
-        let mut environment = BTreeMap::new();
-        environment.extend(self.resolve_org_env_vars(workspace).await?);
-        // Send only workspace-relative Go state. The worker must construct PATH
-        // from its own supervised environment; coordinator Nix store paths are
-        // not necessarily valid on a heterogeneous worker.
-        environment.extend(workspace_go_environment(Path::new(&workspace_path), None));
-        environment.insert("VK_WORKSPACE_ID".into(), workspace.id.to_string());
-        environment.insert(
-            "VK_AGENT_NAME".into(),
-            executors::env::vk_agent_name(workspace.id, execution_process.session_id),
-        );
-        environment.insert(
-            "VK_SESSION_ID".into(),
-            execution_process.session_id.to_string(),
-        );
-        environment.insert("VK_WORKSPACE_BRANCH".into(), workspace.branch.clone());
-
-        let executor_config = match executor_action.typ() {
-            ExecutorActionType::CodingAgentInitialRequest(request) => {
-                Some(&request.executor_config)
-            }
-            ExecutorActionType::CodingAgentFollowUpRequest(request) => {
-                Some(&request.executor_config)
-            }
-            ExecutorActionType::ReviewRequest(request) => Some(&request.executor_config),
-            ExecutorActionType::ScriptRequest(_) => None,
-        };
-        let executor_profile = executor_config
-            .map(|config| config.profile_id().to_string())
-            .unwrap_or_else(|| "script".into());
-        // Send the definition, not just the name. A variant is user-defined data
-        // that lives only here; a worker holds the embedded defaults, which
-        // define DEFAULT and nothing else.
-        let executor_profile_config = executor_config
-            .and_then(dispatched_executor_profile)
-            .map(serde_json::to_value)
-            .transpose()
-            .map_err(anyhow::Error::from)?;
-        let mcp_config_snapshot = if let Some(config) = executor_config {
-            let profile_id = config.profile_id();
-            let agent = ExecutorConfigs::get_cached()
-                .get_coding_agent(&profile_id)
-                .ok_or_else(|| anyhow!("executor profile {profile_id} is unavailable"))?;
-            if agent.supports_mcp() {
-                let snapshot = validated_mcp_snapshot(
-                    config.executor,
-                    read_coding_agent_mcp_servers(&agent)
-                        .await
-                        .map_err(anyhow::Error::from)?
-                        .into_iter()
-                        .collect(),
-                )?;
-                Some(snapshot)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        let action = serde_json::to_value(executor_action).map_err(anyhow::Error::from)?;
-        let run_reason = serde_json::to_value(&execution_process.run_reason)
-            .map_err(anyhow::Error::from)?
-            .as_str()
-            .unwrap_or("unknown")
-            .to_owned();
-        let persistence = if execution_process.run_reason.is_persistent() {
-            PersistencePolicy::Persistent
-        } else {
-            PersistencePolicy::Ordinary
-        };
-        let digest_material = serde_json::to_vec(&json!({
-            "execution_id": execution_process.id,
-            "workspace_id": workspace.id,
-            "session_id": execution_process.session_id,
-            "worker_node_id": worker_node_id,
-            "workspace_path": workspace_path,
-            "executor_profile": executor_profile,
-            // Part of the request's identity: the worker treats a dispatch with
-            // a different digest as a different request. A profile edited
-            // between two dispatches of the same execution must not be deduped
-            // into the first one's definition.
-            "executor_profile_config": executor_profile_config,
-            "mcp_config_snapshot": mcp_config_snapshot,
-            "action": action,
-            "environment": environment,
-            "run_reason": run_reason,
-            "persistence": persistence,
-        }))
-        .map_err(anyhow::Error::from)?;
-        let request_digest = format!("sha256:{:x}", Sha256::digest(digest_material));
-        let authority = RequestAuthority {
-            protocol_version: PROTOCOL_VERSION,
-            coordinator_id,
-            worker_node_id,
-            correlation_id: execution_process.id,
-            issued_at: Utc::now(),
-            nonce: Uuid::new_v4().to_string(),
-        };
-        let dispatch = ExecutionDispatch {
-            authority,
-            execution_id: execution_process.id,
-            workspace_id: workspace.id,
-            session_id: execution_process.session_id,
-            workspace_path: workspace_path.clone(),
-            working_directory: workspace_path,
-            executor_profile,
-            executor_profile_config,
-            mcp_config_snapshot,
-            action,
-            environment,
-            run_reason,
-            timeout_seconds: None,
-            persistence,
-            request_digest: request_digest.clone(),
-        };
-
-        // Launch boundary: from the worker-job record onwards a worker may run
-        // this turn. Refuse if an explicit stop ended the execution while its
-        // preflight above was still in flight.
-        if !begin_execution_launch(execution_process.id) {
-            return Err(stopped_before_launch_error());
-        }
-        ExecutionWorkerJob::create_pending(
-            &self.db.pool,
-            execution_process.id,
-            worker_node_id,
-            &request_digest,
-        )
-        .await?;
-        let accepted = match client.dispatch(worker_node_id, &dispatch).await {
-            Ok(accepted) => accepted,
-            Err(error) => {
-                let worker_hostname = worker.as_ref().map(|worker| worker.hostname.as_str());
-                let evidence = serde_json::json!({
-                    "reason": "worker dispatch failed",
-                    "worker_node_id": worker_node_id,
-                    "worker_hostname": worker_hostname,
-                    "error": error.to_string(),
-                });
-                ExecutionWorkerJob::update_state(
-                    &self.db.pool,
-                    execution_process.id,
-                    ExecutionWorkerDispatchState::Failed,
-                    Some(&evidence),
-                    Some(Utc::now()),
-                )
-                .await?;
-                return Err(dispatch_failure_error(
-                    worker_node_id,
-                    worker.as_ref(),
-                    &error,
-                ));
-            }
-        };
-        if accepted.execution_id != execution_process.id
-            || accepted.request_digest != request_digest
-        {
-            let evidence = serde_json::json!({
-                "reason": "worker returned mismatched dispatch acceptance",
-            });
-            ExecutionWorkerJob::update_state(
-                &self.db.pool,
-                execution_process.id,
-                ExecutionWorkerDispatchState::Failed,
-                Some(&evidence),
-                Some(Utc::now()),
+        let result = self
+            .dispatch_worker_execution(
+                workspace,
+                execution_process,
+                executor_action,
+                worker_node_id,
+                false,
             )
-            .await?;
-            return Err(ContainerError::Other(anyhow!(
-                "Worker returned mismatched dispatch acceptance"
-            )));
+            .await;
+        if let Err(error) = &result {
+            self.settle_dispatch_error(execution_process, error).await?;
         }
-        if !ExecutionWorkerJob::record_acceptance(
-            &self.db.pool,
-            execution_process.id,
-            accepted.worker_job_id,
-            accepted.last_sequence as i64,
-        )
-        .await?
-        {
-            return Err(ContainerError::Other(anyhow!(
-                "Execution worker job was not pending during acceptance"
-            )));
-        }
-        let pending_mcp_generation = self
-            .mcp_refresh_coordinator
-            .status(execution_process.session_id)
-            .await
-            .filter(|state| {
-                state.status == McpRefreshStatus::PendingNextTurn
-                    && state.requested_at <= execution_process.started_at
-            })
-            .map(|state| state.generation);
-        if let Some(snapshot) = dispatch.mcp_config_snapshot.clone() {
-            let client = client.clone();
-            let coordinator = self.mcp_refresh_coordinator.clone();
-            let session_id = execution_process.session_id;
-            let execution_id = execution_process.id;
-            let execution_started_at = execution_process.started_at;
-            let configured_server_ids = snapshot.servers.keys().cloned().collect::<Vec<_>>();
-            let inventory_expected = snapshot.executor == BaseCodingAgent::Codex.to_string()
-                || snapshot.executor == BaseCodingAgent::ClaudeCode.to_string();
-            tokio::spawn(async move {
-                let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-                while tokio::time::Instant::now() < deadline {
-                    let request = McpRefreshRequest {
-                        authority: RequestAuthority {
-                            protocol_version: PROTOCOL_VERSION,
-                            coordinator_id,
-                            worker_node_id,
-                            correlation_id: execution_id,
-                            issued_at: Utc::now(),
-                            nonce: Uuid::new_v4().to_string(),
-                        },
-                        execution_id,
-                        snapshot: snapshot.clone(),
-                    };
-                    if let Ok(Ok(status)) = tokio::time::timeout_at(
-                        deadline,
-                        client.mcp_status(worker_node_id, &request),
-                    )
-                    .await
-                    {
-                        match status.status {
-                            WorkerMcpRefreshStatus::Queued => {
-                                let servers = status
-                                    .servers
-                                    .into_iter()
-                                    .filter_map(|server| serde_json::from_value(server).ok())
-                                    .collect();
-                                if let Some(expected_generation) = pending_mcp_generation {
-                                    coordinator
-                                        .confirm(session_id, expected_generation, servers)
-                                        .await;
-                                } else {
-                                    coordinator
-                                        .observe_inventory(
-                                            session_id,
-                                            execution_started_at,
-                                            configured_server_ids,
-                                            servers,
-                                        )
-                                        .await;
-                                }
-                                return;
-                            }
-                            WorkerMcpRefreshStatus::Unsupported => {
-                                if inventory_expected {
-                                    if tokio::time::Instant::now() < deadline {
-                                        tokio::time::sleep_until(std::cmp::min(
-                                            deadline,
-                                            tokio::time::Instant::now() + Duration::from_secs(1),
-                                        ))
-                                        .await;
-                                    }
-                                    continue;
-                                }
-                                if let Some(expected_generation) = pending_mcp_generation {
-                                    coordinator
-                                        .fail(
-                                            session_id,
-                                            expected_generation,
-                                            McpRefreshErrorCategory::Unsupported,
-                                        )
-                                        .await;
-                                }
-                                return;
-                            }
-                            WorkerMcpRefreshStatus::MaterializationFailed
-                            | WorkerMcpRefreshStatus::ReloadFailed => {
-                                let category = if status.status
-                                    == WorkerMcpRefreshStatus::MaterializationFailed
-                                {
-                                    McpRefreshErrorCategory::MaterializationFailed
-                                } else {
-                                    McpRefreshErrorCategory::ReloadFailed
-                                };
-                                if let Some(expected_generation) = pending_mcp_generation {
-                                    coordinator
-                                        .fail(session_id, expected_generation, category)
-                                        .await;
-                                } else {
-                                    coordinator
-                                        .observe_failure(
-                                            session_id,
-                                            execution_started_at,
-                                            configured_server_ids,
-                                            category,
-                                        )
-                                        .await;
-                                }
-                                return;
-                            }
-                            WorkerMcpRefreshStatus::Busy => {}
-                        }
-                    }
-                    if tokio::time::Instant::now() < deadline {
-                        tokio::time::sleep_until(std::cmp::min(
-                            deadline,
-                            tokio::time::Instant::now() + Duration::from_secs(1),
-                        ))
-                        .await;
-                    }
-                }
-                if let Some(expected_generation) = pending_mcp_generation {
-                    coordinator
-                        .fail(
-                            session_id,
-                            expected_generation,
-                            McpRefreshErrorCategory::Timeout,
-                        )
-                        .await;
-                } else {
-                    coordinator
-                        .observe_failure(
-                            session_id,
-                            execution_started_at,
-                            configured_server_ids,
-                            McpRefreshErrorCategory::Timeout,
-                        )
-                        .await;
-                }
-            });
-        }
-        self.track_worker_msgs_in_store(execution_process, worker_node_id, None)
-            .await?;
-        Ok(())
+        result
     }
 
     async fn session_turn_unsettled(&self, session_id: Uuid) -> Result<bool, ContainerError> {
@@ -5846,6 +6230,13 @@ impl ContainerService for LocalContainerService {
         execution_process: &ExecutionProcess,
         status: ExecutionProcessStatus,
     ) -> Result<(), ContainerError> {
+        if ExecutionWorkerJob::stop_pending_recovery(&self.db.pool, execution_process.id, &status)
+            .await?
+        {
+            self.finish_msg_store(&execution_process.id).await;
+            return Ok(());
+        }
+
         // Explicitly stopping any execution in a session also reaps that
         // session's warm app-server, if one is parked (spec FR-4a). A warm
         // process has no running turn so it is not the `child` below — reap it
@@ -6279,6 +6670,13 @@ impl ContainerService for LocalContainerService {
         }
     }
 
+    async fn has_worker_log_writer(&self, execution_id: Uuid) -> bool {
+        self.worker_log_writers
+            .read()
+            .await
+            .contains_key(&execution_id)
+    }
+
     async fn reattach_worker_executions(&self) {
         if self.worker_client.is_none() {
             return;
@@ -6292,7 +6690,7 @@ impl ContainerService for LocalContainerService {
         };
         let mut reattached = 0_usize;
         for process in running {
-            match self.reattach_worker_execution(&process).await {
+            match self.reattach_worker_execution(&process, true).await {
                 Ok(true) => reattached += 1,
                 Ok(false) => {}
                 // One unrecoverable row must not stop the others; it stays
@@ -6309,6 +6707,46 @@ impl ContainerService for LocalContainerService {
                 reattached,
                 "Re-attached worker-owned executions that ran across the restart"
             );
+        }
+    }
+
+    async fn recover_worker_dispatches(&self) {
+        let (Some(coordinator_id), Some(_)) =
+            (self.cluster_config.coordinator_id, &self.worker_client)
+        else {
+            return;
+        };
+        let running = match ExecutionProcess::find_running(&self.db.pool).await {
+            Ok(running) => running,
+            Err(error) => {
+                tracing::error!(%error, "Failed to list pending worker dispatches");
+                return;
+            }
+        };
+        for process in running {
+            let result = async {
+                let Some(job) =
+                    ExecutionWorkerJob::find_by_execution_id(&self.db.pool, process.id).await?
+                else {
+                    return Ok::<_, ContainerError>(());
+                };
+                if job.dispatch_state != ExecutionWorkerDispatchState::Pending
+                    || ExecutionWorkerJob::recovery(&self.db.pool, process.id)
+                        .await?
+                        .coordinator_id
+                        != Some(coordinator_id)
+                {
+                    return Ok(());
+                }
+                if let Err(error) = self.reconcile_pending_dispatch(&process, &job).await {
+                    self.settle_dispatch_error(&process, &error).await?;
+                }
+                Ok(())
+            }
+            .await;
+            if let Err(error) = result {
+                tracing::error!(execution_id = %process.id, %error, "Could not reconcile pending worker dispatch");
+            }
         }
     }
 
@@ -6954,58 +7392,6 @@ mod cluster_cleanup_tests {
             true,
             now
         ));
-    }
-
-    #[test]
-    fn a_503_dispatch_rejection_is_a_typed_refusal_naming_the_server() {
-        use reqwest::StatusCode;
-        use services::services::{
-            cluster::{WorkerClientError, WorkerUnavailableReason},
-            container::ContainerError,
-        };
-
-        use super::dispatch_failure_error;
-
-        let worker = worker(WorkerNodeStatus::Online, 30);
-        let detail = "worker is under io pressure (full avg60 58.9% >= 40%); not admitting new executions. Wait for pressure to fall below the threshold, then retry.";
-        let error = dispatch_failure_error(
-            worker.id,
-            Some(&worker),
-            &WorkerClientError::Rejected {
-                status: StatusCode::SERVICE_UNAVAILABLE,
-                message: detail.into(),
-            },
-        );
-        let ContainerError::WorkerUnavailable(unavailable) = &error else {
-            panic!("expected WorkerUnavailable, got {error:?}");
-        };
-        assert_eq!(unavailable.worker, "think3");
-        assert_eq!(unavailable.worker_node_id, Some(worker.id));
-        assert_eq!(
-            unavailable.reason,
-            WorkerUnavailableReason::Refusing {
-                detail: detail.into()
-            }
-        );
-        // The conversation log renders this as "Failed to start execution: …".
-        assert!(error.to_string().starts_with(
-            "Execution server think3 is not accepting new executions: worker is under io pressure"
-        ));
-
-        let other = dispatch_failure_error(
-            worker.id,
-            Some(&worker),
-            &WorkerClientError::Rejected {
-                status: StatusCode::BAD_REQUEST,
-                message: "bad".into(),
-            },
-        );
-        assert!(matches!(other, ContainerError::Other(_)));
-        assert!(
-            other
-                .to_string()
-                .starts_with(&format!("Execution server think3 ({})", worker.id))
-        );
     }
 }
 

@@ -665,6 +665,22 @@ impl ExecutionProcess {
         Ok(())
     }
 
+    pub async fn complete_if_running(
+        pool: &SqlitePool,
+        id: Uuid,
+        status: ExecutionProcessStatus,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "UPDATE execution_processes SET status = ?, completed_at = datetime('now', 'subsec')
+             WHERE id = ? AND status = 'running'",
+        )
+        .bind(status)
+        .bind(id)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
     /// Record a terminal status for an execution that never launched.
     ///
     /// The write lands only while the row is still `running` and carries no
