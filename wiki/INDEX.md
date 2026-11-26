@@ -346,7 +346,8 @@ contributed to it.
   with every id form normalized to one placeholder (`vk/7e4f-auto-error-remed`).
   Credit/usage errors are excluded before reservation and remote side effects;
   classify full error evidence and preserve Claude failed-result diagnostics
-  (`vk/723d-don-t-run-auto-f`).
+  (`vk/723d-don-t-run-auto-f`). Claude's `5-hour` window limit is matched by an
+  explicit qualifier list, never "any word" (`vk/e0b5-auto-fix-persist`).
 - [coordinator-nfs-load.md](coordinator-nfs-load.md) — Diagnosing coordinator
   load from NFS waits (io PSI and `procs_blocked` miss it, so count D-state
   threads). Root cause was per-client summaries git sweeps. Bulk worktree scans
