@@ -584,7 +584,7 @@ async fn run_round(
     // it: slots are keyed by the registered path (no I/O on the request
     // path), so two registrations aliasing one checkout serialize here,
     // resolved in the leader, bounded.
-    let dest_lock = match destination_lock(dest, config.probe_timeout).await {
+    let dest_lock = match destination_lock(dest, config.probe_timeout, leftovers).await {
         Some(lock) => lock,
         None => {
             return failed(
@@ -597,7 +597,20 @@ async fn run_round(
             );
         }
     };
-    let repository_guard = dest_lock.lock_owned().await;
+    // Bounded: a timed-out push stuck in I/O keeps this lock until it exits;
+    // waiting on it forever would leave this slot in flight with nothing
+    // shown. Report a retryable timeout instead (the stuck push keeps it).
+    let Ok(repository_guard) =
+        tokio::time::timeout(config.probe_timeout, dest_lock.lock_owned()).await
+    else {
+        return failed(
+            SourceMirrorFailureKind::Timeout,
+            format!(
+                "another push into {} has not exited yet (stuck storage?)",
+                dest.display()
+            ),
+        );
+    };
 
     // 4. A push the destination itself refused is not repeated until the
     //    store or the destination commit changes.
@@ -800,15 +813,28 @@ async fn preflight(
 static DESTINATION_LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> =
     LazyLock::new(Default::default);
 
-async fn destination_lock(dest: &Path, deadline: Duration) -> Option<Arc<tokio::sync::Mutex<()>>> {
+async fn destination_lock(
+    dest: &Path,
+    deadline: Duration,
+    leftovers: &mut Leftovers,
+) -> Option<Arc<tokio::sync::Mutex<()>>> {
     let dest = dest.to_path_buf();
-    let resolve = tokio::task::spawn_blocking(move || {
+    let mut resolve = tokio::task::spawn_blocking(move || {
         worktree_linkage::common_dir_of(&dest)
             .ok()
             .and_then(|(common, _)| std::fs::canonicalize(common).ok())
             .unwrap_or(dest)
     });
-    let identity = tokio::time::timeout(deadline, resolve).await.ok()?.ok()?;
+    let identity = match tokio::time::timeout(deadline, &mut resolve).await {
+        Ok(identity) => identity.ok()?,
+        Err(_) => {
+            // Fenced like every other abandoned probe.
+            leftovers.push(tokio::spawn(async move {
+                let _ = resolve.await;
+            }));
+            return None;
+        }
+    };
     Some(
         DESTINATION_LOCKS
             .lock()

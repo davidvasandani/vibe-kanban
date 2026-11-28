@@ -274,10 +274,33 @@ pub async fn merge_workspace(
     // For a clustered workspace that copy arrives through the background
     // mirror, so make sure it holds the worktree's HEAD before merging —
     // otherwise the merge could silently omit the latest commits.
-    if let Ok((store, _)) = utils::worktree_linkage::common_dir_of(&worktree_path)
-        && let Ok((checkout_git, _)) = utils::worktree_linkage::common_dir_of(&repo.path)
-        && std::fs::canonicalize(&store).ok() != std::fs::canonicalize(&checkout_git).ok()
-    {
+    let (worktree_for_probe, checkout_for_probe) = (worktree_path.clone(), repo.path.clone());
+    let identities = tokio::task::spawn_blocking(move || {
+        let identity = |path: &Path| {
+            let (common, _) = utils::worktree_linkage::common_dir_of(path)?;
+            std::fs::canonicalize(&common)
+                .map_err(|e| format!("canonicalize {}: {e}", common.display()))
+        };
+        Ok::<_, String>((
+            identity(&worktree_for_probe)?,
+            identity(&checkout_for_probe)?,
+        ))
+    });
+    let (store, checkout_git) =
+        match tokio::time::timeout(std::time::Duration::from_secs(10), identities).await {
+            Ok(Ok(Ok(identities))) => identities,
+            Ok(Ok(Err(e))) => {
+                return Err(ApiError::BadRequest(format!(
+                    "Cannot merge: could not identify the workspace's repository: {e}"
+                )));
+            }
+            _ => {
+                return Err(ApiError::BadRequest(
+                    "Cannot merge yet: the repositories did not answer in time".to_string(),
+                ));
+            }
+        };
+    if store != checkout_git {
         // The branch `merge_changes` merges, as the store has it — not the
         // worktree's HEAD, which may be detached or on another branch.
         let (store_dir, branch_ref) = (store.clone(), format!("refs/heads/{}", workspace.branch));
@@ -310,19 +333,24 @@ pub async fn merge_workspace(
         // Pinned: if the workspace moved on while the mirror caught up, the
         // checkout's copy is no longer the latest — refuse instead of merging
         // a tip that omits the newer commits.
-        let (store_dir, branch_ref) = (store.clone(), format!("refs/heads/{}", workspace.branch));
+        // Both sides, re-read together: the store (the workspace moved on?)
+        // and the checkout (its copy reset meanwhile?). Nothing is awaited
+        // between this and `merge_changes`.
+        let (store_dir, checkout_dir, branch_ref) = (
+            store.clone(),
+            repo.path.clone(),
+            format!("refs/heads/{}", workspace.branch),
+        );
+        let deadline = std::time::Duration::from_secs(10);
         let now = tokio::task::spawn_blocking(move || {
-            git::GitCli::new().resolve_commit_within(
-                &store_dir,
-                &branch_ref,
-                std::time::Duration::from_secs(10),
-            )
+            let cli = git::GitCli::new();
+            let store_tip = cli.resolve_commit_within(&store_dir, &branch_ref, deadline);
+            let checkout_tip = cli.resolve_commit_within(&checkout_dir, &branch_ref, deadline);
+            (store_tip.ok().flatten(), checkout_tip.ok().flatten())
         })
         .await
-        .ok()
-        .and_then(Result::ok)
-        .flatten();
-        if now.as_deref() != Some(head.as_str()) {
+        .unwrap_or((None, None));
+        if now.0.as_deref() != Some(head.as_str()) || now.1.as_deref() != Some(head.as_str()) {
             return Err(ApiError::BadRequest(
                 "Cannot merge yet: the workspace received new commits while preparing the \
                  merge; try again"
@@ -745,10 +773,22 @@ fn counts_against_checkout_target(
     // Every call under a process-level deadline: the checkout may be stalled.
     let deadline = std::time::Duration::from_secs(5);
     let cli = git::GitCli::new();
-    let tip = cli
-        .resolve_commit_within(checkout, target, deadline)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("'{target}' was not found in {}", checkout.display()))?;
+    // As a branch — local first, then remote-tracking — the way
+    // `GitService::find_branch` resolves it; never a same-named tag.
+    let mut tip = None;
+    for candidate in [
+        format!("refs/heads/{target}"),
+        format!("refs/remotes/{target}"),
+    ] {
+        if let Some(found) = cli
+            .resolve_commit_within(checkout, &candidate, deadline)
+            .map_err(|e| e.to_string())?
+        {
+            tip = Some(found);
+            break;
+        }
+    }
+    let tip = tip.ok_or_else(|| format!("'{target}' was not found in {}", checkout.display()))?;
     cli.git_within(
         worktree,
         ["cat-file", "-e", &format!("{tip}^{{commit}}")],
