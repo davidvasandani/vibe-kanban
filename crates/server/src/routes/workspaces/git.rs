@@ -559,12 +559,16 @@ pub async fn get_workspace_branch_status(
             };
 
         let (remote_ahead, remote_behind) = if has_open_pr {
-            match deployment.git().get_remote_branch_status(
-                &repo.path,
-                &workspace.branch,
-                None,
-                &credentials,
-            ) {
+            // Worktree first, for the same reason as above.
+            let pr_status_in = |repo_path: &std::path::Path| {
+                deployment.git().get_remote_branch_status(
+                    repo_path,
+                    &workspace.branch,
+                    None,
+                    &credentials,
+                )
+            };
+            match pr_status_in(&worktree_path).or_else(|_| pr_status_in(&repo.path)) {
                 Ok((ahead, behind)) => (Some(ahead), Some(behind)),
                 Err(_) => (None, None),
             }

@@ -48,9 +48,6 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long to wait for a killed child's output pipes to close. A grandchild
 /// that escaped the process group could otherwise hold them open forever.
 const PIPE_DRAIN_GRACE: Duration = Duration::from_secs(5);
-/// Longest a slot stays fenced on a killed push's surviving group members once
-/// its leader is reaped (see `run_git_bounded`).
-const GROUP_FENCE_MAX: Duration = Duration::from_secs(15 * 60);
 const STDERR_MAX_LINES: usize = 20;
 const STDERR_MAX_BYTES: usize = 2048;
 
@@ -776,16 +773,15 @@ async fn run_git_bounded(
             // Every member already has SIGKILL pending (sent above, while the
             // unreaped leader pinned the pgid). After reaping, the number could
             // be reused, so the leftover only *probes* the group (signal 0,
-            // harmless to anyone) and never signals it again; a reused id can
-            // at worst extend the fence, which is bounded.
+            // harmless to anyone) and never signals it again. It holds the
+            // slot until the group is gone, however long that takes: a
+            // reused id can at worst keep the mirror fenced, and that shows on
+            // the workspace as a timeout naming the stuck process.
             leftovers.push(tokio::spawn(async move {
                 let _ = child.wait().await;
                 #[cfg(unix)]
                 if let Some(pgid) = pid.and_then(|pid| i32::try_from(pid).ok()) {
-                    let until = tokio::time::Instant::now() + GROUP_FENCE_MAX;
-                    while utils::process::process_group_alive(pgid)
-                        && tokio::time::Instant::now() < until
-                    {
+                    while utils::process::process_group_alive(pgid) {
                         tokio::time::sleep(Duration::from_secs(1)).await;
                     }
                 }

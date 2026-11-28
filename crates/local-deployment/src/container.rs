@@ -2487,13 +2487,19 @@ impl LocalContainerService {
                 SharedRepositoryStore::sweep_source_registrations(
                     &source,
                     |worktree| live.iter().any(|dir| worktree.starts_with(dir)),
-                    // `<base>/<workspace>/<repo>`: its base must be one that
-                    // visibly holds a live workspace.
+                    // `<base>/<workspace>/<repo>`. vk deletes a workspace as a
+                    // whole, so the workspace directory itself must be gone
+                    // too — a mount point at that level would still exist
+                    // when offline — and its base must visibly hold a live
+                    // workspace right now.
                     |worktree| {
-                        worktree
-                            .parent()
-                            .and_then(Path::parent)
-                            .is_some_and(|base| bases.iter().any(|b| b == base))
+                        let Some(workspace_dir) = worktree.parent() else {
+                            return false;
+                        };
+                        matches!(workspace_dir.try_exists(), Ok(false))
+                            && workspace_dir
+                                .parent()
+                                .is_some_and(|base| bases.iter().any(|b| b == base))
                     },
                 )
             });

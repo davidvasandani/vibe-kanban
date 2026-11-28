@@ -250,6 +250,25 @@ pub fn gitdir_target(worktree_path: &Path) -> Option<PathBuf> {
     parse_gitdir_pointer(&contents, worktree_path)
 }
 
+/// Resolves `.` and `..` components without touching the filesystem (the path
+/// may name something that no longer exists, so `canonicalize` cannot help).
+fn normalize_lexically(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    out.push(component);
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 /// Reads one registration directory (`<common_dir>/worktrees/<name>`).
 pub fn read_registration(admin_dir: &Path) -> Result<Registration, String> {
     let read = |name: &str| {
@@ -261,12 +280,15 @@ pub fn read_registration(admin_dir: &Path) -> Result<Registration, String> {
     if gitdir.is_empty() {
         return Err(format!("{} has an empty gitdir", admin_dir.display()));
     }
+    // Relative when git writes them so (`worktree.useRelativePaths`):
+    // relative to the admin directory, and normalised lexically so it compares
+    // equal to the absolute path callers hold, even once the worktree is gone.
     let worktree_git = {
         let p = Path::new(gitdir);
         if p.is_absolute() {
-            p.to_path_buf()
+            normalize_lexically(p)
         } else {
-            admin_dir.join(p)
+            normalize_lexically(&admin_dir.join(p))
         }
     };
     let head = read("HEAD")?;
@@ -613,6 +635,17 @@ mod tests {
         fs::write(admin.join("locked"), "").unwrap();
         assert!(!remove_registration_of_deleted_worktree(&listed).unwrap());
         assert!(admin.exists());
+    }
+
+    #[test]
+    fn a_relative_gitdir_is_normalised_against_the_admin_directory() {
+        let root = TempDir::new().unwrap();
+        let (common, admin, worktree) = source_registration(root.path());
+        // What `worktree.useRelativePaths` writes: relative to the admin dir.
+        fs::write(admin.join("gitdir"), "../../../../ws/one/repo/.git\n").unwrap();
+        let reg = only(&common);
+        assert_eq!(reg.worktree_path(), worktree.as_path());
+        assert_eq!(registration_state(&reg), RegistrationState::Live);
     }
 
     #[test]
