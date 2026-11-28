@@ -580,6 +580,25 @@ async fn run_round(
         return round;
     }
 
+    // One push at a time per destination *repository*, whatever path reached
+    // it: slots are keyed by the registered path (no I/O on the request
+    // path), so two registrations aliasing one checkout serialize here,
+    // resolved in the leader, bounded.
+    let dest_lock = match destination_lock(dest, config.probe_timeout).await {
+        Some(lock) => lock,
+        None => {
+            return failed(
+                SourceMirrorFailureKind::Timeout,
+                format!(
+                    "resolving the git directory of {} did not finish within {}s",
+                    dest.display(),
+                    config.probe_timeout.as_secs()
+                ),
+            );
+        }
+    };
+    let _one_push_per_repository = dest_lock.lock().await;
+
     // 4. A push the destination itself refused is not repeated until the
     //    store or the destination commit changes.
     let gate = RetryGate {
@@ -759,6 +778,29 @@ async fn preflight(
             format!("pre-flight check panicked: {e}"),
         )),
     }
+}
+
+/// One async lock per canonical destination git directory (see `run_round`).
+static DESTINATION_LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> =
+    LazyLock::new(Default::default);
+
+async fn destination_lock(dest: &Path, deadline: Duration) -> Option<Arc<tokio::sync::Mutex<()>>> {
+    let dest = dest.to_path_buf();
+    let resolve = tokio::task::spawn_blocking(move || {
+        worktree_linkage::common_dir_of(&dest)
+            .ok()
+            .and_then(|(common, _)| std::fs::canonicalize(common).ok())
+            .unwrap_or(dest)
+    });
+    let identity = tokio::time::timeout(deadline, resolve).await.ok()?.ok()?;
+    Some(
+        DESTINATION_LOCKS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(identity)
+            .or_default()
+            .clone(),
+    )
 }
 
 /// What [`fs_tips_agree`] found.

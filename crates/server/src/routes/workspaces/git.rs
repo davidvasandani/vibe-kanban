@@ -299,6 +299,28 @@ pub async fn merge_workspace(
             )
             .await
             .map_err(|e| ApiError::BadRequest(format!("Cannot merge yet: {e}")))?;
+        // Pinned: if the workspace moved on while the mirror caught up, the
+        // checkout's copy is no longer the latest — refuse instead of merging
+        // a tip that omits the newer commits.
+        let (store_dir, branch_ref) = (store.clone(), format!("refs/heads/{}", workspace.branch));
+        let now = tokio::task::spawn_blocking(move || {
+            git::GitCli::new().resolve_commit_within(
+                &store_dir,
+                &branch_ref,
+                std::time::Duration::from_secs(10),
+            )
+        })
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .flatten();
+        if now.as_deref() != Some(head.as_str()) {
+            return Err(ApiError::BadRequest(
+                "Cannot merge yet: the workspace received new commits while preparing the \
+                 merge; try again"
+                    .to_string(),
+            ));
+        }
     }
 
     let workspace_label = workspace.name.as_deref().unwrap_or(&workspace.branch);
@@ -792,11 +814,32 @@ pub async fn change_target_branch(
             .unwrap_or_else(|e| Err(e.to_string()));
             match counts {
                 Ok(status) => status,
-                Err(e) => {
-                    return Ok(ResponseJson(ApiResponse::error(
-                        format!("Could not compare the workspace with '{new_target_branch}': {e}")
-                            .as_str(),
-                    )));
+                // E.g. a new target whose tip the store has not got yet: the
+                // checkout can still compare its own refs (off-worker,
+                // bounded wait).
+                Err(first) => {
+                    let (checkout, branch, target) = (
+                        repo.path.clone(),
+                        workspace.branch.clone(),
+                        new_target_branch.clone(),
+                    );
+                    let fallback = tokio::task::spawn_blocking(move || {
+                        git::GitService::new()
+                            .get_branch_status(&checkout, &branch, &target)
+                            .map_err(|e| e.to_string())
+                    });
+                    match tokio::time::timeout(std::time::Duration::from_secs(10), fallback).await {
+                        Ok(Ok(Ok(status))) => status,
+                        _ => {
+                            return Ok(ResponseJson(ApiResponse::error(
+                                format!(
+                                    "Could not compare the workspace with \
+                                     '{new_target_branch}': {first}"
+                                )
+                                .as_str(),
+                            )));
+                        }
+                    }
                 }
             }
         }
