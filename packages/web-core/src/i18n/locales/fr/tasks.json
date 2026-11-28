@@ -307,6 +307,10 @@
       "states": {
         "creating": "Création en cours..."
       }
+    },
+    "sourceMirror": {
+      "failed": "Impossible de synchroniser cette branche vers le dépôt source : {{message}}",
+      "nextAttempt": "Prochaine tentative à {{time}}"
     }
   },
   "repoBranchSelector": {

@@ -36,6 +36,12 @@ export function deriveRepoInfos(
       prUrl: relevantPR?.pr_info.url,
       prStatus: relevantPR?.pr_info.status,
       isTargetRemote: repoStatus?.is_target_remote ?? false,
+      sourceMirrorError: repoStatus?.source_mirror_error
+        ? {
+            message: repoStatus.source_mirror_error.message,
+            nextAttemptAt: repoStatus.source_mirror_error.next_attempt_at,
+          }
+        : undefined,
     };
   });
 }

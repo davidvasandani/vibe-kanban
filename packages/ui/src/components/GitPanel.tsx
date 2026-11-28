@@ -25,6 +25,14 @@ export interface RepoInfo {
   isPushSuccess?: boolean;
   isPushError?: boolean;
   isTargetRemote?: boolean;
+  /** Failure of the background mirror into the source checkout, if any. */
+  sourceMirrorError?: SourceMirrorErrorInfo;
+}
+
+export interface SourceMirrorErrorInfo {
+  message: string;
+  /** RFC 3339 time of the next automatic attempt. */
+  nextAttemptAt: string;
 }
 
 export type CompleteButtonState =
@@ -96,6 +104,7 @@ export function GitPanel({
             isPushSuccess={repo.isPushSuccess}
             isPushError={repo.isPushError}
             isTargetRemote={repo.isTargetRemote}
+            sourceMirrorError={repo.sourceMirrorError}
             selectedAction={repoSelectedActions?.[repo.id] ?? 'pull-request'}
             onSelectedActionChange={(action) =>
               onRepoActionChange?.(repo.id, action)

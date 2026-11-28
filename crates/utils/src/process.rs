@@ -82,6 +82,22 @@ pub async fn kill_process_group_by_pgid(pgid: i32) -> bool {
     signalled
 }
 
+/// SIGKILL every process in group `pgid` at once, without the SIGTERM grace
+/// period of [`kill_process_group_by_pgid`]. For a child that was spawned with
+/// `process_group(0)` and has **not yet been reaped**, so the pgid cannot have
+/// been recycled. Returns whether a signal was delivered.
+#[cfg(unix)]
+pub fn kill_process_group_now(pgid: u32) -> bool {
+    use nix::{
+        sys::signal::{Signal, killpg},
+        unistd::Pid,
+    };
+    let Ok(pgid) = i32::try_from(pgid) else {
+        return false;
+    };
+    killpg(Pid::from_raw(pgid), Signal::SIGKILL).is_ok()
+}
+
 /// Check that the process with the given pid is still the leader of its own
 /// process group and started around when the execution record was created
 /// (guards against acting on a recycled pid).

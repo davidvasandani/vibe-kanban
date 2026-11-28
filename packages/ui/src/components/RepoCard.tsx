@@ -22,6 +22,7 @@ import {
   DropdownMenuItem,
 } from './Dropdown';
 import { SplitButton, type SplitButtonOption } from './SplitButton';
+import type { SourceMirrorErrorInfo } from './GitPanel';
 
 export type RepoAction =
   | 'pull-request'
@@ -55,6 +56,7 @@ interface RepoCardProps {
   isPushSuccess?: boolean;
   isPushError?: boolean;
   isTargetRemote?: boolean;
+  sourceMirrorError?: SourceMirrorErrorInfo;
   branchDropdownContent?: ReactNode;
   selectedAction?: RepoAction;
   onSelectedActionChange?: (action: RepoAction) => void;
@@ -78,6 +80,7 @@ export function RepoCard({
   isPushSuccess = false,
   isPushError = false,
   isTargetRemote = false,
+  sourceMirrorError,
   branchDropdownContent,
   selectedAction = 'pull-request',
   onSelectedActionChange,
@@ -175,6 +178,13 @@ export function RepoCard({
         </button>
       </div>
 
+      {sourceMirrorError && (
+        <SourceMirrorErrorRow
+          message={sourceMirrorError.message}
+          nextAttemptAt={sourceMirrorError.nextAttemptAt}
+        />
+      )}
+
       {/* PR status row */}
       {prNumber && (
         <div className="flex items-center gap-half my-base">
@@ -257,6 +267,36 @@ export function RepoCard({
           />
         </div>
       )}
+    </div>
+  );
+}
+
+function SourceMirrorErrorRow({
+  message,
+  nextAttemptAt,
+}: SourceMirrorErrorInfo) {
+  const { t } = useTranslation('tasks');
+  const next = new Date(nextAttemptAt);
+  const retry = Number.isNaN(next.getTime())
+    ? null
+    : t('git.sourceMirror.nextAttempt', {
+        time: next.toLocaleTimeString(),
+      });
+  const text = t('git.sourceMirror.failed', { message });
+  return (
+    <div
+      role="status"
+      className="flex items-start gap-half text-xs text-error"
+      title={retry ? `${text}\n${retry}` : text}
+    >
+      <WarningCircleIcon
+        className="size-icon-xs shrink-0 mt-px"
+        weight="fill"
+      />
+      <span className="min-w-0 break-words line-clamp-3">
+        {text}
+        {retry && <span className="text-low"> · {retry}</span>}
+      </span>
     </div>
   );
 }

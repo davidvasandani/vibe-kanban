@@ -9,6 +9,7 @@ use axum::{
     response::{IntoResponse, Json as ResponseJson},
     routing::{get, post},
 };
+use chrono::{DateTime, Utc};
 use db::models::{
     merge::{Merge, MergeStatus, PrMerge, PullRequestInfo},
     repo::{Repo, RepoError},
@@ -24,6 +25,7 @@ use services::services::{
 use ts_rs::TS;
 use utils::response::ApiResponse;
 use uuid::Uuid;
+use workspace_manager::{SourceMirror, SourceMirrorFailure, SourceMirrorFailureKind};
 
 use super::streams::{DiffStreamQuery, stream_workspace_diff_ws};
 use crate::{DeploymentImpl, error::ApiError, middleware::signed_ws::SignedWsUpgrade};
@@ -99,6 +101,45 @@ pub struct RepoBranchStatus {
     pub repo_name: String,
     #[serde(flatten)]
     pub status: BranchStatus,
+    /// Why the background mirror of this workspace's branch into the
+    /// operator's registered checkout is failing, if it is. `None` when the
+    /// mirror is healthy, disabled, or has not run since the server started.
+    pub source_mirror_error: Option<SourceMirrorError>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum SourceMirrorErrorKind {
+    Deterministic,
+    Transient,
+    Timeout,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+pub struct SourceMirrorError {
+    pub kind: SourceMirrorErrorKind,
+    /// Includes a bounded excerpt of git's own error output.
+    pub message: String,
+    pub attempts: u32,
+    pub last_attempt_at: DateTime<Utc>,
+    pub next_attempt_at: DateTime<Utc>,
+}
+
+impl From<SourceMirrorFailure> for SourceMirrorError {
+    fn from(failure: SourceMirrorFailure) -> Self {
+        Self {
+            kind: match failure.kind {
+                SourceMirrorFailureKind::Deterministic => SourceMirrorErrorKind::Deterministic,
+                SourceMirrorFailureKind::Transient => SourceMirrorErrorKind::Transient,
+                SourceMirrorFailureKind::Timeout => SourceMirrorErrorKind::Timeout,
+            },
+            message: failure.message,
+            attempts: failure.attempts,
+            last_attempt_at: failure.last_attempt_at,
+            next_attempt_at: failure.next_attempt_at,
+        }
+    }
 }
 
 #[derive(Deserialize, Debug, TS)]
@@ -504,9 +545,14 @@ pub async fn get_workspace_branch_status(
             (None, None)
         };
 
+        let source_mirror_error = SourceMirror::global()
+            .failure(&repo.path, &workspace.branch)
+            .map(SourceMirrorError::from);
+
         results.push(RepoBranchStatus {
             repo_id: repo.id,
             repo_name: repo.name,
+            source_mirror_error,
             status: BranchStatus {
                 commits_ahead,
                 commits_behind,

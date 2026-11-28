@@ -1290,6 +1290,58 @@ impl GitCli {
         Ok(String::from_utf8_lossy(&out).to_string())
     }
 
+    /// Files added by `HEAD` (relative to its first parent, or the empty tree
+    /// for a root commit) and their total size in bytes. Submodule entries are
+    /// counted as files but contribute no bytes.
+    pub fn head_commit_added_size(
+        &self,
+        worktree_path: &Path,
+    ) -> Result<(usize, u64), GitCliError> {
+        let raw = self.git(
+            worktree_path,
+            [
+                "diff-tree",
+                "-r",
+                "--root",
+                "--no-commit-id",
+                "--no-renames",
+                "--diff-filter=A",
+                "HEAD",
+            ],
+        )?;
+        let mut files = 0usize;
+        let mut blobs = Vec::new();
+        for line in raw.lines() {
+            // `:<old mode> <new mode> <old sha> <new sha> A\t<path>`
+            let Some(meta) = line.strip_prefix(':') else {
+                continue;
+            };
+            let fields: Vec<&str> = meta.split_whitespace().collect();
+            if fields.len() < 4 {
+                continue;
+            }
+            files += 1;
+            if fields[1] != "160000" {
+                blobs.push(fields[3]);
+            }
+        }
+        if blobs.is_empty() {
+            return Ok((files, 0));
+        }
+        let input = blobs.join("\n") + "\n";
+        let sizes = self.git_with_stdin(
+            worktree_path,
+            ["cat-file", "--batch-check=%(objectsize)"],
+            None,
+            input.as_bytes(),
+        )?;
+        let bytes = sizes
+            .lines()
+            .filter_map(|l| l.trim().parse::<u64>().ok())
+            .sum();
+        Ok((files, bytes))
+    }
+
     fn git_with_stdin<I, S>(
         &self,
         repo_path: &Path,

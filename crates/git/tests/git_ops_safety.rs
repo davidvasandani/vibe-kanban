@@ -1730,3 +1730,28 @@ fn list_remotes_expands_aliases_that_name_no_repository() {
         )]
     );
 }
+
+#[test]
+fn head_commit_added_size_counts_only_files_the_commit_adds() {
+    let td = TempDir::new().unwrap();
+    let repo_path = td.path().join("repo");
+    let service = GitService::new();
+    service
+        .initialize_repo_with_main_branch(&repo_path)
+        .unwrap();
+    let repo = Repository::open(&repo_path).unwrap();
+    configure_user(&repo);
+
+    write_file(&repo_path, "existing.txt", "old\n");
+    commit_all(&repo, "base");
+
+    // One modified file (not counted) and two added ones (10 + 5 bytes).
+    write_file(&repo_path, "existing.txt", "modified\n");
+    write_file(&repo_path, "out/a.bin", "0123456789");
+    write_file(&repo_path, "out/b.bin", "abcde");
+    commit_all(&repo, "agent output");
+
+    let (files, bytes) = GitCli::new().head_commit_added_size(&repo_path).unwrap();
+    assert_eq!(files, 2);
+    assert_eq!(bytes, 15);
+}

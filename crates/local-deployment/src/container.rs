@@ -2251,6 +2251,8 @@ impl LocalContainerService {
             return;
         }
 
+        Self::forget_source_registrations(&workspace_dir, &workspace_inputs).await;
+
         if let Err(error) = Workspace::mark_worktree_deleted(&self.db.pool, workspace.id).await {
             tracing::warn!(
                 workspace_id = %workspace.id,
@@ -2381,9 +2383,109 @@ impl LocalContainerService {
         ))
     }
 
+    /// A clustered workspace's worktrees are registered in the shared store,
+    /// so deleting one unregisters it there — but a worktree created before
+    /// clustering and later adopted into the store may still have an entry in
+    /// the operator's checkout, holding its branch. Remove that entry too
+    /// (VAS-1140). Best effort: a failure is logged, never fatal.
+    async fn forget_source_registrations(workspace_dir: &Path, inputs: &[RepoWorkspaceInput]) {
+        for input in inputs {
+            if input.git_path == input.repo.path {
+                // Not clustered: `cleanup_workspace` already unregistered it
+                // from the checkout itself.
+                continue;
+            }
+            let source = input.repo.path.clone();
+            let worktree = workspace_dir.join(&input.repo.name);
+            let result = tokio::task::spawn_blocking(move || {
+                SharedRepositoryStore::forget_source_registrations(&source, &worktree)
+            })
+            .await;
+            match result {
+                Ok(Ok(0)) => {}
+                Ok(Ok(removed)) => tracing::info!(
+                    repo = %input.repo.name,
+                    "removed {removed} stale registration(s) of the deleted workspace from {}",
+                    input.repo.path.display()
+                ),
+                Ok(Err(e)) => tracing::warn!(
+                    repo = %input.repo.name,
+                    "could not clear the deleted workspace's registrations in {}: {e}",
+                    input.repo.path.display()
+                ),
+                Err(e) => tracing::warn!("source registration cleanup task failed: {e}"),
+            }
+        }
+    }
+
+    /// Once per boot: remove provably stale worktree registrations from every
+    /// registered repository's checkout (VAS-1140 found 120 in one). Per entry
+    /// and only on positive evidence — never `git worktree prune`, which over
+    /// NFS can unregister live worktrees — and never an entry under a live
+    /// workspace's directory.
+    async fn sweep_source_registrations(&self) {
+        const PER_REPO_BUDGET: Duration = Duration::from_secs(120);
+        let repos = match Repo::list_all(&self.db.pool).await {
+            Ok(repos) => repos,
+            Err(e) => {
+                tracing::warn!("startup registration sweep: could not list repositories: {e}");
+                return;
+            }
+        };
+        let live_dirs: Arc<Vec<PathBuf>> = match Workspace::fetch_all(&self.db.pool).await {
+            Ok(workspaces) => Arc::new(
+                workspaces
+                    .into_iter()
+                    .filter(|w| !w.worktree_deleted)
+                    .filter_map(|w| w.container_ref.map(PathBuf::from))
+                    .collect(),
+            ),
+            Err(e) => {
+                // Without the live set the guard cannot be applied: skip.
+                tracing::warn!(
+                    "startup registration sweep skipped: could not list workspaces: {e}"
+                );
+                return;
+            }
+        };
+        for repo in repos {
+            let source = repo.path.clone();
+            let live = live_dirs.clone();
+            let task = tokio::task::spawn_blocking(move || {
+                SharedRepositoryStore::sweep_source_registrations(&source, |worktree| {
+                    live.iter().any(|dir| worktree.starts_with(dir))
+                })
+            });
+            match tokio::time::timeout(PER_REPO_BUDGET, task).await {
+                Ok(Ok(Ok(report))) if report.removed > 0 => tracing::info!(
+                    repo = %repo.name,
+                    removed = report.removed,
+                    kept = report.kept,
+                    unreadable = report.unreadable,
+                    "removed stale worktree registrations from {}",
+                    repo.path.display()
+                ),
+                Ok(Ok(Ok(_))) => {}
+                Ok(Ok(Err(e))) => tracing::debug!(
+                    repo = %repo.name,
+                    "startup registration sweep skipped {}: {e}",
+                    repo.path.display()
+                ),
+                Ok(Err(e)) => tracing::warn!("startup registration sweep task failed: {e}"),
+                Err(_) => tracing::warn!(
+                    repo = %repo.name,
+                    "startup registration sweep of {} exceeded {}s; moving on",
+                    repo.path.display(),
+                    PER_REPO_BUDGET.as_secs()
+                ),
+            }
+        }
+    }
+
     fn spawn_workspace_cleanup(&self) {
         let container = self.clone();
         tokio::spawn(async move {
+            container.sweep_source_registrations().await;
             container
                 .workspace_manager
                 .cleanup_orphan_workspaces(!container.cluster_config.enabled)
@@ -2547,6 +2649,41 @@ impl LocalContainerService {
     }
 
     /// Commit changes to each repo. Logs failures but continues with other repos.
+    /// Warn-only guard against generated output landing in a workspace branch
+    /// (VAS-1140: a 28k-file, 1.6 GB auto-commit made every later push of the
+    /// branch take over an hour). Never refuses the commit.
+    fn warn_if_commit_is_large(repo: &Repo, worktree_path: &Path) {
+        fn threshold(name: &str, default: u64) -> u64 {
+            std::env::var(name)
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(default)
+        }
+        let max_files = threshold("VK_LARGE_COMMIT_WARN_FILES", 5_000);
+        let max_mb = threshold("VK_LARGE_COMMIT_WARN_MB", 200);
+        match git::GitCli::new().head_commit_added_size(worktree_path) {
+            Ok((files, bytes)) => {
+                let mb = bytes / (1024 * 1024);
+                if files as u64 > max_files || mb > max_mb {
+                    tracing::warn!(
+                        repo = %repo.name,
+                        worktree = %worktree_path.display(),
+                        added_files = files,
+                        added_mb = mb,
+                        max_files,
+                        max_mb,
+                        "agent auto-commit added {files} files ({mb} MB), above the \
+                         large-commit threshold; generated output may have been committed"
+                    );
+                }
+            }
+            Err(e) => tracing::debug!(
+                repo = %repo.name,
+                "could not measure the auto-commit's size: {e}"
+            ),
+        }
+    }
+
     fn commit_repos(&self, repos_with_changes: Vec<(Repo, PathBuf)>, message: &str) -> bool {
         let mut any_committed = false;
 
@@ -2561,6 +2698,7 @@ impl LocalContainerService {
                 Ok(true) => {
                     any_committed = true;
                     tracing::info!("Committed changes in repo '{}'", repo.name);
+                    Self::warn_if_commit_is_large(&repo, &worktree_path);
                 }
                 Ok(false) => {
                     tracing::warn!("No changes committed in repo '{}' (unexpected)", repo.name);
