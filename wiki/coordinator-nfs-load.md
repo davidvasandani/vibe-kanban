@@ -88,7 +88,13 @@ breaks cross-host coherency; homelab principle 120), a background refresher
 (does work when nobody is looking), and client-side throttling alone (N
 devices still multiply the work).
 
+A second instance of the same signature (VAS-1140) came from an untimed,
+per-request `git push` into the operator checkout: 44 concurrent pushes and a
+load of 127. See [[source-checkout-mirror]] for the bounded, single-flight
+rewrite and the process-group fencing rules.
+
 ## Contributed by
 
 - vk/78a5-analyze-and-redu
 - vk/b923-workspaces-loadi
+- vk/2b38-vas-1140-seriali
