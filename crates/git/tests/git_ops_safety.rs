@@ -1815,10 +1815,38 @@ fn snapshot_index_keeps_staged_only_content_reachable() {
 
     let cli = GitCli::new();
     let index = repo_path.join(".git").join("index");
-    cli.snapshot_index(&repo_path, &index, "refs/vk-retired/test", "snapshot")
-        .unwrap();
+    cli.snapshot_index(
+        &repo_path,
+        &index,
+        "refs/vk-retired/test",
+        "snapshot",
+        std::time::Duration::from_secs(30),
+    )
+    .unwrap();
     let staged = cli
         .git(&repo_path, ["show", "refs/vk-retired/test:f.txt"])
         .unwrap();
     assert_eq!(staged, "staged\n");
+}
+
+#[test]
+fn git_within_kills_a_hung_command_at_its_deadline() {
+    let td = TempDir::new().unwrap();
+    let repo_path = td.path().join("repo");
+    GitService::new()
+        .initialize_repo_with_main_branch(&repo_path)
+        .unwrap();
+    let started = std::time::Instant::now();
+    let result = GitCli::new().git_within(
+        &repo_path,
+        ["-c", "alias.hang=!sleep 30", "hang"],
+        None,
+        std::time::Duration::from_secs(1),
+    );
+    assert!(result.is_err(), "{result:?}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
 }

@@ -540,17 +540,20 @@ pub async fn get_workspace_branch_status(
             Some(head) => {
                 let checkout = repo.path.clone();
                 let branch_ref = format!("refs/heads/{}", workspace.branch);
+                // A process-level deadline, so a stalled checkout never
+                // leaves a probe (or its git child) behind to pile up.
                 let probe = tokio::task::spawn_blocking(move || {
                     git::GitCli::new()
-                        .resolve_commit(&checkout, &branch_ref)
+                        .resolve_commit_within(
+                            &checkout,
+                            &branch_ref,
+                            std::time::Duration::from_secs(5),
+                        )
                         .ok()
                         .flatten()
                         .is_some_and(|tip| tip == head)
                 });
-                matches!(
-                    tokio::time::timeout(std::time::Duration::from_secs(5), probe).await,
-                    Ok(Ok(true))
-                )
+                matches!(probe.await, Ok(true))
             }
             None => false,
         };

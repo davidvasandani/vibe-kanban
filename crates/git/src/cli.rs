@@ -1064,24 +1064,165 @@ impl GitCli {
         Ok(sha)
     }
 
+    /// [`Self::git`] under a process-level deadline, for callers that must not
+    /// wait on stalled storage: the command runs in its own process group,
+    /// and at the deadline the whole group is killed (while the unreaped
+    /// leader still pins the group id) and the call fails. Output pipes are
+    /// drained on threads, so neither side can block on a full pipe, and the
+    /// leader is reaped only after they close.
+    pub fn git_within<I, S>(
+        &self,
+        repo_path: &Path,
+        args: I,
+        envs: Option<&[(OsString, OsString)]>,
+        deadline: std::time::Duration,
+    ) -> Result<String, GitCliError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        use std::{io::Read, sync::mpsc, time::Instant};
+
+        self.ensure_available()?;
+        let git = resolve_executable_path_blocking("git").ok_or(GitCliError::NotAvailable)?;
+        let mut cmd = Command::new(&git);
+        cmd.arg("-C").arg(repo_path);
+        cmd.arg("-c").arg("core.hooksPath=/dev/null");
+        for (k, v) in envs.unwrap_or_default() {
+            cmd.env(k, v);
+        }
+        cmd.env("GIT_TERMINAL_PROMPT", "0");
+        cmd.args(args);
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+        use utils::command_ext::NoWindowExt;
+        let mut child = cmd
+            .no_window()
+            .spawn()
+            .map_err(|e| GitCliError::CommandFailed(e.to_string()))?;
+        let pid = child.id();
+        let pipe = |mut reader: Box<dyn Read + Send>| {
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                let _ = reader.read_to_end(&mut buf);
+                let _ = tx.send(buf);
+            });
+            rx
+        };
+        let stdout = child.stdout.take().map(|p| pipe(Box::new(p)));
+        let stderr = child.stderr.take().map(|p| pipe(Box::new(p)));
+
+        let until = Instant::now() + deadline;
+        let collect = |rx: Option<mpsc::Receiver<Vec<u8>>>| -> Option<Vec<u8>> {
+            match rx {
+                None => Some(Vec::new()),
+                Some(rx) => rx
+                    .recv_timeout(until.saturating_duration_since(Instant::now()))
+                    .ok(),
+            }
+        };
+        let out = collect(stdout);
+        let err = out.as_ref().and_then(|_| collect(stderr));
+        let status = match (out.is_some() && err.is_some()).then_some(()) {
+            Some(()) => loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => break Some(status),
+                    Ok(None) if Instant::now() < until => {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                    _ => break None,
+                }
+            },
+            None => None,
+        };
+        let Some(status) = status else {
+            #[cfg(unix)]
+            utils::process::kill_process_group_now(pid);
+            let _ = child.kill();
+            // Reap on a thread: a child stuck in uninterruptible I/O dies only
+            // when that I/O returns, and this caller must not wait for it.
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            return Err(GitCliError::CommandFailed(format!(
+                "git did not finish within {}s and was killed",
+                deadline.as_secs()
+            )));
+        };
+        let out = out.unwrap_or_default();
+        if !status.success() {
+            let err = String::from_utf8_lossy(&err.unwrap_or_default())
+                .trim()
+                .to_string();
+            return Err(GitCliError::CommandFailed(if err.is_empty() {
+                "Command failed with no output".to_string()
+            } else {
+                err
+            }));
+        }
+        Ok(String::from_utf8_lossy(&out).to_string())
+    }
+
+    /// [`Self::resolve_commit`] under a process-level deadline (see
+    /// [`Self::git_within`]).
+    pub fn resolve_commit_within(
+        &self,
+        repo_path: &Path,
+        revision: &str,
+        deadline: std::time::Duration,
+    ) -> Result<Option<String>, GitCliError> {
+        let out = self.git_within(
+            repo_path,
+            [
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("{revision}^{{commit}}"),
+            ],
+            None,
+            deadline,
+        );
+        match out {
+            Ok(out) => {
+                let oid = out.trim().to_string();
+                Ok((!oid.is_empty()).then_some(oid))
+            }
+            // `--verify --quiet` fails with no output for a missing revision.
+            Err(GitCliError::CommandFailed(msg)) if msg == "Command failed with no output" => {
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     /// Record the tree an index file describes as a commit under `refname`,
     /// so every blob it stages stays reachable (and safe from gc) after the
     /// index itself is moved out of git's view. Fails, writing nothing, for an
     /// index git cannot turn into a tree (e.g. one with unmerged entries).
+    ///
+    /// Every step runs under `deadline` (see [`Self::git_within`]).
     pub fn snapshot_index(
         &self,
         repo_path: &Path,
         index_file: &Path,
         refname: &str,
         message: &str,
+        deadline: std::time::Duration,
     ) -> Result<String, GitCliError> {
         let env = [(
             OsString::from("GIT_INDEX_FILE"),
             index_file.as_os_str().to_os_string(),
         )];
-        let tree = self.git_impl(repo_path, ["write-tree"], Some(&env), None)?;
-        let tree = String::from_utf8_lossy(&tree).trim().to_string();
-        let commit = self.git(
+        let tree = self.git_within(repo_path, ["write-tree"], Some(&env), deadline)?;
+        let tree = tree.trim().to_string();
+        let commit = self.git_within(
             repo_path,
             [
                 "-c",
@@ -1093,9 +1234,11 @@ impl GitCli {
                 "-m",
                 message,
             ],
+            None,
+            deadline,
         )?;
         let commit = commit.trim().to_string();
-        self.update_ref(repo_path, refname, &commit)?;
+        self.git_within(repo_path, ["update-ref", refname, &commit], None, deadline)?;
         Ok(commit)
     }
 

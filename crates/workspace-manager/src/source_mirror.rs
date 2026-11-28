@@ -49,9 +49,6 @@ pub const DISABLED_ENV: &str = "VK_SOURCE_MIRROR_DISABLED";
 
 const DEFAULT_PUSH_TIMEOUT: Duration = Duration::from_secs(300);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
-/// How long to wait for a killed child's output pipes to close. A grandchild
-/// that escaped the process group could otherwise hold them open forever.
-const PIPE_DRAIN_GRACE: Duration = Duration::from_secs(5);
 const STDERR_MAX_LINES: usize = 20;
 const STDERR_MAX_BYTES: usize = 2048;
 
@@ -774,11 +771,31 @@ async fn run_git_bounded(
         buf
     });
 
-    let status = match tokio::time::timeout(timeout, child.wait()).await {
-        Ok(status) => status.map_err(|e| BoundedError::Spawn(e.to_string()))?,
+    // Pipes first, reaping last. The leader is reaped only after every holder
+    // of its output — it and any helper it started (`pack-objects`,
+    // `receive-pack`) — has closed it, so until then the unreaped leader pins
+    // the process-group id and the whole group can be killed safely at the
+    // deadline, helpers included. Nothing is ever signalled after reaping.
+    let (mut stdout_task, mut stderr_task) = (stdout_task, stderr_task);
+    let finished = tokio::time::timeout(timeout, async {
+        let stdout = (&mut stdout_task).await.unwrap_or_default();
+        let stderr = (&mut stderr_task).await.unwrap_or_default();
+        let status = child.wait().await;
+        (stdout, stderr, status)
+    })
+    .await;
+    match finished {
+        Ok((stdout, stderr, status)) => {
+            let status = status.map_err(|e| BoundedError::Spawn(e.to_string()))?;
+            Ok(BoundedOutput {
+                success: status.success(),
+                code: status.code(),
+                stdout: String::from_utf8_lossy(&stdout).to_string(),
+                stderr: String::from_utf8_lossy(&stderr).to_string(),
+            })
+        }
         Err(_) => {
-            // The leader has not been reaped, so its pid still names our
-            // group: kill all of it, then reap.
+            // Not reaped yet, so the pid still names our group: kill all of it.
             #[cfg(unix)]
             if let Some(pid) = pid {
                 utils::process::kill_process_group_now(pid);
@@ -787,18 +804,12 @@ async fn run_git_bounded(
             stdout_task.abort();
             stderr_task.abort();
             // A process blocked in uninterruptible I/O (a hard NFS mount) does
-            // not die on SIGKILL until the I/O returns, and that may be a
-            // helper like `receive-pack` while the leader is already gone.
-            // Report the timeout now; fence the slot with a leftover that ends
-            // only once the leader is reaped *and* the whole group is gone.
-            //
-            // Every member already has SIGKILL pending (sent above, while the
-            // unreaped leader pinned the pgid). After reaping, the number could
-            // be reused, so the leftover only *probes* the group (signal 0,
-            // harmless to anyone) and never signals it again. It holds the
-            // slot until the group is gone, however long that takes: a
-            // reused id can at worst keep the mirror fenced, and that shows on
-            // the workspace as a timeout naming the stuck process.
+            // not die on SIGKILL until the I/O returns. Report the timeout now
+            // and fence the slot with a leftover that ends only once the
+            // leader is reaped and no member of the group is still running.
+            // After reaping it only *probes* the group (signal 0 via /proc),
+            // never signals it: the id could have been reused by then, which
+            // at worst keeps the mirror fenced, visibly, as a timeout.
             leftovers.push(tokio::spawn(async move {
                 let _ = child.wait().await;
                 #[cfg(unix)]
@@ -810,50 +821,9 @@ async fn run_git_bounded(
                     }
                 }
             }));
-            return Err(BoundedError::Timeout(timeout));
+            Err(BoundedError::Timeout(timeout))
         }
-    };
-    // A pipe still open after the leader exited means a helper of the group
-    // is still alive. Keep the slot fenced on it (probing only: the leader is
-    // reaped, so the pgid is no longer pinned and must not be signalled).
-    let mut pipes_held = false;
-    let mut drain = async |task: tokio::task::JoinHandle<Vec<u8>>| match tokio::time::timeout(
-        PIPE_DRAIN_GRACE,
-        task,
-    )
-    .await
-    {
-        Ok(Ok(buf)) => String::from_utf8_lossy(&buf).to_string(),
-        Ok(Err(_)) => String::new(),
-        Err(_) => {
-            pipes_held = true;
-            String::new()
-        }
-    };
-    let stdout = drain(stdout_task).await;
-    let stderr = drain(stderr_task).await;
-    if pipes_held {
-        // The leader exited but a helper kept the output open past the grace
-        // period. The leader is reaped, so the pgid is no longer pinned and is
-        // never signalled from here (it could name someone else by now). Fence
-        // on the group instead — probing only — and report the attempt as
-        // timed out; a push that did land is confirmed by the next round.
-        #[cfg(unix)]
-        if let Some(pgid) = pid.and_then(|pid| i32::try_from(pid).ok()) {
-            leftovers.push(tokio::spawn(async move {
-                while utils::process::process_group_has_running_members(pgid) {
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                }
-            }));
-        }
-        return Err(BoundedError::Timeout(PIPE_DRAIN_GRACE));
     }
-    Ok(BoundedOutput {
-        success: status.success(),
-        code: status.code(),
-        stdout,
-        stderr,
-    })
 }
 
 #[cfg(test)]

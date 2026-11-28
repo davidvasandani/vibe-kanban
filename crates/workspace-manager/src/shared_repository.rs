@@ -438,7 +438,18 @@ impl SharedRepositoryStore {
         entry: &worktree_linkage::Registration,
     ) -> Result<bool, String> {
         let index = entry.admin_dir.join("index");
-        if matches!(index.try_exists(), Ok(true)) {
+        let has_index = match index.try_exists() {
+            Ok(has_index) => has_index,
+            // Cannot tell whether there is staged state to preserve: keep.
+            Err(e) => {
+                warn!(
+                    admin_dir = %entry.admin_dir.display(),
+                    "kept a stale worktree registration: could not check its index: {e}"
+                );
+                return Ok(false);
+            }
+        };
+        if has_index {
             let (Some(name), Some(common_dir)) = (
                 entry.admin_dir.file_name(),
                 entry.admin_dir.parent().and_then(Path::parent),
@@ -455,6 +466,7 @@ impl SharedRepositoryStore {
                     "Index of worktree {} before its registration was retired",
                     entry.worktree_path().display()
                 ),
+                std::time::Duration::from_secs(30),
             ) {
                 warn!(
                     admin_dir = %entry.admin_dir.display(),
