@@ -738,13 +738,7 @@ pub async fn get_workspace_branch_status(
                 target_branch.clone(),
                 credentials.clone(),
             );
-            let via_git = tokio::task::spawn_blocking(move || {
-                git::GitService::new()
-                    .get_remote_branch_status(&repo_dir, &branch, Some(&target), &creds)
-                    .map_err(|e| e.to_string())
-            })
-            .await
-            .unwrap_or_else(|e| Err(e.to_string()));
+            let via_git = bounded_remote_status(repo_dir, branch, Some(target), creds).await;
             match via_git {
                 Ok(counts) => Ok(counts),
                 // E.g. `upstream/main`, whose remote the store has no fetch
@@ -827,13 +821,7 @@ pub async fn get_workspace_branch_status(
                 workspace.branch.clone(),
                 credentials.clone(),
             );
-            let pr_counts = tokio::task::spawn_blocking(move || {
-                git::GitService::new()
-                    .get_remote_branch_status(&repo_dir, &branch, None, &creds)
-                    .map_err(|e| e.to_string())
-            })
-            .await
-            .unwrap_or_else(|e| Err(e.to_string()));
+            let pr_counts = bounded_remote_status(repo_dir, branch, None, creds).await;
             match pr_counts {
                 Ok((ahead, behind)) => (Some(ahead), Some(behind)),
                 // The branch's upstream may be configured only in the
@@ -931,6 +919,50 @@ pub async fn get_workspace_branch_status(
 /// authoritative workspace tip even while its courtesy mirror into the
 /// checkout is pending, disabled or failing. Computed in the worktree's
 /// repository; fails if the checkout's target commit is not present there.
+/// (repository, branch, target) of a remote comparison.
+type RemoteStatusKey = (PathBuf, String, Option<String>);
+
+/// Remote comparisons in flight.
+static REMOTE_STATUS_IN_FLIGHT: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<RemoteStatusKey>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// `get_remote_branch_status` (which fetches from the forge) off the runtime
+/// workers, at most one at a time per (repository, branch, target), and
+/// waited on for a bounded time: a stalled forge or credential helper yields
+/// unknown counts — and the response still carries `source_mirror_error` —
+/// instead of a poll that never returns or polls that stack up fetches.
+async fn bounded_remote_status(
+    repo_dir: PathBuf,
+    branch: String,
+    target: Option<String>,
+    credentials: utils::github_credentials::GitHubCredentials,
+) -> Result<(usize, usize), String> {
+    let key = (repo_dir.clone(), branch.clone(), target.clone());
+    if !REMOTE_STATUS_IN_FLIGHT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(key.clone())
+    {
+        return Err("a remote comparison for this branch is still running".to_string());
+    }
+    let task = tokio::task::spawn_blocking(move || {
+        let result = git::GitService::new()
+            .get_remote_branch_status(&repo_dir, &branch, target.as_deref(), &credentials)
+            .map_err(|e| e.to_string());
+        REMOTE_STATUS_IN_FLIGHT
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&key);
+        result
+    });
+    match tokio::time::timeout(std::time::Duration::from_secs(20), task).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => Err("the remote comparison did not finish within 20s".to_string()),
+    }
+}
+
 /// Background target fetches (see `counts_against_checkout_target`), keyed by
 /// (repository, target ref).
 static TARGET_FETCHES: std::sync::LazyLock<

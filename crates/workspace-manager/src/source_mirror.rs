@@ -1010,6 +1010,29 @@ impl std::fmt::Display for BoundedError {
     }
 }
 
+/// How much of each output pipe a bounded git run keeps (the tail).
+const PIPE_KEEP_BYTES: usize = 64 * 1024;
+
+/// Read `pipe` to its end, keeping at most the last `keep` bytes.
+async fn drain_bounded<R: tokio::io::AsyncRead + Unpin>(pipe: Option<R>, keep: usize) -> Vec<u8> {
+    let mut kept = std::collections::VecDeque::with_capacity(keep.min(8192));
+    let Some(mut pipe) = pipe else {
+        return Vec::new();
+    };
+    let mut chunk = [0u8; 8192];
+    loop {
+        match pipe.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                kept.extend(&chunk[..n]);
+                let excess = kept.len().saturating_sub(keep);
+                kept.drain(..excess);
+            }
+        }
+    }
+    kept.into_iter().collect()
+}
+
 /// Run `git -C <dir> -c core.hooksPath=/dev/null <args>` in its own process
 /// group, killing the whole group if it outlives `timeout`.
 async fn run_git_bounded(
@@ -1041,21 +1064,10 @@ async fn run_git_bounded(
     let pid = child.id();
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    let read_all = |pipe: Option<tokio::process::ChildStdout>| async move {
-        let mut buf = Vec::new();
-        if let Some(mut pipe) = pipe {
-            let _ = pipe.read_to_end(&mut buf).await;
-        }
-        buf
-    };
-    let stdout_task = tokio::spawn(read_all(stdout));
-    let stderr_task = tokio::spawn(async move {
-        let mut buf = Vec::new();
-        if let Some(mut pipe) = stderr {
-            let _ = pipe.read_to_end(&mut buf).await;
-        }
-        buf
-    });
+    // Drained continuously, but only a bounded tail is kept: a chatty child
+    // (or many concurrent mirrors) must not grow memory until the deadline.
+    let stdout_task = tokio::spawn(drain_bounded(stdout, PIPE_KEEP_BYTES));
+    let stderr_task = tokio::spawn(drain_bounded(stderr, PIPE_KEEP_BYTES));
 
     // Pipes first, reaping last. The leader is reaped only after every holder
     // of its output — it and any helper it started (`pack-objects`,

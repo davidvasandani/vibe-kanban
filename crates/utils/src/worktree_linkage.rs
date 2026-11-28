@@ -353,7 +353,14 @@ pub fn registration_state(registration: &Registration) -> RegistrationState {
                 // pointer to anything else (a partial repair, a bad write) is
                 // not, and this entry may still be the only valid one.
                 Ok(true) => match fs::read_to_string(target.join("gitdir")) {
-                    Ok(back) if same_path(Path::new(back.trim()), git_entry) => {
+                    // Relative (`worktree.useRelativePaths`): relative to
+                    // the replacement's own admin directory.
+                    Ok(back)
+                        if same_path(
+                            &normalize_lexically(&target.join(back.trim())),
+                            git_entry,
+                        ) =>
+                    {
                         RegistrationState::Stale(format!(
                             "{} was re-linked to {}",
                             worktree.display(),
