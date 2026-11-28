@@ -396,14 +396,9 @@ impl SharedRepositoryStore {
         Ok(report)
     }
 
+    /// Filesystem-only, so a sweep or a delete never waits on a git child.
     fn common_dir_of(repo: &Path) -> Result<PathBuf, String> {
-        let out = GitCli::new()
-            .git(
-                repo,
-                ["rev-parse", "--path-format=absolute", "--git-common-dir"],
-            )
-            .map_err(|e| format!("{}: {e}", repo.display()))?;
-        Ok(PathBuf::from(out.trim()))
+        worktree_linkage::common_dir_of(repo).map(|(common_dir, _bare)| common_dir)
     }
 
     /// After a verified adoption: drop the entry the worktree left behind in
@@ -756,16 +751,11 @@ impl SharedRepositoryStore {
     /// would trade a working workspace for a tidy one.
     fn mirror_branch_back(&self, repo: &Repo, branch: &str) -> Result<(), WorkspaceError> {
         let store = self.path_for(repo.id);
-        let cli = GitCli::new();
-        // Local heads only: `GitCli::push` sends
-        // `refs/heads/{branch}:refs/heads/{branch}`, so a match on a
-        // remote-tracking ref would spawn a push whose source ref does not
-        // exist — a guaranteed failure, once per repository per provisioning,
-        // swallowed into a debug line. There is also nothing to mirror back: a
-        // remote-tracking ref came *from* the checkout.
-        if !Self::local_branch_commit_present(&cli, &store, branch).unwrap_or(false) {
-            return Ok(());
-        }
+        // No probe here, not even a cheap one: every git call on this path is
+        // paid by a request. `SourceMirror` checks the store's *local* head
+        // (`refs/heads/{branch}`) under a timeout after admission, and does
+        // nothing when it is absent — a remote-tracking ref came *from* the
+        // checkout, so there is nothing to mirror back.
         // Never inline: this runs on nearly every request that touches a
         // clustered workspace. `SourceMirror` runs at most one push per
         // (checkout, branch), off the request path, under a timeout, and
@@ -2675,6 +2665,8 @@ mod tests {
         }
         fs::remove_dir_all(base.join("gone")).unwrap();
         fs::remove_dir_all(base.join("other")).unwrap();
+        // A live sibling on the same storage: evidence that it is mounted.
+        fs::create_dir_all(base.join("live")).unwrap();
 
         assert_eq!(
             SharedRepositoryStore::forget_source_registrations(&checkout, &gone).unwrap(),

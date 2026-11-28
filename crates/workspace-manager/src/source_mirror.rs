@@ -399,7 +399,7 @@ async fn run_round(
     //    push. Remove it if it is provably stale; refuse without pushing if it
     //    is live. Re-run on every round, so an obstruction an operator has
     //    since removed is noticed without waiting for the branch to move.
-    if let Some(round) = preflight(&git, config, dest, branch).await {
+    if let Some(round) = preflight(dest, branch).await {
         return round;
     }
 
@@ -451,49 +451,33 @@ async fn run_round(
     }
 }
 
-async fn preflight(
-    git: &Path,
-    config: &SourceMirrorConfig,
-    dest: &Path,
-    branch: &str,
-) -> Option<Round> {
+async fn preflight(dest: &Path, branch: &str) -> Option<Round> {
     let failed = |kind, message: String| Round::Failed {
         kind,
         message,
         gate: None,
     };
-    let common_dir = match run_git_bounded(
-        git,
-        dest,
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        config.probe_timeout,
-    )
-    .await
-    {
-        Ok(out) if out.success => PathBuf::from(out.stdout.trim()),
-        Ok(out) => {
-            let stderr = excerpt(&out.stderr);
-            return Some(failed(
-                classify(&stderr),
-                format!("{} is not a usable repository: {stderr}", dest.display()),
-            ));
-        }
-        Err(e) => {
-            return Some(failed(
-                SourceMirrorFailureKind::Transient,
-                format!(
-                    "could not resolve the git directory of {}: {e}",
-                    dest.display()
-                ),
-            ));
-        }
-    };
-
+    let dest = dest.to_path_buf();
     let branch = branch.to_string();
-    let dest_display = dest.display().to_string();
-    // Filesystem walk over possibly-NFS storage: off the async workers.
+    // Filesystem reads only (no git subprocess), over possibly-NFS storage:
+    // off the async workers. Re-run on every round, so an obstruction an
+    // operator has since removed — or a main checkout switched to another
+    // branch — is noticed without waiting for either commit to move.
     let verdict =
         tokio::task::spawn_blocking(move || -> Result<(), (SourceMirrorFailureKind, String)> {
+            let dest_display = dest.display();
+            let (common_dir, bare) = worktree_linkage::common_dir_of(&dest)
+                .map_err(|e| (SourceMirrorFailureKind::Deterministic, e))?;
+            let held = format!("ref: refs/heads/{branch}");
+            if !bare
+                && std::fs::read_to_string(common_dir.join("HEAD"))
+                    .is_ok_and(|head| head.trim() == held)
+            {
+                return Err((
+                    SourceMirrorFailureKind::Deterministic,
+                    format!("branch '{branch}' is checked out in {dest_display} itself"),
+                ));
+            }
             let entries = worktree_linkage::registrations(&common_dir)
                 .map_err(|e| (SourceMirrorFailureKind::Transient, e))?;
             for entry in entries.into_iter().flatten() {
@@ -519,7 +503,7 @@ async fn preflight(
                             SourceMirrorFailureKind::Transient,
                             format!(
                                 "branch '{branch}' is held by {} in {dest_display}, whose state \
-                             could not be determined: {reason}",
+                                 could not be determined: {reason}",
                                 entry.admin_dir.display()
                             ),
                         ));
@@ -1008,6 +992,8 @@ mod tests {
             &["worktree", "add", "-q", &wt.to_string_lossy(), "vk/b"],
         );
         fs::remove_dir_all(root.path().join("ws").join("one")).unwrap();
+        // Another workspace on the same storage: evidence it is mounted.
+        fs::create_dir_all(root.path().join("ws").join("other")).unwrap();
 
         let m = mirror(SourceMirrorConfig::default());
         m.request(&store, &src, "vk/b");
@@ -1045,6 +1031,32 @@ mod tests {
             &src,
             &["worktree", "remove", "--force", &holder.to_string_lossy()],
         );
+        m.request(&store, &src, "vk/b");
+        m.wait_idle(&src, "vk/b").await;
+        assert_eq!(m.failure(&src, "vk/b"), None);
+        assert_eq!(tip(&src), tip(&store));
+    }
+
+    #[tokio::test]
+    async fn a_branch_checked_out_in_the_main_worktree_unblocks_once_switched_away() {
+        let root = TempDir::new().unwrap();
+        let (src, store) = fixture(root.path());
+        git(&src, &["checkout", "-q", "vk/b"]);
+        let tools = TempDir::new().unwrap();
+        let m = mirror(SourceMirrorConfig {
+            backoff_base: Duration::ZERO,
+            git_binary: Some(fake_git(tools.path(), "exec git \"$@\"")),
+            ..Default::default()
+        });
+
+        m.request(&store, &src, "vk/b");
+        m.wait_idle(&src, "vk/b").await;
+        let failure = m.failure(&src, "vk/b").expect("recorded");
+        assert_eq!(failure.kind, SourceMirrorFailureKind::Deterministic);
+        assert!(failure.message.contains("itself"), "{}", failure.message);
+        assert_eq!(push_count(tools.path()), 0);
+
+        git(&src, &["checkout", "-q", "main"]);
         m.request(&store, &src, "vk/b");
         m.wait_idle(&src, "vk/b").await;
         assert_eq!(m.failure(&src, "vk/b"), None);

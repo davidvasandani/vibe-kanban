@@ -340,27 +340,7 @@ pub fn registration_state(registration: &Registration) -> RegistrationState {
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => match worktree.try_exists() {
-            Ok(false) => {
-                let Some(storage) = worktree.parent().and_then(Path::parent) else {
-                    return RegistrationState::Indeterminate(format!(
-                        "{} has no parent storage directory",
-                        worktree.display()
-                    ));
-                };
-                match storage.try_exists() {
-                    Ok(true) => RegistrationState::Stale(format!(
-                        "worktree directory {} was removed",
-                        worktree.display()
-                    )),
-                    Ok(false) => RegistrationState::Indeterminate(format!(
-                        "{} is not visible (storage not mounted?)",
-                        storage.display()
-                    )),
-                    Err(e) => {
-                        RegistrationState::Indeterminate(format!("stat {}: {e}", storage.display()))
-                    }
-                }
-            }
+            Ok(false) => storage_evidence(worktree),
             Ok(true) => RegistrationState::Indeterminate(format!(
                 "{} exists but has no .git entry",
                 worktree.display()
@@ -368,6 +348,82 @@ pub fn registration_state(registration: &Registration) -> RegistrationState {
             Err(e) => RegistrationState::Indeterminate(format!("stat {}: {e}", worktree.display())),
         },
         Err(e) => RegistrationState::Indeterminate(format!("stat {}: {e}", git_entry.display())),
+    }
+}
+
+/// A worktree directory is definitely gone. Decide whether that is because it
+/// was deleted (stale) or because the storage holding it is not there right
+/// now (indeterminate).
+///
+/// Evidence of present storage: the nearest existing ancestor — the parent,
+/// or failing that the grandparent, never further — exists **and is not
+/// empty**. An unmounted mount point is an existing, empty directory, so a
+/// worktree directly under an offline mount reads as "cannot tell", not
+/// "deleted". The cost of being wrong in the other direction is only that a
+/// stale entry is kept, e.g. when the last workspace of a base directory goes.
+fn storage_evidence(worktree: &Path) -> RegistrationState {
+    let candidates = [worktree.parent(), worktree.parent().and_then(Path::parent)];
+    for dir in candidates.into_iter().flatten() {
+        match dir.try_exists() {
+            Ok(false) => continue,
+            Ok(true) => {
+                return match fs::read_dir(dir).map(|mut entries| entries.next().is_some()) {
+                    Ok(true) => RegistrationState::Stale(format!(
+                        "worktree directory {} was removed",
+                        worktree.display()
+                    )),
+                    Ok(false) => RegistrationState::Indeterminate(format!(
+                        "{} is empty (storage not mounted?)",
+                        dir.display()
+                    )),
+                    Err(e) => {
+                        RegistrationState::Indeterminate(format!("read {}: {e}", dir.display()))
+                    }
+                };
+            }
+            Err(e) => {
+                return RegistrationState::Indeterminate(format!("stat {}: {e}", dir.display()));
+            }
+        }
+    }
+    RegistrationState::Indeterminate(format!(
+        "neither the parent nor the grandparent of {} is visible (storage not mounted?)",
+        worktree.display()
+    ))
+}
+
+/// Where a repository's shared Git directory is, read from the filesystem
+/// only (no `git` subprocess, so it cannot hang on a child process), and
+/// whether the repository is bare.
+///
+/// - `<repo>/.git` is a directory: a normal checkout; that directory.
+/// - `<repo>/.git` is a `gitdir:` file: a linked worktree or submodule; its
+///   administration directory's `commondir`.
+/// - no `.git`, but `<repo>/HEAD` and `<repo>/objects`: a bare repository.
+pub fn common_dir_of(repo: &Path) -> Result<(PathBuf, bool), String> {
+    let dot_git = repo.join(".git");
+    match fs::symlink_metadata(&dot_git) {
+        Ok(meta) if meta.is_dir() => Ok((dot_git, false)),
+        Ok(_) => {
+            let contents = fs::read_to_string(&dot_git)
+                .map_err(|e| format!("read {}: {e}", dot_git.display()))?;
+            let admin = parse_gitdir_pointer(&contents, repo)
+                .ok_or_else(|| format!("{} is not a `gitdir:` pointer", dot_git.display()))?;
+            match resolve_common_dir(&admin) {
+                Ok(common) => Ok((common, false)),
+                // A submodule's gitdir has no `commondir`: it is its own.
+                Err(_) if admin.join("HEAD").exists() => Ok((admin, false)),
+                Err(e) => Err(e),
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if repo.join("HEAD").is_file() && repo.join("objects").is_dir() {
+                Ok((repo.to_path_buf(), true))
+            } else {
+                Err(format!("{} is not a git repository", repo.display()))
+            }
+        }
+        Err(e) => Err(format!("stat {}: {e}", dot_git.display())),
     }
 }
 
@@ -481,6 +537,8 @@ mod tests {
             format!("gitdir: {}\n", admin.display()),
         )
         .unwrap();
+        // Another workspace on the same storage: evidence that it is mounted.
+        fs::create_dir_all(root.join("ws").join("sibling")).unwrap();
         (common, admin, worktree)
     }
 
@@ -530,6 +588,40 @@ mod tests {
         ));
         assert!(!remove_stale_registration(&reg).unwrap());
         assert!(admin.exists());
+    }
+
+    #[test]
+    fn an_empty_mount_point_is_indeterminate_never_stale() {
+        let root = TempDir::new().unwrap();
+        let (common, admin, _) = source_registration(root.path());
+        // The worktree lives directly under an offline mount: the mount point
+        // directory exists, empty.
+        fs::remove_dir_all(root.path().join("ws")).unwrap();
+        fs::create_dir_all(root.path().join("ws").join("one")).unwrap();
+        let reg = only(&common);
+        assert!(matches!(
+            registration_state(&reg),
+            RegistrationState::Indeterminate(_)
+        ));
+        assert!(!remove_stale_registration(&reg).unwrap());
+        assert!(admin.exists());
+    }
+
+    #[test]
+    fn common_dir_is_resolved_without_git() {
+        let root = TempDir::new().unwrap();
+        let (common, _, worktree) = source_registration(root.path());
+        let checkout = common.parent().unwrap();
+        assert_eq!(common_dir_of(checkout).unwrap(), (common.clone(), false));
+        assert_eq!(
+            common_dir_of(&worktree).unwrap(),
+            (fs::canonicalize(&common).unwrap(), false)
+        );
+        let bare = root.path().join("bare");
+        fs::create_dir_all(bare.join("objects")).unwrap();
+        fs::write(bare.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        assert_eq!(common_dir_of(&bare).unwrap(), (bare.clone(), true));
+        assert!(common_dir_of(&root.path().join("nothing")).is_err());
     }
 
     #[test]

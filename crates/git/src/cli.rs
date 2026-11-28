@@ -1293,15 +1293,22 @@ impl GitCli {
     /// Files added by `HEAD` (relative to its first parent, or the empty tree
     /// for a root commit) and their total size in bytes. Submodule entries are
     /// counted as files but contribute no bytes.
+    ///
+    /// Two output-only commands (no stdin), so a commit with tens of thousands
+    /// of files cannot deadlock on a full pipe.
     pub fn head_commit_added_size(
         &self,
         worktree_path: &Path,
     ) -> Result<(usize, u64), GitCliError> {
+        use std::collections::HashSet;
+
+        // `-z`: `:<modes> <shas> A\0<path>\0` per entry, paths unquoted.
         let raw = self.git(
             worktree_path,
             [
                 "diff-tree",
                 "-r",
+                "-z",
                 "--root",
                 "--no-commit-id",
                 "--no-renames",
@@ -1309,37 +1316,28 @@ impl GitCli {
                 "HEAD",
             ],
         )?;
-        let mut files = 0usize;
-        let mut blobs = Vec::new();
-        for line in raw.lines() {
-            // `:<old mode> <new mode> <old sha> <new sha> A\t<path>`
-            let Some(meta) = line.strip_prefix(':') else {
-                continue;
-            };
-            let fields: Vec<&str> = meta.split_whitespace().collect();
-            if fields.len() < 4 {
+        let mut added: HashSet<&str> = HashSet::new();
+        let mut fields = raw.split('\0');
+        while let Some(meta) = fields.next() {
+            if !meta.starts_with(':') {
                 continue;
             }
-            files += 1;
-            if fields[1] != "160000" {
-                blobs.push(fields[3]);
+            if let Some(path) = fields.next() {
+                added.insert(path);
             }
         }
-        if blobs.is_empty() {
-            return Ok((files, 0));
+        if added.is_empty() {
+            return Ok((0, 0));
         }
-        let input = blobs.join("\n") + "\n";
-        let sizes = self.git_with_stdin(
-            worktree_path,
-            ["cat-file", "--batch-check=%(objectsize)"],
-            None,
-            input.as_bytes(),
-        )?;
-        let bytes = sizes
-            .lines()
-            .filter_map(|l| l.trim().parse::<u64>().ok())
+        // `-l` adds the blob size: `<mode> <type> <sha> <size>\t<path>\0`.
+        let tree = self.git(worktree_path, ["ls-tree", "-r", "-l", "-z", "HEAD"])?;
+        let bytes = tree
+            .split('\0')
+            .filter_map(|entry| entry.split_once('\t'))
+            .filter(|(_, path)| added.contains(path))
+            .filter_map(|(meta, _)| meta.split_whitespace().nth(3)?.parse::<u64>().ok())
             .sum();
-        Ok((files, bytes))
+        Ok((added.len(), bytes))
     }
 
     fn git_with_stdin<I, S>(
