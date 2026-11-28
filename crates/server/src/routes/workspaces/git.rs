@@ -454,7 +454,20 @@ pub async fn merge_workspace(
                     ["update-ref", &branch_ref, &squash, &pinned],
                     None,
                     deadline,
-                )
+                )?;
+                // Only now, with the authoritative branch moved, the courtesy
+                // copy in the checkout follows (if it lagged and is not
+                // checked out); later mirror pushes then fast-forward.
+                let branch = branch_ref.trim_start_matches("refs/heads/");
+                if let Err(e) = git::GitService::new().advance_lagging_copy(
+                    &checkout_dir,
+                    branch,
+                    &pinned,
+                    &squash,
+                ) {
+                    tracing::warn!("left the checkout's copy of {branch} as is: {e}");
+                }
+                Ok::<_, git::GitCliError>(String::new())
             })
             .await;
             if !matches!(moved, Ok(Ok(_))) {
@@ -752,19 +765,14 @@ pub async fn get_workspace_branch_status(
                     // Comparing the target with itself: a fetch of its remote
                     // through the usual credentialed path that needs nothing
                     // but the target ref (counts ignored).
-                    // Off the runtime workers (a slow remote must not pin one).
-                    let (checkout, target, creds) = (
+                    // Bounded and single-flight, like the primary comparison.
+                    let refreshed = bounded_remote_status(
                         repo.path.clone(),
                         target_branch.clone(),
+                        Some(target_branch.clone()),
                         credentials.clone(),
-                    );
-                    let refreshed = tokio::task::spawn_blocking(move || {
-                        git::GitService::new()
-                            .get_remote_branch_status(&checkout, &target, Some(&target), &creds)
-                            .map_err(|e| e.to_string())
-                    })
-                    .await
-                    .unwrap_or_else(|e| Err(e.to_string()));
+                    )
+                    .await;
                     match refreshed {
                         // Unknown rather than a comparison against a cached,
                         // possibly stale tracking ref.
@@ -832,18 +840,14 @@ pub async fn get_workspace_branch_status(
                     // credentialed fetch this status always did there); its
                     // own counts may rest on a stale workspace copy, so they
                     // are ignored in favour of the store's branch below.
-                    let (checkout, branch, creds) = (
+                    let refreshed = bounded_remote_status(
                         repo.path.clone(),
                         workspace.branch.clone(),
+                        None,
                         credentials.clone(),
-                    );
-                    let refreshed = tokio::task::spawn_blocking(move || {
-                        git::GitService::new()
-                            .get_remote_branch_status(&checkout, &branch, None, &creds)
-                            .is_ok()
-                    })
+                    )
                     .await
-                    .unwrap_or(false);
+                    .is_ok();
                     let (worktree, checkout, branch) = (
                         worktree_path.clone(),
                         repo.path.clone(),

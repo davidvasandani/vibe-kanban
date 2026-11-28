@@ -742,6 +742,45 @@ impl GitService {
         }
     }
 
+    /// After a pinned merge whose authoritative branch has moved to `new_tip`:
+    /// move `branch` in `base_path` (a courtesy copy) there too, from a value
+    /// it is verified to hold — the pinned tip or an ancestor of it (a copy
+    /// that lagged) — and only if no worktree has it checked out. Returns
+    /// whether it moved.
+    pub fn advance_lagging_copy(
+        &self,
+        base_path: &Path,
+        branch: &str,
+        pinned: &str,
+        new_tip: &str,
+    ) -> Result<bool, GitServiceError> {
+        let repo = self.open_repo(base_path)?;
+        let refname = format!("refs/heads/{branch}");
+        let new_tip = git2::Oid::from_str(new_tip)?;
+        match self.squash_cas_base(base_path, &repo, branch, pinned) {
+            Some(Some(observed)) => {
+                repo.reference_matching(
+                    &refname,
+                    new_tip,
+                    true,
+                    observed,
+                    "Follow the workspace branch after squash merge",
+                )?;
+                Ok(true)
+            }
+            Some(None) => {
+                repo.reference(
+                    &refname,
+                    new_tip,
+                    false,
+                    "Follow the workspace branch after squash merge",
+                )?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
     /// [`Self::merge_changes`] that merges exactly `expected_task_tip` (when
     /// given) rather than whatever `task_branch_name` points at by the time it
     /// is read: the divergence check and the squash both use that commit, and
@@ -821,35 +860,12 @@ impl GitService {
                 // tip, so a commit that landed meanwhile is not overwritten.
                 let task_refname = format!("refs/heads/{task_branch_name}");
                 match expected_task_tip {
-                    Some(tip) => {
-                        // The merge itself is done; a branch that moved on
-                        // keeps its newer commit for the next merge.
-                        match self.squash_cas_base(
-                            base_worktree_path,
-                            &base_repo,
-                            task_branch_name,
-                            tip,
-                        ) {
-                            Some(observed) => {
-                                let old = observed.map(|o| o.to_string()).unwrap_or_else(|| {
-                                    "0000000000000000000000000000000000000000".to_string()
-                                });
-                                if let Err(e) = git_cli.git(
-                                    base_worktree_path,
-                                    ["update-ref", task_refname.as_str(), sha.as_str(), &old],
-                                ) {
-                                    tracing::warn!(
-                                        "left {task_refname} as is after merging {tip}: it moved \
-                                         on ({e})"
-                                    );
-                                }
-                            }
-                            None => tracing::warn!(
-                                "left {task_refname} as is after merging {tip}: it is not an \
-                                 ancestor of the merged commit"
-                            ),
-                        }
-                    }
+                    // Pinned (a clustered workspace): the task branch here is
+                    // only a courtesy copy. It is moved by the caller with
+                    // `advance_lagging_copy`, after the authoritative branch
+                    // has moved — never before, or a commit that landed
+                    // meanwhile would leave the copy off the real history.
+                    Some(_) => {}
                     None => {
                         git_cli
                             .update_ref(base_worktree_path, &task_refname, &sha)
@@ -901,38 +917,12 @@ impl GitService {
                 // work can continue from the merged state without conflicts.
                 let task_refname = format!("refs/heads/{task_branch_name}");
                 match expected_task_tip {
-                    Some(tip) => {
-                        let moved = match self.squash_cas_base(
-                            base_worktree_path,
-                            &base_repo,
-                            task_branch_name,
-                            tip,
-                        ) {
-                            Some(Some(observed)) => base_repo
-                                .reference_matching(
-                                    &task_refname,
-                                    squash_commit_id,
-                                    true,
-                                    observed,
-                                    "Reset task branch after squash merge",
-                                )
-                                .map(|_| ()),
-                            Some(None) => base_repo
-                                .reference(
-                                    &task_refname,
-                                    squash_commit_id,
-                                    false,
-                                    "Reset task branch after squash merge",
-                                )
-                                .map(|_| ()),
-                            None => Err(git2::Error::from_str(
-                                "it is not an ancestor of the merged commit",
-                            )),
-                        };
-                        if let Err(e) = moved {
-                            tracing::warn!("left {task_refname} as is after merging {tip}: {e}");
-                        }
-                    }
+                    // Pinned (a clustered workspace): the task branch here is
+                    // only a courtesy copy. It is moved by the caller with
+                    // `advance_lagging_copy`, after the authoritative branch
+                    // has moved — never before, or a commit that landed
+                    // meanwhile would leave the copy off the real history.
+                    Some(_) => {}
                     None => {
                         base_repo.reference(
                             &task_refname,

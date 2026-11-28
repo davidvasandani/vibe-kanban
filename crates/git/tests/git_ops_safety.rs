@@ -1951,3 +1951,60 @@ fn a_pinned_merge_into_an_unchecked_out_target_updates_the_base_repository() {
     assert_ne!(before, after);
     assert_eq!(after.trim(), sha);
 }
+
+#[test]
+fn a_lagging_courtesy_copy_follows_but_a_diverged_or_checked_out_one_does_not() {
+    let td = TempDir::new().unwrap();
+    let (repo_path, worktree_path) = setup_repo_with_worktree(&td);
+    let cli = GitCli::new();
+    let rev = |r: &str| {
+        cli.git(&repo_path, ["rev-parse", r])
+            .unwrap()
+            .trim()
+            .to_string()
+    };
+    let pinned = rev("feature");
+    let new_tip = rev("main");
+    // A copy that lagged at an ancestor of the pinned tip (not checked out).
+    cli.git(&repo_path, ["branch", "lagging", &format!("{pinned}~1")])
+        .unwrap();
+    // A copy that diverged: a commit off `main` that `feature` lacks.
+    let tree = rev("main^{tree}");
+    let off = cli
+        .git(
+            &repo_path,
+            [
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit-tree",
+                &tree,
+                "-p",
+                "main",
+                "-m",
+                "elsewhere",
+            ],
+        )
+        .unwrap();
+    cli.git(&repo_path, ["branch", "diverged", off.trim()])
+        .unwrap();
+
+    let s = GitService::new();
+    assert!(
+        s.advance_lagging_copy(&repo_path, "lagging", &pinned, &new_tip)
+            .unwrap()
+    );
+    assert_eq!(rev("lagging"), new_tip);
+    assert!(
+        !s.advance_lagging_copy(&repo_path, "diverged", &pinned, &new_tip)
+            .unwrap()
+    );
+    // `feature` is checked out by the worktree: left alone.
+    assert!(
+        !s.advance_lagging_copy(&repo_path, "feature", &pinned, &new_tip)
+            .unwrap()
+    );
+    assert_eq!(rev("feature"), pinned);
+    let _ = worktree_path;
+}
