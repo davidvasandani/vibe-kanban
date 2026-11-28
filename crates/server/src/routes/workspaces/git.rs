@@ -761,6 +761,18 @@ pub async fn get_workspace_branch_status(
                 // mapping for: compare the workspace branch against the
                 // checkout's remote-tracking ref instead (bounded, off-worker).
                 Err(_) => {
+                    // Refresh the target in the checkout first (the same
+                    // credentialed fetch this status always did there),
+                    // whether or not its copy of the workspace branch is
+                    // current; its own counts are ignored.
+                    if secondary.is_none() {
+                        let _ = deployment.git().get_remote_branch_status(
+                            &repo.path,
+                            &workspace.branch,
+                            Some(&target_branch),
+                            &credentials,
+                        );
+                    }
                     let (worktree, checkout, branch, target) = (
                         worktree_path.clone(),
                         repo.path.clone(),
@@ -781,32 +793,9 @@ pub async fn get_workspace_branch_status(
                 workspace.branch.clone(),
                 target_branch.clone(),
             );
-            let store_tip = head_oid.clone();
             tokio::task::spawn_blocking(move || {
-                counts_against_checkout_target(&worktree, &checkout, &branch, &target).or_else(
-                    |first| {
-                        // The store may lack a newer target commit. If the
-                        // checkout's copy of the workspace branch is verifiably
-                        // the store's tip, the checkout can compare both.
-                        if git::GitCli::has_stuck_command(&checkout) {
-                            return Err(first);
-                        }
-                        let checkout_tip = git::GitCli::new()
-                            .resolve_commit_within(
-                                &checkout,
-                                &format!("refs/heads/{branch}"),
-                                std::time::Duration::from_secs(5),
-                            )
-                            .ok()
-                            .flatten();
-                        if store_tip.is_none() || checkout_tip != store_tip {
-                            return Err(first);
-                        }
-                        git::GitService::new()
-                            .get_branch_status(&checkout, &branch, &target)
-                            .map_err(|e| e.to_string())
-                    },
-                )
+                // Bounded throughout; it brings a missing target commit in.
+                counts_against_checkout_target(&worktree, &checkout, &branch, &target)
             })
             .await
             .unwrap_or_else(|e| Err(e.to_string()))
@@ -942,27 +931,52 @@ fn counts_against_checkout_target(
     let cli = git::GitCli::new();
     // As a branch — local first, then remote-tracking — the way
     // `GitService::find_branch` resolves it; never a same-named tag.
-    let mut tip = None;
+    let mut found = None;
     for candidate in [
         format!("refs/heads/{target}"),
         format!("refs/remotes/{target}"),
     ] {
-        if let Some(found) = cli
+        if let Some(oid) = cli
             .resolve_commit_within(checkout, &candidate, deadline)
             .map_err(|e| e.to_string())?
         {
-            tip = Some(found);
+            found = Some((candidate, oid));
             break;
         }
     }
-    let tip = tip.ok_or_else(|| format!("'{target}' was not found in {}", checkout.display()))?;
-    cli.git_within(
-        worktree,
-        ["cat-file", "-e", &format!("{tip}^{{commit}}")],
-        None,
-        deadline,
-    )
-    .map_err(|_| format!("{tip} is not present in the workspace's repository"))?;
+    let (target_ref, tip) =
+        found.ok_or_else(|| format!("'{target}' was not found in {}", checkout.display()))?;
+    let present = |cli: &git::GitCli| {
+        cli.git_within(
+            worktree,
+            ["cat-file", "-e", &format!("{tip}^{{commit}}")],
+            None,
+            deadline,
+        )
+        .is_ok()
+    };
+    if !present(&cli) {
+        // The workspace's repository (the shared store, for a clustered
+        // workspace) lacks the checkout's current target commit: fetch just
+        // that ref's objects (FETCH_HEAD only, no ref moves; bounded).
+        let _ = cli.git_within(
+            worktree,
+            [
+                "fetch",
+                "--no-tags",
+                "--no-write-fetch-head",
+                &checkout.to_string_lossy(),
+                &target_ref,
+            ],
+            None,
+            std::time::Duration::from_secs(30),
+        );
+        if !present(&cli) {
+            return Err(format!(
+                "{tip} is not present in the workspace's repository"
+            ));
+        }
+    }
     let out = cli
         .git_within(
             worktree,
