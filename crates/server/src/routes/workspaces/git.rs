@@ -680,18 +680,17 @@ pub async fn get_workspace_branch_status(
 
         let has_uncommitted_changes = uncommitted_count.map(|c| c > 0);
 
-        // Resolved from the worktree's own repository first (for a clustered
-        // workspace that is the shared store, which every branch reaches
-        // before the background mirror copies it to the checkout), then the
-        // registered checkout; failing both, assume local rather than failing
-        // the response and hiding `source_mirror_error` with it.
+        // The target's kind comes from the registered checkout — the same
+        // local-first resolution merge and rebase use — with the worktree's
+        // repository as the fallback; failing both, assume local rather than
+        // failing the response and hiding `source_mirror_error` with it.
         let is_target_remote = deployment
             .git()
-            .is_remote_branch(&worktree_path, &target_branch)
+            .is_remote_branch(&repo.path, &target_branch)
             .or_else(|_| {
                 deployment
                     .git()
-                    .is_remote_branch(&repo.path, &target_branch)
+                    .is_remote_branch(&worktree_path, &target_branch)
             })
             .unwrap_or(false);
 
@@ -986,6 +985,12 @@ fn counts_against_checkout_target(
             .and_then(|(common, _)| std::fs::canonicalize(common).ok())
             .unwrap_or_else(|| worktree.to_path_buf());
         let key = (repository.clone(), target_ref.clone());
+        if git::GitCli::has_stuck_command(&repository) {
+            return Err(format!(
+                "an earlier fetch into {} has not exited (stalled storage?)",
+                repository.display()
+            ));
+        }
         let started = {
             let mut fetches = TARGET_FETCHES.lock().unwrap_or_else(|e| e.into_inner());
             match fetches.get(&key) {

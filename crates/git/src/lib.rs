@@ -705,6 +705,29 @@ impl GitService {
         )
     }
 
+    /// For a pinned merge: the value to compare-and-swap the base repository's
+    /// task branch from. `Some(Some(observed))` when it is the pinned tip or an
+    /// ancestor of it (a courtesy copy that lagged — moving it to the squash
+    /// keeps later mirror pushes fast-forward), `Some(None)` when it does not
+    /// exist, `None` when it points elsewhere (moved on: leave it).
+    fn squash_cas_base(
+        repo: &Repository,
+        refname: &str,
+        pinned: &str,
+    ) -> Option<Option<git2::Oid>> {
+        let pinned = git2::Oid::from_str(pinned).ok()?;
+        match repo.refname_to_id(refname) {
+            Ok(observed) if observed == pinned => Some(Some(observed)),
+            Ok(observed) => repo
+                .graph_descendant_of(pinned, observed)
+                .ok()
+                .filter(|is| *is)
+                .map(|_| Some(observed)),
+            Err(e) if e.code() == git2::ErrorCode::NotFound => Some(None),
+            Err(_) => None,
+        }
+    }
+
     /// [`Self::merge_changes`] that merges exactly `expected_task_tip` (when
     /// given) rather than whatever `task_branch_name` points at by the time it
     /// is read: the divergence check and the squash both use that commit, and
@@ -787,13 +810,25 @@ impl GitService {
                     Some(tip) => {
                         // The merge itself is done; a branch that moved on
                         // keeps its newer commit for the next merge.
-                        if let Err(e) = git_cli.git(
-                            base_worktree_path,
-                            ["update-ref", task_refname.as_str(), sha.as_str(), tip],
-                        ) {
-                            tracing::warn!(
-                                "left {task_refname} as is after merging {tip}: it moved on ({e})"
-                            );
+                        match Self::squash_cas_base(&base_repo, &task_refname, tip) {
+                            Some(observed) => {
+                                let old = observed.map(|o| o.to_string()).unwrap_or_else(|| {
+                                    "0000000000000000000000000000000000000000".to_string()
+                                });
+                                if let Err(e) = git_cli.git(
+                                    base_worktree_path,
+                                    ["update-ref", task_refname.as_str(), sha.as_str(), &old],
+                                ) {
+                                    tracing::warn!(
+                                        "left {task_refname} as is after merging {tip}: it moved \
+                                         on ({e})"
+                                    );
+                                }
+                            }
+                            None => tracing::warn!(
+                                "left {task_refname} as is after merging {tip}: it is not an \
+                                 ancestor of the merged commit"
+                            ),
                         }
                     }
                     None => {
@@ -848,16 +883,30 @@ impl GitService {
                 let task_refname = format!("refs/heads/{task_branch_name}");
                 match expected_task_tip {
                     Some(tip) => {
-                        if let Err(e) = base_repo.reference_matching(
-                            &task_refname,
-                            squash_commit_id,
-                            true,
-                            git2::Oid::from_str(tip)?,
-                            "Reset task branch after squash merge",
-                        ) {
-                            tracing::warn!(
-                                "left {task_refname} as is after merging {tip}: it moved on ({e})"
-                            );
+                        let moved = match Self::squash_cas_base(&base_repo, &task_refname, tip) {
+                            Some(Some(observed)) => base_repo
+                                .reference_matching(
+                                    &task_refname,
+                                    squash_commit_id,
+                                    true,
+                                    observed,
+                                    "Reset task branch after squash merge",
+                                )
+                                .map(|_| ()),
+                            Some(None) => base_repo
+                                .reference(
+                                    &task_refname,
+                                    squash_commit_id,
+                                    false,
+                                    "Reset task branch after squash merge",
+                                )
+                                .map(|_| ()),
+                            None => Err(git2::Error::from_str(
+                                "it is not an ancestor of the merged commit",
+                            )),
+                        };
+                        if let Err(e) = moved {
+                            tracing::warn!("left {task_refname} as is after merging {tip}: {e}");
                         }
                     }
                     None => {

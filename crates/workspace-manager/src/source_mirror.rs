@@ -1112,7 +1112,8 @@ async fn run_git_bounded(
     }
 }
 
-#[cfg(test)]
+// The fixtures run generated `/bin/sh` git wrappers.
+#[cfg(all(test, unix))]
 mod tests {
     use std::{fs, process::Command};
 
@@ -1280,6 +1281,8 @@ mod tests {
         );
     }
 
+    // Reads `/proc` to prove the grandchild is gone.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_hung_push_is_killed_with_its_children_within_the_timeout() {
         let root = TempDir::new().unwrap();

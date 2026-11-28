@@ -1829,6 +1829,8 @@ fn snapshot_index_keeps_staged_only_content_reachable() {
     assert_eq!(staged, "staged\n");
 }
 
+// The alias runs `sleep` through `/bin/sh`.
+#[cfg(unix)]
 #[test]
 fn git_within_kills_a_hung_command_at_its_deadline() {
     let td = TempDir::new().unwrap();
