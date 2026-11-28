@@ -923,12 +923,10 @@ pub async fn get_workspace_branch_status(
 /// authoritative workspace tip even while its courtesy mirror into the
 /// checkout is pending, disabled or failing. Computed in the worktree's
 /// repository; fails if the checkout's target commit is not present there.
-/// (repository, branch, target) of a remote comparison.
-type RemoteStatusKey = (PathBuf, String, Option<String>);
-
-/// Remote comparisons in flight.
+/// Repositories (canonical common git directories) with a remote comparison —
+/// and so a fetch — in flight.
 static REMOTE_STATUS_IN_FLIGHT: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashSet<RemoteStatusKey>>,
+    std::sync::Mutex<std::collections::HashSet<PathBuf>>,
 > = std::sync::LazyLock::new(Default::default);
 
 /// `get_remote_branch_status` (which fetches from the forge) off the runtime
@@ -942,13 +940,30 @@ async fn bounded_remote_status(
     target: Option<String>,
     credentials: utils::github_credentials::GitHubCredentials,
 ) -> Result<(usize, usize), String> {
-    let key = (repo_dir.clone(), branch.clone(), target.clone());
+    // One fetch at a time per *repository* (several workspaces share one
+    // store, and every comparison fetches into the same remote-tracking
+    // refs): keyed by the canonical common git directory, resolved off-worker.
+    let probe_dir = repo_dir.clone();
+    let repository = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::task::spawn_blocking(move || {
+            utils::worktree_linkage::common_dir_of(&probe_dir)
+                .ok()
+                .and_then(|(common, _)| std::fs::canonicalize(common).ok())
+                .unwrap_or(probe_dir)
+        }),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .ok_or_else(|| "the repository did not answer in time".to_string())?;
+    let key = repository;
     if !REMOTE_STATUS_IN_FLIGHT
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(key.clone())
     {
-        return Err("a remote comparison for this branch is still running".to_string());
+        return Err("a remote fetch into this repository is still running".to_string());
     }
     let task = tokio::task::spawn_blocking(move || {
         let result = git::GitService::new()

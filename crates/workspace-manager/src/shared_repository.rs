@@ -523,16 +523,22 @@ impl SharedRepositoryStore {
         }
         // A detached HEAD may name a commit no ref reaches: pin it too, so gc
         // cannot take it once the entry is out of git's view.
-        if entry.head_branch.is_none()
-            && let Ok(head) = std::fs::read_to_string(entry.admin_dir.join("HEAD"))
-            && let head = head.trim()
-            && head.len() >= 40
-            && head.bytes().all(|b| b.is_ascii_hexdigit())
-            && let (Some(name), Some(common_dir)) = (
+        if entry.head_branch.is_none() {
+            // Detached: the commit must be read and pinned, or the entry stays.
+            let head = std::fs::read_to_string(entry.admin_dir.join("HEAD"));
+            let head = head.as_deref().map(str::trim).unwrap_or_default();
+            let is_oid = head.len() >= 40 && head.bytes().all(|b| b.is_ascii_hexdigit());
+            let (Some(name), Some(common_dir), true) = (
                 entry.admin_dir.file_name(),
                 entry.admin_dir.parent().and_then(Path::parent),
-            )
-        {
+                is_oid,
+            ) else {
+                warn!(
+                    admin_dir = %entry.admin_dir.display(),
+                    "kept a stale worktree registration: could not read its detached HEAD"
+                );
+                return false;
+            };
             let refname = format!(
                 "refs/vk-retired/{}-{}-head",
                 name.to_string_lossy(),
