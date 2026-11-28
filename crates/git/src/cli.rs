@@ -1294,7 +1294,8 @@ impl GitCli {
     /// for a root commit) and their total size in bytes. Submodule entries are
     /// counted as files but contribute no bytes.
     ///
-    /// Reads only the blobs the commit adds, never the whole tree.
+    /// Reads only the blobs the commit adds, never the whole tree. Beyond
+    /// 8192 added blobs the byte count is a lower bound.
     pub fn head_commit_added_size(
         &self,
         worktree_path: &Path,
@@ -1336,10 +1337,14 @@ impl GitCli {
             }
         }
         // Sizes of exactly those blobs, in batches small enough that neither
-        // the stdin we write nor the output git writes back can fill a pipe
-        // (`git_with_stdin` writes all input before reading any output).
-        const BATCH: usize = 1000;
-        let blobs: Vec<&str> = blobs.into_iter().collect();
+        // the stdin we write (64 x 41 B) nor git's reply exceeds the smallest
+        // pipe buffer POSIX allows (4 KiB): `git_with_stdin` writes all input
+        // before reading any output, so a larger batch could deadlock. At most
+        // `MAX_SIZED_BLOBS` are sized; past that the byte count is a lower
+        // bound, and the file count alone already crosses any sane threshold.
+        const BATCH: usize = 64;
+        const MAX_SIZED_BLOBS: usize = 8192;
+        let blobs: Vec<&str> = blobs.into_iter().take(MAX_SIZED_BLOBS).collect();
         let mut bytes = 0u64;
         for batch in blobs.chunks(BATCH) {
             let input = batch.join("\n") + "\n";

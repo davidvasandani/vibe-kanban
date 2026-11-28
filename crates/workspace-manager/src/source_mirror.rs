@@ -822,13 +822,23 @@ async fn run_git_bounded(
     };
     let stdout = drain(stdout_task).await;
     let stderr = drain(stderr_task).await;
-    #[cfg(unix)]
-    if pipes_held && let Some(pgid) = pid.and_then(|pid| i32::try_from(pid).ok()) {
-        leftovers.push(tokio::spawn(async move {
-            while utils::process::process_group_has_running_members(pgid) {
-                tokio::time::sleep(Duration::from_secs(1)).await;
+    if pipes_held {
+        // The leader exited but a helper kept the output open past the grace
+        // period. While that helper lives the group exists, so its id cannot
+        // have been reused: kill it, fence on it, and report the attempt as
+        // timed out (a push that did land is confirmed by the next round).
+        #[cfg(unix)]
+        if let Some(pgid) = pid.and_then(|pid| i32::try_from(pid).ok()) {
+            if utils::process::process_group_has_running_members(pgid) {
+                utils::process::kill_process_group_now(pgid as u32);
             }
-        }));
+            leftovers.push(tokio::spawn(async move {
+                while utils::process::process_group_has_running_members(pgid) {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }));
+        }
+        return Err(BoundedError::Timeout(PIPE_DRAIN_GRACE));
     }
     Ok(BoundedOutput {
         success: status.success(),

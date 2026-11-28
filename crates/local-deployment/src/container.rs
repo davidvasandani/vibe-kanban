@@ -2207,6 +2207,7 @@ impl LocalContainerService {
             }
         };
 
+        let mut seen_before_cleanup = Vec::new();
         let cleanup_succeeded = if workspace_inputs.is_empty() {
             tracing::warn!(
                 "No repositories found for workspace {}, cleaning up workspace directory only",
@@ -2224,6 +2225,12 @@ impl LocalContainerService {
                 true
             }
         } else {
+            // Evidence for forgetting source registrations afterwards: which
+            // clustered worktrees were *visibly present* before cleanup. Only
+            // a worktree seen present and then gone was deleted by us; one
+            // that was already invisible may sit on storage that is offline.
+            seen_before_cleanup =
+                Self::clustered_worktrees_present(&workspace_dir, &workspace_inputs).await;
             match WorkspaceManager::cleanup_workspace(&workspace_dir, &workspace_inputs).await {
                 Ok(()) => true,
                 Err(error) => {
@@ -2251,7 +2258,8 @@ impl LocalContainerService {
             return;
         }
 
-        Self::forget_source_registrations(&workspace_dir, &workspace_inputs).await;
+        Self::forget_source_registrations(&workspace_dir, &workspace_inputs, &seen_before_cleanup)
+            .await;
 
         if let Err(error) = Workspace::mark_worktree_deleted(&self.db.pool, workspace.id).await {
             tracing::warn!(
@@ -2388,7 +2396,11 @@ impl LocalContainerService {
     /// clustering and later adopted into the store may still have an entry in
     /// the operator's checkout, holding its branch. Remove that entry too
     /// (VAS-1140). Best effort: a failure is logged, never fatal.
-    async fn forget_source_registrations(workspace_dir: &Path, inputs: &[RepoWorkspaceInput]) {
+    async fn forget_source_registrations(
+        workspace_dir: &Path,
+        inputs: &[RepoWorkspaceInput],
+        seen_before_cleanup: &[PathBuf],
+    ) {
         for input in inputs {
             if input.git_path == input.repo.path {
                 // Not clustered: `cleanup_workspace` already unregistered it
@@ -2397,6 +2409,11 @@ impl LocalContainerService {
             }
             let source = input.repo.path.clone();
             let worktree = workspace_dir.join(&input.repo.name);
+            if !seen_before_cleanup.contains(&worktree) {
+                // Not seen present before cleanup, so its absence now is no
+                // proof we deleted it: keep the registration.
+                continue;
+            }
             let task = tokio::task::spawn_blocking(move || {
                 SharedRepositoryStore::forget_source_registrations(&source, &worktree)
             });
@@ -2426,6 +2443,32 @@ impl LocalContainerService {
                 ),
                 Err(e) => tracing::warn!("source registration cleanup task failed: {e}"),
             }
+        }
+    }
+
+    /// The clustered worktrees of `inputs` that definitely exist right now.
+    /// Bounded; anything that cannot be confirmed in time is left out.
+    async fn clustered_worktrees_present(
+        workspace_dir: &Path,
+        inputs: &[RepoWorkspaceInput],
+    ) -> Vec<PathBuf> {
+        let candidates: Vec<PathBuf> = inputs
+            .iter()
+            .filter(|input| input.git_path != input.repo.path)
+            .map(|input| workspace_dir.join(&input.repo.name))
+            .collect();
+        if candidates.is_empty() {
+            return candidates;
+        }
+        let probe = tokio::task::spawn_blocking(move || {
+            candidates
+                .into_iter()
+                .filter(|path| matches!(path.join(".git").try_exists(), Ok(true)))
+                .collect::<Vec<_>>()
+        });
+        match tokio::time::timeout(Duration::from_secs(30), probe).await {
+            Ok(Ok(present)) => present,
+            _ => Vec::new(),
         }
     }
 
