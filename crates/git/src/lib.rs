@@ -710,13 +710,27 @@ impl GitService {
     /// ancestor of it (a courtesy copy that lagged — moving it to the squash
     /// keeps later mirror pushes fast-forward), `Some(None)` when it does not
     /// exist, `None` when it points elsewhere (moved on: leave it).
+    ///
+    /// Also `None` when the branch is checked out anywhere in the base
+    /// repository (an operator's checkout of the courtesy copy): moving a
+    /// checked-out ref under its worktree would make its files read as local
+    /// changes against the new tip.
     fn squash_cas_base(
+        &self,
+        base_worktree_path: &Path,
         repo: &Repository,
-        refname: &str,
+        branch: &str,
         pinned: &str,
     ) -> Option<Option<git2::Oid>> {
         let pinned = git2::Oid::from_str(pinned).ok()?;
-        match repo.refname_to_id(refname) {
+        if !matches!(
+            self.find_checkout_path_for_branch(base_worktree_path, branch),
+            Ok(None)
+        ) {
+            return None;
+        }
+        let refname = format!("refs/heads/{branch}");
+        match repo.refname_to_id(&refname) {
             Ok(observed) if observed == pinned => Some(Some(observed)),
             Ok(observed) => repo
                 .graph_descendant_of(pinned, observed)
@@ -810,7 +824,12 @@ impl GitService {
                     Some(tip) => {
                         // The merge itself is done; a branch that moved on
                         // keeps its newer commit for the next merge.
-                        match Self::squash_cas_base(&base_repo, &task_refname, tip) {
+                        match self.squash_cas_base(
+                            base_worktree_path,
+                            &base_repo,
+                            task_branch_name,
+                            tip,
+                        ) {
                             Some(observed) => {
                                 let old = observed.map(|o| o.to_string()).unwrap_or_else(|| {
                                     "0000000000000000000000000000000000000000".to_string()
@@ -883,7 +902,12 @@ impl GitService {
                 let task_refname = format!("refs/heads/{task_branch_name}");
                 match expected_task_tip {
                     Some(tip) => {
-                        let moved = match Self::squash_cas_base(&base_repo, &task_refname, tip) {
+                        let moved = match self.squash_cas_base(
+                            base_worktree_path,
+                            &base_repo,
+                            task_branch_name,
+                            tip,
+                        ) {
                             Some(Some(observed)) => base_repo
                                 .reference_matching(
                                     &task_refname,

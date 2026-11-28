@@ -720,37 +720,31 @@ pub async fn get_workspace_branch_status(
         // other is the fallback; failing both, report unknown counts rather
         // than failing the response and hiding `source_mirror_error`.
 
-        // A checkout that does not hold the worktree's HEAD is never read as a
-        // fallback: its copy of the branch is stale and would under-report.
         // The workspace side is always read from the worktree's own
         // repository — the shared store, for a clustered workspace — never
         // from the checkout's courtesy copy, which may lag or have been moved.
         // (A coordinator-local worktree shares its checkout's refs anyway.)
-        let (primary, secondary): (&std::path::Path, Option<&std::path::Path>) =
-            (&worktree_path, None);
-        let branch_status_in = |repo_path: &std::path::Path| {
-            if is_target_remote {
-                deployment.git().get_remote_branch_status(
-                    repo_path,
-                    &workspace.branch,
-                    Some(&target_branch),
-                    &credentials,
-                )
-            } else {
-                deployment
-                    .git()
-                    .get_branch_status(repo_path, &workspace.branch, &target_branch)
-            }
-        };
+        let primary: &std::path::Path = &worktree_path;
         // A local target is compared as the checkout has it *now* (the same
         // source direct merge and rebase use), against the worktree's HEAD.
         // Off the runtime workers. When it cannot compare against the current
         // target (e.g. the store lacks that commit yet), the counts are
         // unknown — never a comparison against an older copy of the target.
         let counts = if is_target_remote {
-            let via_git = branch_status_in(primary)
-                .or_else(|e| secondary.map_or(Err(e), &branch_status_in))
-                .map_err(|e| e.to_string());
+            // Off the runtime workers: this fetches from the forge.
+            let (repo_dir, branch, target, creds) = (
+                primary.to_path_buf(),
+                workspace.branch.clone(),
+                target_branch.clone(),
+                credentials.clone(),
+            );
+            let via_git = tokio::task::spawn_blocking(move || {
+                git::GitService::new()
+                    .get_remote_branch_status(&repo_dir, &branch, Some(&target), &creds)
+                    .map_err(|e| e.to_string())
+            })
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()));
             match via_git {
                 Ok(counts) => Ok(counts),
                 // E.g. `upstream/main`, whose remote the store has no fetch
@@ -826,16 +820,21 @@ pub async fn get_workspace_branch_status(
         };
 
         let (remote_ahead, remote_behind) = if has_open_pr {
-            // Worktree first, for the same reason as above.
-            let pr_status_in = |repo_path: &std::path::Path| {
-                deployment.git().get_remote_branch_status(
-                    repo_path,
-                    &workspace.branch,
-                    None,
-                    &credentials,
-                )
-            };
-            match pr_status_in(primary).or_else(|e| secondary.map_or(Err(e), &pr_status_in)) {
+            // The worktree's repository, for the same reason as above.
+            // Off the runtime workers: this fetches from the forge.
+            let (repo_dir, branch, creds) = (
+                primary.to_path_buf(),
+                workspace.branch.clone(),
+                credentials.clone(),
+            );
+            let pr_counts = tokio::task::spawn_blocking(move || {
+                git::GitService::new()
+                    .get_remote_branch_status(&repo_dir, &branch, None, &creds)
+                    .map_err(|e| e.to_string())
+            })
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()));
+            match pr_counts {
                 Ok((ahead, behind)) => (Some(ahead), Some(behind)),
                 // The branch's upstream may be configured only in the
                 // checkout (a PR opened before the workspace moved to the
