@@ -2457,49 +2457,32 @@ impl LocalContainerService {
                 return;
             }
         };
-        // Storage evidence for a registration whose worktree directory is gone:
-        // its workspace base directory holds a live workspace that is visible
-        // on disk right now, so that storage is mounted and the absence is a
-        // deletion. Computed off the async workers (NFS stats).
-        let evidence = tokio::task::spawn_blocking(move || {
-            let present_bases: Vec<PathBuf> = live_dirs
-                .iter()
-                .filter(|dir| matches!(dir.try_exists(), Ok(true)))
-                .filter_map(|dir| dir.parent().map(Path::to_path_buf))
-                .collect();
-            (live_dirs, present_bases)
-        });
-        let Ok(Ok((live_dirs, present_bases))) =
-            tokio::time::timeout(Duration::from_secs(120), evidence).await
-        else {
-            tracing::warn!(
-                "startup registration sweep skipped: workspace directories did not answer"
-            );
-            return;
-        };
         let live_dirs = Arc::new(live_dirs);
-        let present_bases = Arc::new(present_bases);
         for repo in repos {
             let source = repo.path.clone();
             let live = live_dirs.clone();
-            let bases = present_bases.clone();
             let task = tokio::task::spawn_blocking(move || {
                 SharedRepositoryStore::sweep_source_registrations(
                     &source,
                     |worktree| live.iter().any(|dir| worktree.starts_with(dir)),
-                    // `<base>/<workspace>/<repo>`. vk deletes a workspace as a
-                    // whole, so the workspace directory itself must be gone
-                    // too — a mount point at that level would still exist
-                    // when offline — and its base must visibly hold a live
+                    // Storage evidence for `<base>/<workspace>/<repo>`, checked
+                    // at the moment of removal (never from a snapshot: a mount
+                    // can drop mid-sweep). vk deletes a workspace as a whole,
+                    // so the workspace directory itself must be gone too — a
+                    // mount point at that level would still exist when
+                    // offline — and the same base must visibly hold a live
                     // workspace right now.
                     |worktree| {
                         let Some(workspace_dir) = worktree.parent() else {
                             return false;
                         };
+                        let Some(base) = workspace_dir.parent() else {
+                            return false;
+                        };
                         matches!(workspace_dir.try_exists(), Ok(false))
-                            && workspace_dir
-                                .parent()
-                                .is_some_and(|base| bases.iter().any(|b| b == base))
+                            && live.iter().any(|dir| {
+                                dir.parent() == Some(base) && matches!(dir.try_exists(), Ok(true))
+                            })
                     },
                 )
             });

@@ -550,9 +550,11 @@ async fn preflight(
                             SourceMirrorFailureKind::Deterministic,
                             format!(
                                 "branch '{branch}' is held by the worktree registration {} in \
-                                 {dest_display}, whose worktree {} no longer exists; remove it \
-                                 with `git -C {dest_display} worktree prune` if that storage is \
-                                 not just offline",
+                                 {dest_display}, whose worktree {} no longer exists; once you \
+                                 have confirmed that worktree was deleted (not on storage that \
+                                 is offline), remove that one registration directory — not \
+                                 `git worktree prune`, which also drops entries of other \
+                                 worktrees whose storage is offline",
                                 entry.admin_dir.display(),
                                 entry.worktree_path().display()
                             ),
@@ -781,7 +783,9 @@ async fn run_git_bounded(
                 let _ = child.wait().await;
                 #[cfg(unix)]
                 if let Some(pgid) = pid.and_then(|pid| i32::try_from(pid).ok()) {
-                    while utils::process::process_group_alive(pgid) {
+                    // Zombies do not count: an orphan nobody reaps can do no
+                    // more I/O and must not fence the mirror forever.
+                    while utils::process::process_group_has_running_members(pgid) {
                         tokio::time::sleep(Duration::from_secs(1)).await;
                     }
                 }
@@ -1121,7 +1125,9 @@ mod tests {
         let failure = m.failure(&src, "vk/b").expect("recorded");
         assert_eq!(failure.kind, SourceMirrorFailureKind::Deterministic);
         assert!(
-            failure.message.contains("worktree prune"),
+            failure
+                .message
+                .contains("remove that one registration directory"),
             "{}",
             failure.message
         );

@@ -53,6 +53,50 @@ pub fn process_group_alive(pgid: i32) -> bool {
     killpg(Pid::from_raw(pgid), None).is_ok()
 }
 
+/// Whether the group has a member that can still run (or is blocked in I/O):
+/// any process in it that is not a zombie. Unlike [`process_group_alive`],
+/// an exited-but-unreaped orphan (a zombie its reaper never collected) does
+/// not count. Linux reads `/proc`; elsewhere falls back to
+/// [`process_group_alive`].
+#[cfg(unix)]
+pub fn process_group_has_running_members(pgid: i32) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return process_group_alive(pgid);
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if !name.bytes().all(|b| b.is_ascii_digit()) {
+                continue;
+            }
+            let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+                continue;
+            };
+            // `pid (comm) state ppid pgrp …`; `comm` may contain spaces and
+            // parentheses, so split after the last `)`.
+            let Some((_, rest)) = stat.rsplit_once(") ") else {
+                continue;
+            };
+            let mut fields = rest.split_whitespace();
+            let (Some(state), Some(_ppid), Some(pgrp)) =
+                (fields.next(), fields.next(), fields.next())
+            else {
+                continue;
+            };
+            if state != "Z" && state != "X" && pgrp.parse::<i32>() == Ok(pgid) {
+                return true;
+            }
+        }
+        false
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        process_group_alive(pgid)
+    }
+}
+
 /// Send SIGTERM then SIGKILL to a process group identified only by its pgid
 /// (e.g. one adopted from a previous server instance, with no child handle).
 /// Returns true if a signal was delivered.
@@ -211,5 +255,46 @@ mod tests {
         assert_eq!(parse_etime_seconds("42"), None);
         assert_eq!(parse_etime_seconds("a:b"), None);
         assert_eq!(parse_etime_seconds("1:2:3:4"), None);
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod group_member_tests {
+    use std::os::unix::process::CommandExt;
+
+    use super::*;
+
+    #[test]
+    fn running_members_are_seen_and_a_reaped_group_is_not() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pgid = child.id() as i32;
+        assert!(process_group_has_running_members(pgid));
+        kill_process_group_now(child.id());
+        child.wait().unwrap();
+        assert!(!process_group_has_running_members(pgid));
+    }
+
+    #[test]
+    fn a_zombie_is_not_a_running_member() {
+        let mut child = std::process::Command::new("true")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pgid = child.id() as i32;
+        // Exited but not yet reaped: a zombie.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::fs::read_to_string(format!("/proc/{pgid}/stat"))
+            .is_ok_and(|s| !s.rsplit_once(") ").is_some_and(|(_, r)| r.starts_with('Z')))
+        {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(process_group_alive(pgid), "signal 0 still sees the zombie");
+        assert!(!process_group_has_running_members(pgid));
+        child.wait().unwrap();
     }
 }
