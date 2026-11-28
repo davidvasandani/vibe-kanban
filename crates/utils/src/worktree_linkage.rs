@@ -376,7 +376,17 @@ pub fn registration_state(registration: &Registration) -> RegistrationState {
 /// entry and the reason at `info!` before acting. Only Git's bookkeeping
 /// directory is removed; no worktree file is ever touched.
 pub fn remove_stale_registration(registration: &Registration) -> Result<bool, String> {
-    let RegistrationState::Stale(reason) = registration_state(registration) else {
+    // Re-read the entry rather than trusting the caller's copy: git may have
+    // replaced it (same admin path, new worktree) or locked it since it was
+    // listed. A changed or unreadable entry is not the one judged stale.
+    let current = match read_registration(&registration.admin_dir) {
+        Ok(current) => current,
+        Err(_) => return Ok(false),
+    };
+    if current != *registration {
+        return Ok(false);
+    }
+    let RegistrationState::Stale(reason) = registration_state(&current) else {
         return Ok(false);
     };
     tracing::info!(
@@ -555,6 +565,34 @@ mod tests {
             worktree.join(".git").exists(),
             "the worktree is never touched"
         );
+    }
+
+    #[test]
+    fn an_entry_replaced_or_locked_after_listing_is_not_removed() {
+        let root = TempDir::new().unwrap();
+        let (common, admin, _) = source_registration(root.path());
+        fs::remove_dir_all(root.path().join("ws").join("one")).unwrap();
+        let listed = only(&common);
+
+        // Git reuses the admin path for a new, live worktree.
+        let fresh = root.path().join("ws").join("two").join("repo");
+        fs::create_dir_all(&fresh).unwrap();
+        fs::write(
+            admin.join("gitdir"),
+            format!("{}\n", fresh.join(".git").display()),
+        )
+        .unwrap();
+        fs::write(fresh.join(".git"), format!("gitdir: {}\n", admin.display())).unwrap();
+        assert!(!remove_stale_registration(&listed).unwrap());
+        assert!(admin.exists());
+
+        // Or the original entry gets locked.
+        let (common, admin, _) = source_registration(&root.path().join("other"));
+        fs::remove_dir_all(root.path().join("other").join("ws").join("one")).unwrap();
+        let listed = only(&common);
+        fs::write(admin.join("locked"), "").unwrap();
+        assert!(!remove_stale_registration(&listed).unwrap());
+        assert!(admin.exists());
     }
 
     #[test]

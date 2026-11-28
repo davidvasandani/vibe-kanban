@@ -115,8 +115,17 @@ pub struct SourceMirrorFailure {
     pub attempts: u32,
     pub last_attempt_at: DateTime<Utc>,
     pub next_attempt_at: DateTime<Utc>,
-    /// The store commit the failure was observed at (deterministic gate).
-    pub failed_tip: Option<String>,
+    /// Set only when the destination itself refused a push: the inputs that
+    /// were refused. The push is not retried until one of them changes.
+    pub retry_gate: Option<RetryGate>,
+}
+
+/// The (store commit, destination commit) pair a deterministic push refusal
+/// was observed at. Either side moving counts as changed input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetryGate {
+    pub store_tip: String,
+    pub dest_tip: Option<String>,
 }
 
 /// What [`SourceMirror::request`] did. Never "succeeded": the work is async.
@@ -168,7 +177,7 @@ enum Round {
     Failed {
         kind: SourceMirrorFailureKind,
         message: String,
-        tip: Option<String>,
+        gate: Option<RetryGate>,
     },
 }
 
@@ -281,7 +290,11 @@ async fn lead(inner: Arc<Inner>, key: MirrorKey, store: PathBuf) {
                 }
                 false
             }
-            Round::Failed { kind, message, tip } => {
+            Round::Failed {
+                kind,
+                message,
+                gate,
+            } => {
                 let attempts = slot.failure.as_ref().map_or(0, |f| f.attempts) + 1;
                 let now = Utc::now();
                 let next = now + backoff(&inner.config, kind, attempts);
@@ -300,7 +313,7 @@ async fn lead(inner: Arc<Inner>, key: MirrorKey, store: PathBuf) {
                     attempts,
                     last_attempt_at: now,
                     next_attempt_at: next,
-                    failed_tip: tip,
+                    retry_gate: gate,
                 });
                 false
             }
@@ -348,7 +361,11 @@ async fn run_round(
         .git_binary
         .clone()
         .unwrap_or_else(|| PathBuf::from("git"));
-    let failed = |kind, message: String, tip: Option<String>| Round::Failed { kind, message, tip };
+    let failed = |kind, message: String| Round::Failed {
+        kind,
+        message,
+        gate: None,
+    };
 
     // 1. The store's commit. Absent means nothing to mirror.
     let store_tip = match branch_tip(&git, store, branch, config.probe_timeout).await {
@@ -361,38 +378,42 @@ async fn run_round(
                     "could not read '{branch}' in the store {}: {e}",
                     store.display()
                 ),
-                None,
             );
         }
     };
 
-    // 2. A deterministic refusal is not retried at the same commit.
-    if let Some(previous) = previous
-        && previous.kind == SourceMirrorFailureKind::Deterministic
-        && previous.failed_tip.as_deref() == Some(store_tip.as_str())
-    {
-        return Round::Unchanged;
-    }
-
-    // 3. Nothing to do when the destination already has it.
-    match branch_tip(&git, dest, branch, config.probe_timeout).await {
+    // 2. Nothing to do when the destination already has it — including when
+    //    an operator fixed it by hand after a failure.
+    let dest_tip = match branch_tip(&git, dest, branch, config.probe_timeout).await {
         Ok(Some(tip)) if tip == store_tip => return Round::Synced { pushed: false },
-        Ok(_) => {}
+        Ok(tip) => tip,
         Err(e) => {
-            let kind = classify(&e);
             return failed(
-                kind,
+                classify(&e),
                 format!("could not read '{branch}' in {}: {e}", dest.display()),
-                Some(store_tip),
             );
         }
+    };
+
+    // 3. Pre-flight: a registration holding the branch makes git refuse the
+    //    push. Remove it if it is provably stale; refuse without pushing if it
+    //    is live. Re-run on every round, so an obstruction an operator has
+    //    since removed is noticed without waiting for the branch to move.
+    if let Some(round) = preflight(&git, config, dest, branch).await {
+        return round;
     }
 
-    // 4. Pre-flight: a registration holding the branch makes git refuse the
-    //    push. Remove it if it is provably stale; refuse without pushing if it
-    //    is live.
-    if let Some(round) = preflight(&git, config, dest, branch, &store_tip).await {
-        return round;
+    // 4. A push the destination itself refused is not repeated until the
+    //    store or the destination commit changes.
+    let gate = RetryGate {
+        store_tip,
+        dest_tip,
+    };
+    if let Some(previous) = previous
+        && previous.kind == SourceMirrorFailureKind::Deterministic
+        && previous.retry_gate.as_ref() == Some(&gate)
+    {
+        return Round::Unchanged;
     }
 
     // 5. The push itself, bounded.
@@ -409,11 +430,12 @@ async fn run_round(
         Ok(output) if output.success => Round::Synced { pushed: true },
         Ok(output) => {
             let stderr = excerpt(&output.stderr);
-            failed(
-                classify(&stderr),
-                format!("git push failed: {stderr}"),
-                Some(store_tip),
-            )
+            let kind = classify(&stderr);
+            Round::Failed {
+                kind,
+                message: format!("git push failed: {stderr}"),
+                gate: (kind == SourceMirrorFailureKind::Deterministic).then_some(gate),
+            }
         }
         Err(BoundedError::Timeout(after)) => failed(
             SourceMirrorFailureKind::Timeout,
@@ -421,12 +443,10 @@ async fn run_round(
                 "git push did not finish within {}s and was killed with its process group",
                 after.as_secs()
             ),
-            Some(store_tip),
         ),
         Err(BoundedError::Spawn(e)) => failed(
             SourceMirrorFailureKind::Transient,
             format!("could not start git push: {e}"),
-            Some(store_tip),
         ),
     }
 }
@@ -436,12 +456,11 @@ async fn preflight(
     config: &SourceMirrorConfig,
     dest: &Path,
     branch: &str,
-    store_tip: &str,
 ) -> Option<Round> {
     let failed = |kind, message: String| Round::Failed {
         kind,
         message,
-        tip: Some(store_tip.to_string()),
+        gate: None,
     };
     let common_dir = match run_git_bounded(
         git,
@@ -998,6 +1017,38 @@ mod tests {
         assert_eq!(tip(&src), tip(&store));
         let list = git(&src, &["worktree", "list", "--porcelain"]);
         assert!(!list.contains("prunable"), "{list}");
+    }
+
+    #[tokio::test]
+    async fn removing_the_obstruction_unblocks_the_mirror_without_a_new_commit() {
+        let root = TempDir::new().unwrap();
+        let (src, store) = fixture(root.path());
+        let holder = root.path().join("holder");
+        git(
+            &src,
+            &["worktree", "add", "-q", &holder.to_string_lossy(), "vk/b"],
+        );
+        let m = mirror(SourceMirrorConfig {
+            backoff_base: Duration::ZERO,
+            ..Default::default()
+        });
+
+        m.request(&store, &src, "vk/b");
+        m.wait_idle(&src, "vk/b").await;
+        assert_eq!(
+            m.failure(&src, "vk/b").unwrap().kind,
+            SourceMirrorFailureKind::Deterministic
+        );
+
+        // The operator removes the worktree; the store's commit is unchanged.
+        git(
+            &src,
+            &["worktree", "remove", "--force", &holder.to_string_lossy()],
+        );
+        m.request(&store, &src, "vk/b");
+        m.wait_idle(&src, "vk/b").await;
+        assert_eq!(m.failure(&src, "vk/b"), None);
+        assert_eq!(tip(&src), tip(&store));
     }
 
     #[tokio::test]
