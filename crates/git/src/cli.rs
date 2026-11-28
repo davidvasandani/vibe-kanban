@@ -87,6 +87,20 @@ pub struct StatusDiffOptions {
     pub path_filter: Option<Vec<String>>, // pathspecs to limit diff
 }
 
+/// Timed-out `git_within` children not yet exited, per repository path.
+static STUCK_COMMANDS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, usize>>,
+> = std::sync::LazyLock::new(Default::default);
+
+fn stuck_commands_adjust(repo_path: &Path, delta: isize) {
+    let mut stuck = STUCK_COMMANDS.lock().unwrap_or_else(|e| e.into_inner());
+    let count = stuck.entry(repo_path.to_path_buf()).or_default();
+    *count = count.saturating_add_signed(delta);
+    if *count == 0 {
+        stuck.remove(repo_path);
+    }
+}
+
 impl GitCli {
     pub fn new() -> Self {
         Self {}
@@ -1176,8 +1190,13 @@ impl GitCli {
             let _ = child.kill();
             // Reap on a thread: a child stuck in uninterruptible I/O dies only
             // when that I/O returns, and this caller must not wait for it.
+            // Until it has, `has_stuck_command` reports this repository, so
+            // pollers can skip it instead of piling up more stuck children.
+            let key = repo_path.to_path_buf();
+            stuck_commands_adjust(&key, 1);
             std::thread::spawn(move || {
                 let _ = child.wait();
+                stuck_commands_adjust(&key, -1);
             });
             return Err(GitCliError::CommandFailed(format!(
                 "git did not finish within {}s and was killed",
@@ -1196,6 +1215,16 @@ impl GitCli {
             }));
         }
         Ok(String::from_utf8_lossy(&out).to_string())
+    }
+
+    /// Whether a [`Self::git_within`] command against `repo_path` timed out
+    /// and has not exited yet (killed, but stuck in uninterruptible I/O).
+    pub fn has_stuck_command(repo_path: &Path) -> bool {
+        STUCK_COMMANDS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(repo_path)
+            .is_some_and(|n| *n > 0)
     }
 
     /// [`Self::resolve_commit`] under a process-level deadline (see

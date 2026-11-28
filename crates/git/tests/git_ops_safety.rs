@@ -1849,6 +1849,14 @@ fn git_within_kills_a_hung_command_at_its_deadline() {
         "{:?}",
         started.elapsed()
     );
+    // Killed and reaped soon after: no longer reported as stuck.
+    for _ in 0..100 {
+        if !GitCli::has_stuck_command(&repo_path) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("the killed command was never reaped");
 }
 
 #[test]

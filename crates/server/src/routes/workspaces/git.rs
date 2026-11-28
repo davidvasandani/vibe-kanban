@@ -730,7 +730,43 @@ pub async fn get_workspace_branch_status(
             };
             match pr_status_in(primary).or_else(|e| secondary.map_or(Err(e), &pr_status_in)) {
                 Ok((ahead, behind)) => (Some(ahead), Some(behind)),
-                Err(_) => (None, None),
+                // The branch's upstream may be configured only in the
+                // checkout (a PR opened before the workspace moved to the
+                // store): resolve it there, compare it with the store's branch.
+                Err(_) => {
+                    let (worktree, checkout, branch) = (
+                        worktree_path.clone(),
+                        repo.path.clone(),
+                        workspace.branch.clone(),
+                    );
+                    let counts = tokio::task::spawn_blocking(move || {
+                        let upstream = git::GitCli::new()
+                            .git_within(
+                                &checkout,
+                                [
+                                    "rev-parse",
+                                    "--abbrev-ref",
+                                    "--symbolic-full-name",
+                                    &format!("{branch}@{{upstream}}"),
+                                ],
+                                None,
+                                std::time::Duration::from_secs(5),
+                            )
+                            .map_err(|e| e.to_string())?;
+                        counts_against_checkout_target(
+                            &worktree,
+                            &checkout,
+                            &branch,
+                            upstream.trim(),
+                        )
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()));
+                    match counts {
+                        Ok((ahead, behind)) => (Some(ahead), Some(behind)),
+                        Err(_) => (None, None),
+                    }
+                }
             }
         } else {
             (None, None)
@@ -778,6 +814,14 @@ fn counts_against_checkout_target(
     branch: &str,
     target: &str,
 ) -> Result<(usize, usize), String> {
+    // One stuck probe per stalled checkout at most: while an earlier one has
+    // not exited, report unknown rather than start another.
+    if git::GitCli::has_stuck_command(checkout) || git::GitCli::has_stuck_command(worktree) {
+        return Err(format!(
+            "an earlier read of {} has not finished (stalled storage?)",
+            checkout.display()
+        ));
+    }
     // Every call under a process-level deadline: the checkout may be stalled.
     let deadline = std::time::Duration::from_secs(5);
     let cli = git::GitCli::new();
