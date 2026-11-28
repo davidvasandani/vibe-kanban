@@ -547,8 +547,18 @@ async fn preflight(
                         ));
                     }
                     RegistrationState::Stale(_) => {
-                        worktree_linkage::retire_stale_registration(&entry)
+                        let retired = crate::SharedRepositoryStore::preserve_and_retire(&entry)
                             .map_err(|e| (SourceMirrorFailureKind::Transient, e))?;
+                        if !retired {
+                            return Err((
+                                SourceMirrorFailureKind::Transient,
+                                format!(
+                                    "branch '{branch}' is held by the orphaned registration {} \
+                                     in {dest_display}, which could not be retired safely",
+                                    entry.admin_dir.display()
+                                ),
+                            ));
+                        }
                     }
                     // Deleted, or on storage that is offline right now: this
                     // path cannot tell, so it reports rather than removes.

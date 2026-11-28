@@ -2728,7 +2728,7 @@ impl LocalContainerService {
     /// Warn-only guard against generated output landing in a workspace branch
     /// (VAS-1140: a 28k-file, 1.6 GB auto-commit made every later push of the
     /// branch take over an hour). Never refuses the commit.
-    fn warn_if_commit_is_large(repo: &Repo, worktree_path: &Path) {
+    fn warn_if_commit_is_large(repo: &Repo, worktree_path: &Path, commit: &str) {
         fn threshold(name: &str, default: u64) -> u64 {
             std::env::var(name)
                 .ok()
@@ -2737,7 +2737,7 @@ impl LocalContainerService {
         }
         let max_files = threshold("VK_LARGE_COMMIT_WARN_FILES", 5_000);
         let max_mb = threshold("VK_LARGE_COMMIT_WARN_MB", 200);
-        match git::GitCli::new().head_commit_added_size(worktree_path) {
+        match git::GitCli::new().commit_added_size(worktree_path, commit) {
             Ok((files, bytes)) => {
                 let mb = bytes / (1024 * 1024);
                 if files as u64 > max_files || mb > max_mb {
@@ -2774,7 +2774,16 @@ impl LocalContainerService {
                 Ok(true) => {
                     any_committed = true;
                     tracing::info!("Committed changes in repo '{}'", repo.name);
-                    Self::warn_if_commit_is_large(&repo, &worktree_path);
+                    // Diagnostic only: measured off the completion path, on
+                    // the commit just made (not whatever HEAD is later).
+                    if let Ok(head) = self.git().get_head_info(&worktree_path)
+                        && let Ok(runtime) = tokio::runtime::Handle::try_current()
+                    {
+                        let (repo, worktree_path) = (repo.clone(), worktree_path.clone());
+                        runtime.spawn_blocking(move || {
+                            Self::warn_if_commit_is_large(&repo, &worktree_path, &head.oid)
+                        });
+                    }
                 }
                 Ok(false) => {
                     tracing::warn!("No changes committed in repo '{}' (unexpected)", repo.name);

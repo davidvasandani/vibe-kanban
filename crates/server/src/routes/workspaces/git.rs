@@ -533,18 +533,35 @@ pub async fn get_workspace_branch_status(
         // repository, the shared store, which has the real branch tip. The
         // other is the fallback; failing both, report unknown counts rather
         // than failing the response and hiding `source_mirror_error`.
-        let checkout_is_current = head_oid.as_deref().is_some_and(|head| {
-            git::GitCli::new()
-                .resolve_commit(&repo.path, &format!("refs/heads/{}", workspace.branch))
-                .ok()
-                .flatten()
-                .is_some_and(|tip| tip == head)
-        });
-        let (primary, secondary): (&std::path::Path, &std::path::Path) = if checkout_is_current {
-            (&repo.path, &worktree_path)
-        } else {
-            (&worktree_path, &repo.path)
+        // Bounded and off the runtime workers: the checkout may be on a stalled
+        // mount, and this read must not keep `source_mirror_error` from being
+        // returned. Unknown counts as "not current".
+        let checkout_is_current = match head_oid.clone() {
+            Some(head) => {
+                let checkout = repo.path.clone();
+                let branch_ref = format!("refs/heads/{}", workspace.branch);
+                let probe = tokio::task::spawn_blocking(move || {
+                    git::GitCli::new()
+                        .resolve_commit(&checkout, &branch_ref)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|tip| tip == head)
+                });
+                matches!(
+                    tokio::time::timeout(std::time::Duration::from_secs(5), probe).await,
+                    Ok(Ok(true))
+                )
+            }
+            None => false,
         };
+        // A checkout that does not hold the worktree's HEAD is never read as a
+        // fallback: its copy of the branch is stale and would under-report.
+        let (primary, secondary): (&std::path::Path, Option<&std::path::Path>) =
+            if checkout_is_current {
+                (&repo.path, Some(&worktree_path))
+            } else {
+                (&worktree_path, None)
+            };
         let branch_status_in = |repo_path: &std::path::Path| {
             if is_target_remote {
                 deployment.git().get_remote_branch_status(
@@ -559,18 +576,19 @@ pub async fn get_workspace_branch_status(
                     .get_branch_status(repo_path, &workspace.branch, &target_branch)
             }
         };
-        let (commits_ahead, commits_behind) =
-            match branch_status_in(primary).or_else(|_| branch_status_in(secondary)) {
-                Ok((ahead, behind)) => (Some(ahead), Some(behind)),
-                Err(e) => {
-                    tracing::debug!(
-                        repo = %repo.name,
-                        "branch status unavailable for '{}': {e}",
-                        workspace.branch
-                    );
-                    (None, None)
-                }
-            };
+        let (commits_ahead, commits_behind) = match branch_status_in(primary)
+            .or_else(|e| secondary.map_or(Err(e), &branch_status_in))
+        {
+            Ok((ahead, behind)) => (Some(ahead), Some(behind)),
+            Err(e) => {
+                tracing::debug!(
+                    repo = %repo.name,
+                    "branch status unavailable for '{}': {e}",
+                    workspace.branch
+                );
+                (None, None)
+            }
+        };
 
         let (remote_ahead, remote_behind) = if has_open_pr {
             // Worktree first, for the same reason as above.
@@ -582,7 +600,7 @@ pub async fn get_workspace_branch_status(
                     &credentials,
                 )
             };
-            match pr_status_in(primary).or_else(|_| pr_status_in(secondary)) {
+            match pr_status_in(primary).or_else(|e| secondary.map_or(Err(e), &pr_status_in)) {
                 Ok((ahead, behind)) => (Some(ahead), Some(behind)),
                 Err(_) => (None, None),
             }

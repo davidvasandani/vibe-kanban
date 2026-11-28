@@ -411,9 +411,7 @@ impl SharedRepositoryStore {
                 continue;
             }
             let removed = match worktree_linkage::registration_state(&entry) {
-                RegistrationState::Stale(_) => {
-                    worktree_linkage::retire_stale_registration(&entry).map(|r| r.is_some())
-                }
+                RegistrationState::Stale(_) => Self::preserve_and_retire(&entry),
                 RegistrationState::WorktreeMissing(_) if storage_present(entry.worktree_path()) => {
                     worktree_linkage::remove_registration_of_deleted_worktree(&entry)
                 }
@@ -431,6 +429,47 @@ impl SharedRepositoryStore {
         Ok(report)
     }
 
+    /// Move a re-linked (stale) registration aside — but first snapshot its
+    /// `index` into `refs/vk-retired/<name>-<epoch>` of the repository that
+    /// owns it, so staged-only content stays reachable from a ref and survives
+    /// gc (constitution XV). When the snapshot cannot be taken the
+    /// registration is kept, never retired on a guess. Blocking.
+    pub(crate) fn preserve_and_retire(
+        entry: &worktree_linkage::Registration,
+    ) -> Result<bool, String> {
+        let index = entry.admin_dir.join("index");
+        if matches!(index.try_exists(), Ok(true)) {
+            let (Some(name), Some(common_dir)) = (
+                entry.admin_dir.file_name(),
+                entry.admin_dir.parent().and_then(Path::parent),
+            ) else {
+                return Ok(false);
+            };
+            let epoch = chrono::Utc::now().timestamp();
+            let refname = format!("refs/vk-retired/{}-{epoch}", name.to_string_lossy());
+            if let Err(e) = GitCli::new().snapshot_index(
+                common_dir,
+                &index,
+                &refname,
+                &format!(
+                    "Index of worktree {} before its registration was retired",
+                    entry.worktree_path().display()
+                ),
+            ) {
+                warn!(
+                    admin_dir = %entry.admin_dir.display(),
+                    "kept a stale worktree registration: could not snapshot its index: {e}"
+                );
+                return Ok(false);
+            }
+            info!(
+                admin_dir = %entry.admin_dir.display(),
+                "snapshotted the retiring registration's index to {refname}"
+            );
+        }
+        worktree_linkage::retire_stale_registration(entry).map(|r| r.is_some())
+    }
+
     /// Filesystem-only, so a sweep or a delete never waits on a git child.
     fn common_dir_of(repo: &Path) -> Result<PathBuf, String> {
         worktree_linkage::common_dir_of(repo).map(|(common_dir, _bare)| common_dir)
@@ -445,10 +484,10 @@ impl SharedRepositoryStore {
         // Moved aside, not deleted: its `index` may be the only record of
         // staged work (constitution XV).
         match worktree_linkage::read_registration(previous)
-            .and_then(|entry| worktree_linkage::retire_stale_registration(&entry))
+            .and_then(|entry| Self::preserve_and_retire(&entry))
         {
-            Ok(Some(_)) => {}
-            Ok(None) => debug!(
+            Ok(true) => {}
+            Ok(false) => debug!(
                 "left the previous registration {} in place: it is not provably stale",
                 previous.display()
             ),
@@ -2684,6 +2723,16 @@ mod tests {
             fs::read_dir(&retired).unwrap().count(),
             1,
             "moved aside with its index, not deleted"
+        );
+        let refs = cli()
+            .git(
+                &checkout,
+                ["for-each-ref", "--format=%(refname)", "refs/vk-retired/"],
+            )
+            .unwrap();
+        assert!(
+            refs.trim().lines().count() == 1,
+            "its staged state is reachable from a recovery ref: {refs}"
         );
         let list = cli()
             .git(&checkout, ["worktree", "list", "--porcelain"])

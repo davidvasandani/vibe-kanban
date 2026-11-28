@@ -1064,6 +1064,41 @@ impl GitCli {
         Ok(sha)
     }
 
+    /// Record the tree an index file describes as a commit under `refname`,
+    /// so every blob it stages stays reachable (and safe from gc) after the
+    /// index itself is moved out of git's view. Fails, writing nothing, for an
+    /// index git cannot turn into a tree (e.g. one with unmerged entries).
+    pub fn snapshot_index(
+        &self,
+        repo_path: &Path,
+        index_file: &Path,
+        refname: &str,
+        message: &str,
+    ) -> Result<String, GitCliError> {
+        let env = [(
+            OsString::from("GIT_INDEX_FILE"),
+            index_file.as_os_str().to_os_string(),
+        )];
+        let tree = self.git_impl(repo_path, ["write-tree"], Some(&env), None)?;
+        let tree = String::from_utf8_lossy(&tree).trim().to_string();
+        let commit = self.git(
+            repo_path,
+            [
+                "-c",
+                "user.name=Vibe Kanban",
+                "-c",
+                "user.email=noreply@vibe-kanban.local",
+                "commit-tree",
+                &tree,
+                "-m",
+                message,
+            ],
+        )?;
+        let commit = commit.trim().to_string();
+        self.update_ref(repo_path, refname, &commit)?;
+        Ok(commit)
+    }
+
     /// Update a ref to a specific sha in the repo.
     pub fn update_ref(
         &self,
@@ -1300,6 +1335,15 @@ impl GitCli {
         &self,
         worktree_path: &Path,
     ) -> Result<(usize, u64), GitCliError> {
+        self.commit_added_size(worktree_path, "HEAD")
+    }
+
+    /// [`Self::head_commit_added_size`] for an explicit commit.
+    pub fn commit_added_size(
+        &self,
+        worktree_path: &Path,
+        commit: &str,
+    ) -> Result<(usize, u64), GitCliError> {
         use std::collections::HashSet;
 
         // Against the first parent (so a merge is measured too), or the empty
@@ -1307,15 +1351,16 @@ impl GitCli {
         let has_parent = self
             .git(
                 worktree_path,
-                ["rev-parse", "--verify", "--quiet", "HEAD^1"],
+                ["rev-parse", "--verify", "--quiet", &format!("{commit}^1")],
             )
             .is_ok();
         let mut args = vec!["diff-tree", "-r", "-z", "--no-commit-id", "--no-renames"];
         args.push("--diff-filter=A");
+        let parent = format!("{commit}^1");
         if has_parent {
-            args.extend(["HEAD^1", "HEAD"]);
+            args.extend([parent.as_str(), commit]);
         } else {
-            args.extend(["--root", "HEAD"]);
+            args.extend(["--root", commit]);
         }
         let raw = self.git(worktree_path, args)?;
         let mut files = 0usize;

@@ -1794,3 +1794,31 @@ fn head_commit_added_size_measures_a_merge_against_its_first_parent() {
 
     assert_eq!(cli.head_commit_added_size(&repo_path).unwrap(), (1, 10));
 }
+
+#[test]
+fn snapshot_index_keeps_staged_only_content_reachable() {
+    let td = TempDir::new().unwrap();
+    let repo_path = td.path().join("repo");
+    let service = GitService::new();
+    service
+        .initialize_repo_with_main_branch(&repo_path)
+        .unwrap();
+    let repo = Repository::open(&repo_path).unwrap();
+    configure_user(&repo);
+    write_file(&repo_path, "f.txt", "committed\n");
+    commit_all(&repo, "base");
+
+    // Stage one version, then edit again: the staged one exists only in the index.
+    write_file(&repo_path, "f.txt", "staged\n");
+    add_path(&repo_path, "f.txt");
+    write_file(&repo_path, "f.txt", "edited again\n");
+
+    let cli = GitCli::new();
+    let index = repo_path.join(".git").join("index");
+    cli.snapshot_index(&repo_path, &index, "refs/vk-retired/test", "snapshot")
+        .unwrap();
+    let staged = cli
+        .git(&repo_path, ["show", "refs/vk-retired/test:f.txt"])
+        .unwrap();
+    assert_eq!(staged, "staged\n");
+}
