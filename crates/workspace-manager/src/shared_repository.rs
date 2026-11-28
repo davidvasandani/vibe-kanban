@@ -389,20 +389,20 @@ impl SharedRepositoryStore {
     }
 
     /// Startup sweep of one operator checkout. Per entry, never `git worktree
-    /// prune`. Blocking. An entry is removed when it is not claimed by
-    /// `is_live` (a live workspace directory, by the caller's records) and
-    /// either
+    /// prune`. Blocking. Only an entry whose worktree was **re-linked** to
+    /// another registration (provably orphaned) and that `is_live` does not
+    /// claim is retired — moved aside, its index snapshotted first.
     ///
-    /// - its worktree was re-linked to another registration (provably
-    ///   orphaned), or
-    /// - its worktree directory is gone **and** `storage_present` vouches for
-    ///   the storage that held it (e.g. that base directory visibly holds a
-    ///   live workspace right now) — a missing directory alone cannot tell a
-    ///   deletion from an offline mount.
+    /// An entry whose worktree directory is merely *missing* is kept: from
+    /// here a deletion cannot be told from storage that is offline (a hidden
+    /// mount can even expose an underlying directory with other content), and
+    /// removing a live worktree's registration breaks it when the storage
+    /// returns. Such entries are removed on real deletion evidence instead —
+    /// by workspace deletion, which saw the worktree and then removed it — and
+    /// mirror pre-flight names any that block a branch.
     pub fn sweep_source_registrations(
         source_repo: &Path,
         is_live: impl Fn(&Path) -> bool,
-        storage_present: impl Fn(&Path) -> bool,
     ) -> Result<SweepReport, String> {
         let common_dir = Self::common_dir_of(source_repo)?;
         let mut report = SweepReport::default();
@@ -421,9 +421,6 @@ impl SharedRepositoryStore {
             }
             let removed = match worktree_linkage::registration_state(&entry) {
                 RegistrationState::Stale(_) => Self::preserve_and_retire(&entry),
-                RegistrationState::WorktreeMissing(_) if storage_present(entry.worktree_path()) => {
-                    Self::preserve_and_remove_deleted(&entry, &storage_present)
-                }
                 _ => Ok(false),
             };
             match removed {
@@ -2844,13 +2841,12 @@ mod tests {
     }
 
     #[test]
-    fn the_startup_sweep_removes_stale_entries_and_keeps_live_ones() {
+    fn the_startup_sweep_retires_relinked_entries_and_keeps_missing_ones() {
         let fixture = TempDir::new().unwrap();
         let checkout = fixture.path().join("srv-src").join("repo");
         seed_repo(&checkout);
         let base = fixture.path().join("workspaces");
-        let mut paths = Vec::new();
-        for name in ["live", "stale-1", "stale-2", "claimed"] {
+        for name in ["live", "relinked", "missing", "claimed"] {
             let branch = format!("vk/{name}");
             git::GitService::new()
                 .create_branch(&checkout, &branch, "main")
@@ -2860,25 +2856,34 @@ mod tests {
             cli()
                 .worktree_add(&checkout, &path, &branch, false)
                 .unwrap();
-            paths.push(path);
         }
-        for name in ["stale-1", "stale-2", "claimed"] {
-            fs::remove_dir_all(base.join(name)).unwrap();
-        }
+        // Re-linked elsewhere (what adoption by an older release left behind).
+        let elsewhere = fixture
+            .path()
+            .join("store")
+            .join("worktrees")
+            .join("relinked");
+        fs::create_dir_all(&elsewhere).unwrap();
+        fs::write(
+            base.join("relinked").join("repo").join(".git"),
+            format!("gitdir: {}\n", elsewhere.display()),
+        )
+        .unwrap();
+        // Missing: deleted, or on offline storage — cannot tell.
+        fs::remove_dir_all(base.join("missing")).unwrap();
+        // Claimed by a live workspace record, even though it is gone.
+        fs::remove_dir_all(base.join("claimed")).unwrap();
         let claimed = base.join("claimed");
 
-        let report = SharedRepositoryStore::sweep_source_registrations(
-            &checkout,
-            |p| p.starts_with(&claimed),
-            // The base directory visibly holds the live workspace.
-            |p| p.parent().and_then(Path::parent) == Some(base.as_path()),
-        )
+        let report = SharedRepositoryStore::sweep_source_registrations(&checkout, |p| {
+            p.starts_with(&claimed)
+        })
         .unwrap();
         assert_eq!(
             report,
             SweepReport {
-                removed: 2,
-                kept: 2,
+                removed: 1,
+                kept: 3,
                 unreadable: 0
             }
         );
@@ -2887,6 +2892,10 @@ mod tests {
             .unwrap();
         assert!(list.contains("vk/live"), "{list}");
         assert!(list.contains("vk/claimed"), "{list}");
-        assert!(!list.contains("vk/stale-"), "{list}");
+        assert!(
+            list.contains("vk/missing"),
+            "kept without deletion evidence: {list}"
+        );
+        assert!(!list.contains("vk/relinked"), "{list}");
     }
 }

@@ -2524,11 +2524,12 @@ impl LocalContainerService {
         )
     }
 
-    /// Once per boot: remove provably stale worktree registrations from every
-    /// registered repository's checkout (VAS-1140 found 120 in one). Per entry
+    /// Once per boot: retire provably orphaned (re-linked) worktree
+    /// registrations from every registered repository's checkout. Per entry
     /// and only on positive evidence — never `git worktree prune`, which over
     /// NFS can unregister live worktrees — and never an entry under a live
-    /// workspace's directory.
+    /// workspace's directory. Entries whose worktree is merely missing are
+    /// kept (see `SharedRepositoryStore::sweep_source_registrations`).
     async fn sweep_source_registrations(&self) {
         const PER_REPO_BUDGET: Duration = Duration::from_secs(120);
         let repos = match Repo::list_all(&self.db.pool).await {
@@ -2557,33 +2558,9 @@ impl LocalContainerService {
             let source = repo.path.clone();
             let live = live_dirs.clone();
             let task = tokio::task::spawn_blocking(move || {
-                SharedRepositoryStore::sweep_source_registrations(
-                    &source,
-                    |worktree| live.iter().any(|dir| worktree.starts_with(dir)),
-                    // Storage evidence for `<base>/<workspace>/<repo>`, checked
-                    // at the moment of removal (never from a snapshot: a mount
-                    // can drop mid-sweep). vk deletes a workspace as a whole,
-                    // so the workspace directory itself must be gone too — a
-                    // mount point at that level would still exist when
-                    // offline — and the same base must visibly hold a live
-                    // workspace right now.
-                    |worktree| {
-                        let Some(workspace_dir) = worktree.parent() else {
-                            return false;
-                        };
-                        let Some(base) = workspace_dir.parent() else {
-                            return false;
-                        };
-                        // Gone, not merely dangling: a symlink into an
-                        // offline volume still has an entry of its own.
-                        matches!(
-                            std::fs::symlink_metadata(workspace_dir),
-                            Err(e) if e.kind() == std::io::ErrorKind::NotFound
-                        ) && live.iter().any(|dir| {
-                            dir.parent() == Some(base) && matches!(dir.try_exists(), Ok(true))
-                        })
-                    },
-                )
+                SharedRepositoryStore::sweep_source_registrations(&source, |worktree| {
+                    live.iter().any(|dir| worktree.starts_with(dir))
+                })
             });
             match tokio::time::timeout(PER_REPO_BUDGET, task).await {
                 Ok(Ok(Ok(report))) if report.removed > 0 => tracing::info!(

@@ -1196,6 +1196,15 @@ impl GitCli {
             stuck_commands_adjust(&key, 1);
             std::thread::spawn(move || {
                 let _ = child.wait();
+                // Helpers (`pack-objects`, …) may outlive the leader: keep the
+                // fence until none of the group is still running (probing
+                // only — never signalled after the leader is reaped).
+                #[cfg(unix)]
+                if let Ok(pgid) = i32::try_from(pid) {
+                    while utils::process::process_group_has_running_members(pgid) {
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                    }
+                }
                 stuck_commands_adjust(&key, -1);
             });
             return Err(GitCliError::CommandFailed(format!(

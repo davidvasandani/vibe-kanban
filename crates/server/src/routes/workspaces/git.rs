@@ -407,6 +407,52 @@ pub async fn merge_workspace(
         pinned_tip.as_deref(),
     )?;
 
+    // A clustered workspace's branch lives in the shared store: move it to the
+    // squash commit too (compare-and-swap against the pinned tip, so a commit
+    // that landed meanwhile is kept), exactly as `merge_changes` does for a
+    // coordinator-local workspace's branch. Best effort, bounded, off-worker.
+    if let Some(pinned) = pinned_tip.clone() {
+        let (store_dir, checkout_dir, target_ref, branch_ref, squash) = (
+            store.clone(),
+            repo.path.clone(),
+            format!("refs/heads/{}", workspace_repo.target_branch),
+            format!("refs/heads/{}", workspace.branch),
+            merge_commit_id.clone(),
+        );
+        let moved = tokio::task::spawn_blocking(move || {
+            let cli = git::GitCli::new();
+            let deadline = std::time::Duration::from_secs(60);
+            // The squash commit is the checkout target's tip: fetchable as a ref.
+            cli.git_within(
+                &store_dir,
+                [
+                    "fetch",
+                    "--no-tags",
+                    "--no-write-fetch-head",
+                    &checkout_dir.to_string_lossy(),
+                    &target_ref,
+                ],
+                None,
+                deadline,
+            )?;
+            cli.git_within(
+                &store_dir,
+                ["update-ref", &branch_ref, &squash, &pinned],
+                None,
+                deadline,
+            )
+        })
+        .await;
+        if !matches!(moved, Ok(Ok(_))) {
+            tracing::warn!(
+                repo = %repo.path.display(),
+                "merged {}, but could not move the workspace branch in the shared store to \
+                 the squash commit: {moved:?}",
+                workspace.branch
+            );
+        }
+    }
+
     Merge::create_direct(
         pool,
         workspace.id,
@@ -975,6 +1021,24 @@ pub async fn change_target_branch(
         // Off the runtime workers, every git call under a deadline; a failure
         // here is reported, never retried against an unbounded checkout read.
         Some(worktree) => {
+            // The authoritative tip of the workspace branch (the worktree's
+            // own repository — the shared store for a clustered workspace).
+            let worktree_tip = {
+                let (worktree, branch_ref) =
+                    (worktree.clone(), format!("refs/heads/{}", workspace.branch));
+                tokio::task::spawn_blocking(move || {
+                    git::GitCli::new()
+                        .resolve_commit_within(
+                            &worktree,
+                            &branch_ref,
+                            std::time::Duration::from_secs(5),
+                        )
+                        .ok()
+                        .flatten()
+                })
+                .await
+                .unwrap_or(None)
+            };
             let (checkout, branch, target) = (
                 repo.path.clone(),
                 workspace.branch.clone(),
@@ -996,7 +1060,24 @@ pub async fn change_target_branch(
                         workspace.branch.clone(),
                         new_target_branch.clone(),
                     );
+                    let authoritative = worktree_tip.clone();
                     let fallback = tokio::task::spawn_blocking(move || {
+                        // Only if the checkout's copy of the workspace branch
+                        // is verifiably the authoritative tip; otherwise its
+                        // counts would describe an older commit.
+                        let checkout_tip = git::GitCli::new()
+                            .resolve_commit_within(
+                                &checkout,
+                                &format!("refs/heads/{branch}"),
+                                std::time::Duration::from_secs(5),
+                            )
+                            .ok()
+                            .flatten();
+                        if authoritative.is_none() || checkout_tip != authoritative {
+                            return Err("the registered checkout's copy of the workspace \
+                                        branch is not current"
+                                .to_string());
+                        }
                         git::GitService::new()
                             .get_branch_status(&checkout, &branch, &target)
                             .map_err(|e| e.to_string())
