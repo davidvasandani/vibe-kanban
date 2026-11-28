@@ -611,6 +611,15 @@ async fn run_round(
             ),
         );
     };
+    // Another leader (an aliased registration) may have just pushed this.
+    if let Ok(Some(tip)) = branch_tip(&git, dest, branch, config.probe_timeout, leftovers).await
+        && tip == store_tip
+    {
+        return Round::Synced {
+            pushed: false,
+            tip: Some(tip),
+        };
+    }
 
     // 4. A push the destination itself refused is not repeated until the
     //    store or the destination commit changes.

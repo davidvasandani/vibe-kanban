@@ -323,37 +323,72 @@ pub async fn merge_workspace(
                 workspace.branch
             ))
         })?;
-        SourceMirror::global()
-            .ensure_synced(
-                &store,
-                &repo.path,
-                &workspace.branch,
-                &head,
-                std::time::Duration::from_secs(120),
-            )
-            .await
-            .map_err(|e| ApiError::BadRequest(format!("Cannot merge yet: {e}")))?;
-        // Pinned: if the workspace moved on while the mirror caught up, the
-        // checkout's copy is no longer the latest — refuse instead of merging
-        // a tip that omits the newer commits.
-        // Both sides, re-read together: the store (the workspace moved on?)
-        // and the checkout (its copy reset meanwhile?). Nothing is awaited
-        // between this and `merge_changes`.
-        let (store_dir, checkout_dir, branch_ref) = (
+        // The merge needs the pinned commit's *objects* in the checkout, not
+        // its branch ref: the courtesy mirror's non-forced push cannot move a
+        // ref that was rebased or amended, and that must not block a merge.
+        // Fetch the commit into the checkout (FETCH_HEAD only, no ref is
+        // touched; bounded), then confirm it is there.
+        let (store_dir, checkout_dir, branch_ref, tip) = (
             store.clone(),
             repo.path.clone(),
             format!("refs/heads/{}", workspace.branch),
+            head.clone(),
         );
-        let deadline = std::time::Duration::from_secs(10);
-        let now = tokio::task::spawn_blocking(move || {
+        let fetched = tokio::task::spawn_blocking(move || {
             let cli = git::GitCli::new();
-            let store_tip = cli.resolve_commit_within(&store_dir, &branch_ref, deadline);
-            let checkout_tip = cli.resolve_commit_within(&checkout_dir, &branch_ref, deadline);
-            (store_tip.ok().flatten(), checkout_tip.ok().flatten())
+            let deadline = std::time::Duration::from_secs(120);
+            let present = |cli: &git::GitCli| {
+                cli.git_within(
+                    &checkout_dir,
+                    ["cat-file", "-e", &format!("{tip}^{{commit}}")],
+                    None,
+                    std::time::Duration::from_secs(10),
+                )
+                .is_ok()
+            };
+            if present(&cli) {
+                return Ok(());
+            }
+            cli.git_within(
+                &checkout_dir,
+                [
+                    "fetch",
+                    "--no-tags",
+                    "--no-write-fetch-head",
+                    &store_dir.to_string_lossy(),
+                    &branch_ref,
+                ],
+                None,
+                deadline,
+            )
+            .map_err(|e| e.to_string())?;
+            if present(&cli) {
+                Ok(())
+            } else {
+                Err(format!("{tip} did not arrive in the registered checkout"))
+            }
         })
         .await
-        .unwrap_or((None, None));
-        if now.0.as_deref() != Some(head.as_str()) || now.1.as_deref() != Some(head.as_str()) {
+        .unwrap_or_else(|e| Err(e.to_string()));
+        fetched.map_err(|e| {
+            ApiError::BadRequest(format!(
+                "Cannot merge yet: could not bring the workspace's commits into the registered \
+                 checkout: {e}"
+            ))
+        })?;
+        // Pinned: if the workspace moved on meanwhile, refuse instead of
+        // merging a tip that omits the newer commits. Nothing is awaited
+        // between this and `merge_changes_pinned`.
+        let (store_dir, branch_ref) = (store.clone(), format!("refs/heads/{}", workspace.branch));
+        let now = tokio::task::spawn_blocking(move || {
+            git::GitCli::new()
+                .resolve_commit_within(&store_dir, &branch_ref, std::time::Duration::from_secs(10))
+                .ok()
+                .flatten()
+        })
+        .await
+        .unwrap_or(None);
+        if now.as_deref() != Some(head.as_str()) {
             return Err(ApiError::BadRequest(
                 "Cannot merge yet: the workspace received new commits while preparing the \
                  merge; try again"
@@ -700,8 +735,32 @@ pub async fn get_workspace_branch_status(
                 workspace.branch.clone(),
                 target_branch.clone(),
             );
+            let store_tip = head_oid.clone();
             tokio::task::spawn_blocking(move || {
-                counts_against_checkout_target(&worktree, &checkout, &branch, &target)
+                counts_against_checkout_target(&worktree, &checkout, &branch, &target).or_else(
+                    |first| {
+                        // The store may lack a newer target commit. If the
+                        // checkout's copy of the workspace branch is verifiably
+                        // the store's tip, the checkout can compare both.
+                        if git::GitCli::has_stuck_command(&checkout) {
+                            return Err(first);
+                        }
+                        let checkout_tip = git::GitCli::new()
+                            .resolve_commit_within(
+                                &checkout,
+                                &format!("refs/heads/{branch}"),
+                                std::time::Duration::from_secs(5),
+                            )
+                            .ok()
+                            .flatten();
+                        if store_tip.is_none() || checkout_tip != store_tip {
+                            return Err(first);
+                        }
+                        git::GitService::new()
+                            .get_branch_status(&checkout, &branch, &target)
+                            .map_err(|e| e.to_string())
+                    },
+                )
             })
             .await
             .unwrap_or_else(|e| Err(e.to_string()))
