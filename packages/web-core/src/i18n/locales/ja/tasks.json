@@ -205,7 +205,7 @@
     },
     "sourceMirror": {
       "failed": "このブランチをソースチェックアウトに同期できませんでした: {{message}}",
-      "nextAttempt": "次の試行: {{time}}"
+      "retryAfter": "{{time}} 以降に再試行可能"
     }
   },
   "loading": "タスクを読み込み中...",

@@ -205,7 +205,7 @@
     },
     "sourceMirror": {
       "failed": "이 브랜치를 소스 체크아웃에 동기화할 수 없습니다: {{message}}",
-      "nextAttempt": "다음 시도: {{time}}"
+      "retryAfter": "{{time}} 이후 재시도 가능"
     }
   },
   "loading": "작업 로딩 중...",

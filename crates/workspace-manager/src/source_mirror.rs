@@ -156,6 +156,8 @@ struct Slot {
     /// hard NFS mount) or a filesystem scan still blocked. No new round starts
     /// while any is alive, so timed-out work never overlaps its replacement.
     leftovers: Vec<tokio::task::JoinHandle<()>>,
+    /// The commit the last successful round saw on both sides.
+    synced_tip: Option<String>,
 }
 
 /// Collects work a round abandons at a deadline (see [`Slot::leftovers`]).
@@ -180,7 +182,11 @@ static GLOBAL: LazyLock<SourceMirror> =
 enum Round {
     /// The destination holds the store's commit (already, or after a push), or
     /// there is nothing to mirror.
-    Synced { pushed: bool },
+    Synced {
+        pushed: bool,
+        /// The commit both sides now hold (`None`: nothing to mirror).
+        tip: Option<String>,
+    },
     /// Deterministic failure at an unchanged commit: nothing was spawned.
     Unchanged,
     Failed {
@@ -245,6 +251,64 @@ impl SourceMirror {
             .and_then(|slot| slot.failure.clone())
     }
 
+    /// The commit the destination was last seen holding for `branch`, as of
+    /// the last successful round — no git call. `None` when no round has
+    /// succeeded since start, or the last one failed.
+    pub fn synced_tip(&self, dest: &Path, branch: &str) -> Option<String> {
+        let slots = self.inner.slots.lock().unwrap_or_else(|e| e.into_inner());
+        slots
+            .get(&(dest.to_path_buf(), branch.to_string()))
+            .and_then(|slot| slot.synced_tip.clone())
+    }
+
+    /// For an operation that acts on the destination's copy of the branch (a
+    /// direct merge reads it there): ask for a mirror, wait for it up to
+    /// `deadline`, and confirm the destination now holds `expected`. Never
+    /// starts a second push; waits on the in-flight one. The error says why
+    /// the copy is not current, including the mirror's own failure.
+    pub async fn ensure_synced(
+        &self,
+        store: &Path,
+        dest: &Path,
+        branch: &str,
+        expected: &str,
+        deadline: Duration,
+    ) -> Result<(), String> {
+        if self.synced_tip(dest, branch).as_deref() == Some(expected) {
+            return Ok(());
+        }
+        let outcome = self.request(store, dest, branch);
+        if matches!(
+            outcome,
+            RequestOutcome::Disabled | RequestOutcome::NoRuntime
+        ) {
+            return Err(format!(
+                "the branch '{branch}' has not been mirrored into {} and mirroring is {}",
+                dest.display(),
+                if outcome == RequestOutcome::Disabled {
+                    "disabled"
+                } else {
+                    "unavailable"
+                }
+            ));
+        }
+        let _ = tokio::time::timeout(deadline, self.wait_idle(dest, branch)).await;
+        if self.synced_tip(dest, branch).as_deref() == Some(expected) {
+            return Ok(());
+        }
+        Err(match self.failure(dest, branch) {
+            Some(failure) => format!(
+                "the latest commit of '{branch}' has not reached {}: {}",
+                dest.display(),
+                failure.message
+            ),
+            None => format!(
+                "the latest commit of '{branch}' has not reached {} yet; try again shortly",
+                dest.display()
+            ),
+        })
+    }
+
     /// Wait until no leader is running for (`dest`, `branch`).
     pub async fn wait_idle(&self, dest: &Path, branch: &str) {
         let key: MirrorKey = (dest.to_path_buf(), branch.to_string());
@@ -305,7 +369,8 @@ async fn lead(inner: Arc<Inner>, key: MirrorKey, store: PathBuf) {
         let slot = slots.entry(key.clone()).or_default();
         slot.leftovers.extend(leftovers);
         let succeeded = match round {
-            Round::Synced { pushed } => {
+            Round::Synced { pushed, tip } => {
+                slot.synced_tip = tip;
                 if let Some(old) = slot.failure.take() {
                     info!(
                         dest = %dest.display(),
@@ -331,6 +396,7 @@ async fn lead(inner: Arc<Inner>, key: MirrorKey, store: PathBuf) {
                 message,
                 gate,
             } => {
+                slot.synced_tip = None;
                 let attempts = slot.failure.as_ref().map_or(0, |f| f.attempts) + 1;
                 let now = Utc::now();
                 let next = now + backoff(&inner.config, kind, attempts);
@@ -407,7 +473,12 @@ async fn run_round(
     // 1. The store's commit. Absent means nothing to mirror.
     let store_tip = match branch_tip(&git, store, branch, config.probe_timeout, leftovers).await {
         Ok(Some(tip)) => tip,
-        Ok(None) => return Round::Synced { pushed: false },
+        Ok(None) => {
+            return Round::Synced {
+                pushed: false,
+                tip: None,
+            };
+        }
         Err((kind, e)) => {
             return failed(
                 kind,
@@ -422,7 +493,12 @@ async fn run_round(
     // 2. Nothing to do when the destination already has it — including when
     //    an operator fixed it by hand after a failure.
     let dest_tip = match branch_tip(&git, dest, branch, config.probe_timeout, leftovers).await {
-        Ok(Some(tip)) if tip == store_tip => return Round::Synced { pushed: false },
+        Ok(Some(tip)) if tip == store_tip => {
+            return Round::Synced {
+                pushed: false,
+                tip: Some(tip),
+            };
+        }
         Ok(tip) => tip,
         Err((kind, e)) => {
             return failed(
@@ -465,7 +541,10 @@ async fn run_round(
     )
     .await
     {
-        Ok(output) if output.success => Round::Synced { pushed: true },
+        Ok(output) if output.success => Round::Synced {
+            pushed: true,
+            tip: Some(gate.store_tip),
+        },
         Ok(output) => {
             let stderr = excerpt(&output.stderr);
             let kind = classify(&stderr);
@@ -1277,6 +1356,35 @@ mod tests {
             failure.message
         );
         assert_eq!(push_count(tools.path()), 0, "nothing overlaps stuck work");
+    }
+
+    #[tokio::test]
+    async fn ensure_synced_waits_for_the_mirror_and_reports_why_it_is_not_current() {
+        let root = TempDir::new().unwrap();
+        let (src, store) = fixture(root.path());
+        let m = mirror(SourceMirrorConfig::default());
+        let head = tip(&store);
+
+        m.ensure_synced(&store, &src, "vk/b", &head, Duration::from_secs(30))
+            .await
+            .unwrap();
+        assert_eq!(tip(&src), head);
+        assert_eq!(m.synced_tip(&src, "vk/b").as_deref(), Some(head.as_str()));
+
+        // A destination that refuses: the merge-time check names the reason.
+        let root = TempDir::new().unwrap();
+        let (src, store) = fixture(root.path());
+        let holder = root.path().join("holder");
+        git(
+            &src,
+            &["worktree", "add", "-q", &holder.to_string_lossy(), "vk/b"],
+        );
+        let err = m
+            .ensure_synced(&store, &src, "vk/b", &tip(&store), Duration::from_secs(30))
+            .await
+            .unwrap_err();
+        assert!(err.contains("checked out"), "{err}");
+        assert_eq!(m.synced_tip(&src, "vk/b"), None);
     }
 
     #[tokio::test]

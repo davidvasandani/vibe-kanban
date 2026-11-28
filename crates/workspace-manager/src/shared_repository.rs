@@ -41,6 +41,10 @@ const STAGING_SUFFIX: &str = ".incoming";
 const REGISTERED_REMOTE: &str = "vk-registered";
 const ORIGIN_FETCH_REFSPEC: &str = "+refs/heads/*:refs/remotes/origin/*";
 
+/// Serializes snapshotting and retiring/removing worktree registrations
+/// within this process (see `snapshot_registration_index`).
+static REGISTRATION_CLEANUP: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// What [`SharedRepositoryStore::sweep_source_registrations`] did.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct SweepReport {
@@ -429,6 +433,11 @@ impl SharedRepositoryStore {
     pub(crate) fn preserve_and_retire(
         entry: &worktree_linkage::Registration,
     ) -> Result<bool, String> {
+        // Adoption, mirror pre-flight and the startup sweep can reach the same
+        // entry at once; one at a time, snapshot and move together.
+        let _one_at_a_time = REGISTRATION_CLEANUP
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if !Self::snapshot_registration_index(entry) {
             return Ok(false);
         }
@@ -442,6 +451,9 @@ impl SharedRepositoryStore {
     pub(crate) fn preserve_and_remove_deleted(
         entry: &worktree_linkage::Registration,
     ) -> Result<bool, String> {
+        let _one_at_a_time = REGISTRATION_CLEANUP
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if !Self::snapshot_registration_index(entry) {
             return Ok(false);
         }

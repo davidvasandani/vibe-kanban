@@ -262,6 +262,31 @@ pub async fn merge_workspace(
     let workspace_path = Path::new(&container_ref);
     let worktree_path = workspace_path.join(repo.name);
 
+    // `merge_changes` reads the workspace branch from the registered checkout.
+    // For a clustered workspace that copy arrives through the background
+    // mirror, so make sure it holds the worktree's HEAD before merging —
+    // otherwise the merge could silently omit the latest commits.
+    if let Ok((store, _)) = utils::worktree_linkage::common_dir_of(&worktree_path)
+        && let Ok((checkout_git, _)) = utils::worktree_linkage::common_dir_of(&repo.path)
+        && std::fs::canonicalize(&store).ok() != std::fs::canonicalize(&checkout_git).ok()
+    {
+        let head = deployment
+            .git()
+            .get_head_info(&worktree_path)
+            .map_err(ApiError::GitService)?
+            .oid;
+        SourceMirror::global()
+            .ensure_synced(
+                &store,
+                &repo.path,
+                &workspace.branch,
+                &head,
+                std::time::Duration::from_secs(120),
+            )
+            .await
+            .map_err(|e| ApiError::BadRequest(format!("Cannot merge yet: {e}")))?;
+    }
+
     let workspace_label = workspace.name.as_deref().unwrap_or(&workspace.branch);
     let vk_id = resolve_vibe_kanban_identifier(&deployment, workspace.id).await;
     let commit_message = format!("{} (vibe-kanban {})", workspace_label, vk_id);
@@ -533,30 +558,15 @@ pub async fn get_workspace_branch_status(
         // repository, the shared store, which has the real branch tip. The
         // other is the fallback; failing both, report unknown counts rather
         // than failing the response and hiding `source_mirror_error`.
-        // Bounded and off the runtime workers: the checkout may be on a stalled
-        // mount, and this read must not keep `source_mirror_error` from being
-        // returned. Unknown counts as "not current".
-        let checkout_is_current = match head_oid.clone() {
-            Some(head) => {
-                let checkout = repo.path.clone();
-                let branch_ref = format!("refs/heads/{}", workspace.branch);
-                // A process-level deadline, so a stalled checkout never
-                // leaves a probe (or its git child) behind to pile up.
-                let probe = tokio::task::spawn_blocking(move || {
-                    git::GitCli::new()
-                        .resolve_commit_within(
-                            &checkout,
-                            &branch_ref,
-                            std::time::Duration::from_secs(5),
-                        )
-                        .ok()
-                        .flatten()
-                        .is_some_and(|tip| tip == head)
-                });
-                matches!(probe.await, Ok(true))
-            }
-            None => false,
-        };
+        // From the mirror's own record, not a probe: no git call can pile up
+        // here on a stalled checkout. A workspace that is not clustered never
+        // records one, and reading its worktree first is equivalent anyway
+        // (the worktree shares the checkout's refs).
+        let checkout_is_current = head_oid.as_deref().is_some_and(|head| {
+            SourceMirror::global()
+                .synced_tip(&repo.path, &workspace.branch)
+                .is_some_and(|tip| tip == head)
+        });
         // A checkout that does not hold the worktree's HEAD is never read as a
         // fallback: its copy of the branch is stale and would under-report.
         let (primary, secondary): (&std::path::Path, Option<&std::path::Path>) =

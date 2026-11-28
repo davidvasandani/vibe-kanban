@@ -205,7 +205,7 @@
     },
     "sourceMirror": {
       "failed": "No se pudo sincronizar esta rama con el repositorio de origen: {{message}}",
-      "nextAttempt": "Próximo intento a las {{time}}"
+      "retryAfter": "Reintento posible después de las {{time}}"
     }
   },
   "loading": "Cargando tareas...",

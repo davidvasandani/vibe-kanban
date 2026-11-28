@@ -279,7 +279,7 @@ function SourceMirrorErrorRow({
   const next = new Date(nextAttemptAt);
   const retry = Number.isNaN(next.getTime())
     ? null
-    : t('git.sourceMirror.nextAttempt', {
+    : t('git.sourceMirror.retryAfter', {
         time: next.toLocaleTimeString(),
       });
   const text = t('git.sourceMirror.failed', { message });

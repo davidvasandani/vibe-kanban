@@ -310,7 +310,7 @@
     },
     "sourceMirror": {
       "failed": "Impossible de synchroniser cette branche vers le dépôt source : {{message}}",
-      "nextAttempt": "Prochaine tentative à {{time}}"
+      "retryAfter": "Nouvel essai possible après {{time}}"
     }
   },
   "repoBranchSelector": {

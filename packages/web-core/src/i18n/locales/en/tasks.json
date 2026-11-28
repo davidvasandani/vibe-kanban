@@ -310,7 +310,7 @@
     },
     "sourceMirror": {
       "failed": "Couldn't sync this branch to the source checkout: {{message}}",
-      "nextAttempt": "Next attempt at {{time}}"
+      "retryAfter": "Retry possible after {{time}}"
     }
   },
   "repoBranchSelector": {
