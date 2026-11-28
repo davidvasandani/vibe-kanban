@@ -1730,3 +1730,281 @@ fn list_remotes_expands_aliases_that_name_no_repository() {
         )]
     );
 }
+
+#[test]
+fn head_commit_added_size_counts_only_files_the_commit_adds() {
+    let td = TempDir::new().unwrap();
+    let repo_path = td.path().join("repo");
+    let service = GitService::new();
+    service
+        .initialize_repo_with_main_branch(&repo_path)
+        .unwrap();
+    let repo = Repository::open(&repo_path).unwrap();
+    configure_user(&repo);
+
+    write_file(&repo_path, "existing.txt", "old\n");
+    commit_all(&repo, "base");
+
+    // One modified file (not counted) and two added ones (10 + 5 bytes).
+    write_file(&repo_path, "existing.txt", "modified\n");
+    write_file(&repo_path, "out/a.bin", "0123456789");
+    write_file(&repo_path, "out/b.bin", "abcde");
+    commit_all(&repo, "agent output");
+
+    let (files, bytes) = GitCli::new().head_commit_added_size(&repo_path).unwrap();
+    assert_eq!(files, 2);
+    assert_eq!(bytes, 15);
+}
+
+#[test]
+fn head_commit_added_size_measures_a_merge_against_its_first_parent() {
+    let td = TempDir::new().unwrap();
+    let repo_path = td.path().join("repo");
+    let service = GitService::new();
+    service
+        .initialize_repo_with_main_branch(&repo_path)
+        .unwrap();
+    let repo = Repository::open(&repo_path).unwrap();
+    configure_user(&repo);
+    write_file(&repo_path, "base.txt", "base\n");
+    commit_all(&repo, "base");
+
+    let cli = GitCli::new();
+    cli.git(&repo_path, ["checkout", "-q", "-b", "side"])
+        .unwrap();
+    write_file(&repo_path, "gen/out.bin", "0123456789");
+    commit_all(&repo, "side adds output");
+    cli.git(&repo_path, ["checkout", "-q", "main"]).unwrap();
+    cli.git(
+        &repo_path,
+        [
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "merge",
+            "-q",
+            "--no-ff",
+            "-m",
+            "merge side",
+            "side",
+        ],
+    )
+    .unwrap();
+
+    assert_eq!(cli.head_commit_added_size(&repo_path).unwrap(), (1, 10));
+}
+
+#[test]
+fn snapshot_index_keeps_staged_only_content_reachable() {
+    let td = TempDir::new().unwrap();
+    let repo_path = td.path().join("repo");
+    let service = GitService::new();
+    service
+        .initialize_repo_with_main_branch(&repo_path)
+        .unwrap();
+    let repo = Repository::open(&repo_path).unwrap();
+    configure_user(&repo);
+    write_file(&repo_path, "f.txt", "committed\n");
+    commit_all(&repo, "base");
+
+    // Stage one version, then edit again: the staged one exists only in the index.
+    write_file(&repo_path, "f.txt", "staged\n");
+    add_path(&repo_path, "f.txt");
+    write_file(&repo_path, "f.txt", "edited again\n");
+
+    let cli = GitCli::new();
+    let index = repo_path.join(".git").join("index");
+    cli.snapshot_index(
+        &repo_path,
+        &index,
+        "refs/vk-retired/test",
+        "snapshot",
+        std::time::Duration::from_secs(30),
+    )
+    .unwrap();
+    let staged = cli
+        .git(&repo_path, ["show", "refs/vk-retired/test:f.txt"])
+        .unwrap();
+    assert_eq!(staged, "staged\n");
+}
+
+// The alias runs `sleep` through `/bin/sh`.
+#[cfg(unix)]
+#[test]
+fn git_within_kills_a_hung_command_at_its_deadline() {
+    let td = TempDir::new().unwrap();
+    let repo_path = td.path().join("repo");
+    GitService::new()
+        .initialize_repo_with_main_branch(&repo_path)
+        .unwrap();
+    let started = std::time::Instant::now();
+    let result = GitCli::new().git_within(
+        &repo_path,
+        ["-c", "alias.hang=!sleep 30", "hang"],
+        None,
+        std::time::Duration::from_secs(1),
+    );
+    assert!(result.is_err(), "{result:?}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    // Killed and reaped soon after: no longer reported as stuck.
+    for _ in 0..100 {
+        if !GitCli::has_stuck_command(&repo_path) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("the killed command was never reaped");
+}
+
+#[test]
+fn a_pinned_merge_merges_the_verified_tip_and_keeps_a_newer_branch() {
+    let td = TempDir::new().unwrap();
+    let (repo_path, worktree_path) = setup_repo_with_worktree(&td);
+    let cli = GitCli::new();
+    let verified = cli
+        .git(&worktree_path, ["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+    // A commit lands on the task branch after the tip was verified.
+    write_file(&worktree_path, "late.txt", "late\n");
+    cli.git(&worktree_path, ["add", "late.txt"]).unwrap();
+    cli.git(
+        &worktree_path,
+        [
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "-m",
+            "late",
+        ],
+    )
+    .unwrap();
+    let newer = cli
+        .git(&worktree_path, ["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    GitService::new()
+        .merge_changes_pinned(
+            &repo_path,
+            &worktree_path,
+            "feature",
+            "main",
+            "squash",
+            Some(&verified),
+        )
+        .unwrap();
+
+    let main_tree = cli
+        .git(&repo_path, ["ls-tree", "-r", "--name-only", "main"])
+        .unwrap();
+    assert!(
+        !main_tree.contains("late.txt"),
+        "only the verified tip is merged"
+    );
+    assert_eq!(
+        cli.git(&repo_path, ["rev-parse", "refs/heads/feature"])
+            .unwrap()
+            .trim(),
+        newer,
+        "the task branch keeps the commit that landed meanwhile"
+    );
+}
+
+#[test]
+fn a_pinned_merge_into_an_unchecked_out_target_updates_the_base_repository() {
+    let td = TempDir::new().unwrap();
+    let (repo_path, worktree_path) = setup_repo_with_worktree(&td);
+    let cli = GitCli::new();
+    // Move the base checkout off `main`, so the libgit2 path is taken.
+    cli.git(&repo_path, ["checkout", "-q", "-b", "parking"])
+        .unwrap();
+    let verified = cli
+        .git(&worktree_path, ["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let before = cli.git(&repo_path, ["rev-parse", "main"]).unwrap();
+
+    let sha = GitService::new()
+        .merge_changes_pinned(
+            &repo_path,
+            &worktree_path,
+            "feature",
+            "main",
+            "squash",
+            Some(&verified),
+        )
+        .unwrap();
+
+    let after = cli.git(&repo_path, ["rev-parse", "main"]).unwrap();
+    assert_ne!(before, after);
+    assert_eq!(after.trim(), sha);
+}
+
+#[test]
+fn a_lagging_courtesy_copy_follows_but_a_diverged_or_checked_out_one_does_not() {
+    let td = TempDir::new().unwrap();
+    let (repo_path, worktree_path) = setup_repo_with_worktree(&td);
+    let cli = GitCli::new();
+    let rev = |r: &str| {
+        cli.git(&repo_path, ["rev-parse", r])
+            .unwrap()
+            .trim()
+            .to_string()
+    };
+    let pinned = rev("feature");
+    let new_tip = rev("main");
+    // A copy that lagged at an ancestor of the pinned tip (not checked out).
+    cli.git(&repo_path, ["branch", "lagging", &format!("{pinned}~1")])
+        .unwrap();
+    // A copy that diverged: a commit off `main` that `feature` lacks.
+    let tree = rev("main^{tree}");
+    let off = cli
+        .git(
+            &repo_path,
+            [
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit-tree",
+                &tree,
+                "-p",
+                "main",
+                "-m",
+                "elsewhere",
+            ],
+        )
+        .unwrap();
+    cli.git(&repo_path, ["branch", "diverged", off.trim()])
+        .unwrap();
+
+    let s = GitService::new();
+    assert!(
+        s.advance_lagging_copy(&repo_path, "lagging", &pinned, &new_tip)
+            .unwrap()
+    );
+    assert_eq!(rev("lagging"), new_tip);
+    assert!(
+        !s.advance_lagging_copy(&repo_path, "diverged", &pinned, &new_tip)
+            .unwrap()
+    );
+    // `feature` is checked out by the worktree: left alone.
+    assert!(
+        !s.advance_lagging_copy(&repo_path, "feature", &pinned, &new_tip)
+            .unwrap()
+    );
+    assert_eq!(rev("feature"), pinned);
+    let _ = worktree_path;
+}

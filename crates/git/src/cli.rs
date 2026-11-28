@@ -87,6 +87,20 @@ pub struct StatusDiffOptions {
     pub path_filter: Option<Vec<String>>, // pathspecs to limit diff
 }
 
+/// Timed-out `git_within` children not yet exited, per repository path.
+static STUCK_COMMANDS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, usize>>,
+> = std::sync::LazyLock::new(Default::default);
+
+fn stuck_commands_adjust(repo_path: &Path, delta: isize) {
+    let mut stuck = STUCK_COMMANDS.lock().unwrap_or_else(|e| e.into_inner());
+    let count = stuck.entry(repo_path.to_path_buf()).or_default();
+    *count = count.saturating_add_signed(delta);
+    if *count == 0 {
+        stuck.remove(repo_path);
+    }
+}
+
 impl GitCli {
     pub fn new() -> Self {
         Self {}
@@ -1064,6 +1078,236 @@ impl GitCli {
         Ok(sha)
     }
 
+    /// [`Self::git`] under a process-level deadline, for callers that must not
+    /// wait on stalled storage: the command runs in its own process group,
+    /// and at the deadline the whole group is killed (while the unreaped
+    /// leader still pins the group id) and the call fails. Output pipes are
+    /// drained on threads, so neither side can block on a full pipe, and the
+    /// leader is reaped only after they close.
+    pub fn git_within<I, S>(
+        &self,
+        repo_path: &Path,
+        args: I,
+        envs: Option<&[(OsString, OsString)]>,
+        deadline: std::time::Duration,
+    ) -> Result<String, GitCliError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        self.git_within_stdin(repo_path, args, envs, None, deadline)
+    }
+
+    /// [`Self::git_within`] that also feeds `stdin` (written on a thread, so a
+    /// large input cannot deadlock against unread output).
+    pub fn git_within_stdin<I, S>(
+        &self,
+        repo_path: &Path,
+        args: I,
+        envs: Option<&[(OsString, OsString)]>,
+        stdin: Option<Vec<u8>>,
+        deadline: std::time::Duration,
+    ) -> Result<String, GitCliError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        use std::{io::Read, sync::mpsc, time::Instant};
+
+        // No `ensure_available` here: it runs an unbounded `git --version`.
+        // Resolving the executable is enough; a broken git fails the command.
+        let git = resolve_executable_path_blocking("git").ok_or(GitCliError::NotAvailable)?;
+        let mut cmd = Command::new(&git);
+        cmd.arg("-C").arg(repo_path);
+        cmd.arg("-c").arg("core.hooksPath=/dev/null");
+        for (k, v) in envs.unwrap_or_default() {
+            cmd.env(k, v);
+        }
+        cmd.env("GIT_TERMINAL_PROMPT", "0");
+        cmd.args(args);
+        cmd.stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+        use utils::command_ext::NoWindowExt;
+        let mut child = cmd
+            .no_window()
+            .spawn()
+            .map_err(|e| GitCliError::CommandFailed(e.to_string()))?;
+        let pid = child.id();
+        if let (Some(input), Some(mut pipe)) = (stdin, child.stdin.take()) {
+            std::thread::spawn(move || {
+                use std::io::Write;
+                let _ = pipe.write_all(&input);
+            });
+        }
+        let pipe = |mut reader: Box<dyn Read + Send>| {
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                let _ = reader.read_to_end(&mut buf);
+                let _ = tx.send(buf);
+            });
+            rx
+        };
+        let stdout = child.stdout.take().map(|p| pipe(Box::new(p)));
+        let stderr = child.stderr.take().map(|p| pipe(Box::new(p)));
+
+        let until = Instant::now() + deadline;
+        let collect = |rx: Option<mpsc::Receiver<Vec<u8>>>| -> Option<Vec<u8>> {
+            match rx {
+                None => Some(Vec::new()),
+                Some(rx) => rx
+                    .recv_timeout(until.saturating_duration_since(Instant::now()))
+                    .ok(),
+            }
+        };
+        let out = collect(stdout);
+        let err = out.as_ref().and_then(|_| collect(stderr));
+        let status = match (out.is_some() && err.is_some()).then_some(()) {
+            Some(()) => loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => break Some(status),
+                    Ok(None) if Instant::now() < until => {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                    _ => break None,
+                }
+            },
+            None => None,
+        };
+        let Some(status) = status else {
+            #[cfg(unix)]
+            utils::process::kill_process_group_now(pid);
+            let _ = child.kill();
+            // Reap on a thread: a child stuck in uninterruptible I/O dies only
+            // when that I/O returns, and this caller must not wait for it.
+            // Until it has, `has_stuck_command` reports this repository, so
+            // pollers can skip it instead of piling up more stuck children.
+            let key = repo_path.to_path_buf();
+            stuck_commands_adjust(&key, 1);
+            std::thread::spawn(move || {
+                let _ = child.wait();
+                // Helpers (`pack-objects`, …) may outlive the leader: keep the
+                // fence until none of the group is still running (probing
+                // only — never signalled after the leader is reaped).
+                #[cfg(unix)]
+                if let Ok(pgid) = i32::try_from(pid) {
+                    while utils::process::process_group_has_running_members(pgid) {
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                    }
+                }
+                stuck_commands_adjust(&key, -1);
+            });
+            return Err(GitCliError::CommandFailed(format!(
+                "git did not finish within {}s and was killed",
+                deadline.as_secs()
+            )));
+        };
+        let out = out.unwrap_or_default();
+        if !status.success() {
+            let err = String::from_utf8_lossy(&err.unwrap_or_default())
+                .trim()
+                .to_string();
+            return Err(GitCliError::CommandFailed(if err.is_empty() {
+                "Command failed with no output".to_string()
+            } else {
+                err
+            }));
+        }
+        Ok(String::from_utf8_lossy(&out).to_string())
+    }
+
+    /// Whether a [`Self::git_within`] command against `repo_path` timed out
+    /// and has not exited yet (killed, but stuck in uninterruptible I/O).
+    pub fn has_stuck_command(repo_path: &Path) -> bool {
+        STUCK_COMMANDS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(repo_path)
+            .is_some_and(|n| *n > 0)
+    }
+
+    /// [`Self::resolve_commit`] under a process-level deadline (see
+    /// [`Self::git_within`]).
+    pub fn resolve_commit_within(
+        &self,
+        repo_path: &Path,
+        revision: &str,
+        deadline: std::time::Duration,
+    ) -> Result<Option<String>, GitCliError> {
+        let out = self.git_within(
+            repo_path,
+            [
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("{revision}^{{commit}}"),
+            ],
+            None,
+            deadline,
+        );
+        match out {
+            Ok(out) => {
+                let oid = out.trim().to_string();
+                Ok((!oid.is_empty()).then_some(oid))
+            }
+            // `--verify --quiet` fails with no output for a missing revision.
+            Err(GitCliError::CommandFailed(msg)) if msg == "Command failed with no output" => {
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Record the tree an index file describes as a commit under `refname`,
+    /// so every blob it stages stays reachable (and safe from gc) after the
+    /// index itself is moved out of git's view. Fails, writing nothing, for an
+    /// index git cannot turn into a tree (e.g. one with unmerged entries).
+    ///
+    /// Every step runs under `deadline` (see [`Self::git_within`]).
+    pub fn snapshot_index(
+        &self,
+        repo_path: &Path,
+        index_file: &Path,
+        refname: &str,
+        message: &str,
+        deadline: std::time::Duration,
+    ) -> Result<String, GitCliError> {
+        let env = [(
+            OsString::from("GIT_INDEX_FILE"),
+            index_file.as_os_str().to_os_string(),
+        )];
+        let tree = self.git_within(repo_path, ["write-tree"], Some(&env), deadline)?;
+        let tree = tree.trim().to_string();
+        let commit = self.git_within(
+            repo_path,
+            [
+                "-c",
+                "user.name=Vibe Kanban",
+                "-c",
+                "user.email=noreply@vibe-kanban.local",
+                "commit-tree",
+                &tree,
+                "-m",
+                message,
+            ],
+            None,
+            deadline,
+        )?;
+        let commit = commit.trim().to_string();
+        self.git_within(repo_path, ["update-ref", refname, &commit], None, deadline)?;
+        Ok(commit)
+    }
+
     /// Update a ref to a specific sha in the repo.
     pub fn update_ref(
         &self,
@@ -1288,6 +1532,109 @@ impl GitCli {
     {
         let out = self.git_impl(repo_path, args, Some(envs), None)?;
         Ok(String::from_utf8_lossy(&out).to_string())
+    }
+
+    /// Files added by `HEAD` (relative to its first parent, or the empty tree
+    /// for a root commit) and their total size in bytes. Submodule entries are
+    /// counted as files but contribute no bytes.
+    ///
+    /// Reads only the blobs the commit adds, never the whole tree. Beyond
+    /// 8192 added blobs the byte count is a lower bound.
+    pub fn head_commit_added_size(
+        &self,
+        worktree_path: &Path,
+    ) -> Result<(usize, u64), GitCliError> {
+        self.commit_added_size(worktree_path, "HEAD")
+    }
+
+    /// [`Self::head_commit_added_size`] for an explicit commit, within a
+    /// total `budget`: every git call runs under the time left, and when the
+    /// budget runs out mid-way the byte count so far is returned as a lower
+    /// bound (it is a diagnostic, never worth waiting on stalled storage for).
+    pub fn commit_added_size(
+        &self,
+        worktree_path: &Path,
+        commit: &str,
+    ) -> Result<(usize, u64), GitCliError> {
+        self.commit_added_size_within(worktree_path, commit, std::time::Duration::from_secs(60))
+    }
+
+    pub fn commit_added_size_within(
+        &self,
+        worktree_path: &Path,
+        commit: &str,
+        budget: std::time::Duration,
+    ) -> Result<(usize, u64), GitCliError> {
+        use std::collections::HashSet;
+
+        let until = std::time::Instant::now() + budget;
+        let left = || until.saturating_duration_since(std::time::Instant::now());
+
+        // Against the first parent (so a merge is measured too), or the empty
+        // tree for a root commit. `-z`: `:<modes> <shas> A\0<path>\0`.
+        let has_parent = self
+            .git_within(
+                worktree_path,
+                ["rev-parse", "--verify", "--quiet", &format!("{commit}^1")],
+                None,
+                left(),
+            )
+            .is_ok();
+        let mut args = vec!["diff-tree", "-r", "-z", "--no-commit-id", "--no-renames"];
+        args.push("--diff-filter=A");
+        let parent = format!("{commit}^1");
+        if has_parent {
+            args.extend([parent.as_str(), commit]);
+        } else {
+            args.extend(["--root", commit]);
+        }
+        let raw = self.git_within(worktree_path, args, None, left())?;
+        let mut files = 0usize;
+        let mut blobs: HashSet<&str> = HashSet::new();
+        let mut fields = raw.split('\0');
+        while let Some(meta) = fields.next() {
+            let Some(meta) = meta.strip_prefix(':') else {
+                continue;
+            };
+            let _path = fields.next();
+            // `<old mode> <new mode> <old sha> <new sha> A`
+            let parts: Vec<&str> = meta.split_whitespace().collect();
+            if parts.len() < 4 {
+                continue;
+            }
+            files += 1;
+            if parts[1] != "160000" {
+                blobs.insert(parts[3]);
+            }
+        }
+        // Sizes of exactly those blobs. Input is fed on a thread, so batches
+        // can be large without deadlocking. At most `MAX_SIZED_BLOBS` are
+        // sized; past that (or once the budget is spent) the byte count is a
+        // lower bound, and the file count alone crosses any sane threshold.
+        const BATCH: usize = 2048;
+        const MAX_SIZED_BLOBS: usize = 8192;
+        let blobs: Vec<&str> = blobs.into_iter().take(MAX_SIZED_BLOBS).collect();
+        let mut bytes = 0u64;
+        for batch in blobs.chunks(BATCH) {
+            if left().is_zero() {
+                break;
+            }
+            let input = batch.join("\n") + "\n";
+            let Ok(sizes) = self.git_within_stdin(
+                worktree_path,
+                ["cat-file", "--batch-check=%(objectsize)"],
+                None,
+                Some(input.into_bytes()),
+                left(),
+            ) else {
+                break;
+            };
+            bytes += sizes
+                .lines()
+                .filter_map(|l| l.trim().parse::<u64>().ok())
+                .sum::<u64>();
+        }
+        Ok((files, bytes))
     }
 
     fn git_with_stdin<I, S>(

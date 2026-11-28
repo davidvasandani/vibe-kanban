@@ -307,6 +307,10 @@
       "states": {
         "creating": "Creating..."
       }
+    },
+    "sourceMirror": {
+      "failed": "Couldn't sync this branch to the source checkout: {{message}}",
+      "retryAfter": "Retry possible after {{time}}"
     }
   },
   "repoBranchSelector": {

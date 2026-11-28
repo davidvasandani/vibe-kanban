@@ -349,6 +349,15 @@ function GitOperations({
         if (chips.length > 0)
           return <div className="flex items-center gap-2">{chips}</div>;
 
+        // Both counts unknown (the comparison could not run, e.g. while the
+        // branch mirror lags): say nothing rather than "up to date".
+        if (
+          selectedRepoStatus &&
+          selectedRepoStatus.commits_ahead === null &&
+          selectedRepoStatus.commits_behind === null
+        )
+          return null;
+
         return (
           <span className="text-muted-foreground hidden sm:inline">
             {t('git.status.upToDate')}

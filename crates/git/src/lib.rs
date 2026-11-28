@@ -695,14 +695,128 @@ impl GitService {
         base_branch_name: &str,
         commit_message: &str,
     ) -> Result<String, GitServiceError> {
+        self.merge_changes_pinned(
+            base_worktree_path,
+            task_worktree_path,
+            task_branch_name,
+            base_branch_name,
+            commit_message,
+            None,
+        )
+    }
+
+    /// For a pinned merge: the value to compare-and-swap the base repository's
+    /// task branch from. `Some(Some(observed))` when it is the pinned tip or an
+    /// ancestor of it (a courtesy copy that lagged — moving it to the squash
+    /// keeps later mirror pushes fast-forward), `Some(None)` when it does not
+    /// exist, `None` when it points elsewhere (moved on: leave it).
+    ///
+    /// Also `None` when the branch is checked out anywhere in the base
+    /// repository (an operator's checkout of the courtesy copy): moving a
+    /// checked-out ref under its worktree would make its files read as local
+    /// changes against the new tip.
+    fn squash_cas_base(
+        &self,
+        base_worktree_path: &Path,
+        repo: &Repository,
+        branch: &str,
+        pinned: &str,
+    ) -> Option<Option<git2::Oid>> {
+        let pinned = git2::Oid::from_str(pinned).ok()?;
+        if !matches!(
+            self.find_checkout_path_for_branch(base_worktree_path, branch),
+            Ok(None)
+        ) {
+            return None;
+        }
+        let refname = format!("refs/heads/{branch}");
+        match repo.refname_to_id(&refname) {
+            Ok(observed) if observed == pinned => Some(Some(observed)),
+            Ok(observed) => repo
+                .graph_descendant_of(pinned, observed)
+                .ok()
+                .filter(|is| *is)
+                .map(|_| Some(observed)),
+            Err(e) if e.code() == git2::ErrorCode::NotFound => Some(None),
+            Err(_) => None,
+        }
+    }
+
+    /// After a pinned merge whose authoritative branch has moved to `new_tip`:
+    /// move `branch` in `base_path` (a courtesy copy) there too, from a value
+    /// it is verified to hold — the pinned tip or an ancestor of it (a copy
+    /// that lagged) — and only if no worktree has it checked out. Returns
+    /// whether it moved.
+    pub fn advance_lagging_copy(
+        &self,
+        base_path: &Path,
+        branch: &str,
+        pinned: &str,
+        new_tip: &str,
+    ) -> Result<bool, GitServiceError> {
+        let repo = self.open_repo(base_path)?;
+        let refname = format!("refs/heads/{branch}");
+        let new_tip = git2::Oid::from_str(new_tip)?;
+        match self.squash_cas_base(base_path, &repo, branch, pinned) {
+            Some(Some(observed)) => {
+                repo.reference_matching(
+                    &refname,
+                    new_tip,
+                    true,
+                    observed,
+                    "Follow the workspace branch after squash merge",
+                )?;
+                Ok(true)
+            }
+            Some(None) => {
+                repo.reference(
+                    &refname,
+                    new_tip,
+                    false,
+                    "Follow the workspace branch after squash merge",
+                )?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// [`Self::merge_changes`] that merges exactly `expected_task_tip` (when
+    /// given) rather than whatever `task_branch_name` points at by the time it
+    /// is read: the divergence check and the squash both use that commit, and
+    /// the task branch is moved only if it is still at it (a conditional ref
+    /// update), so a commit landing mid-merge is never silently dropped.
+    pub fn merge_changes_pinned(
+        &self,
+        base_worktree_path: &Path,
+        task_worktree_path: &Path,
+        task_branch_name: &str,
+        base_branch_name: &str,
+        commit_message: &str,
+        expected_task_tip: Option<&str>,
+    ) -> Result<String, GitServiceError> {
         // Open the repositories
         let task_repo = self.open_repo(task_worktree_path)?;
         let base_repo = self.open_repo(base_worktree_path)?;
 
         // Check if base branch is ahead of task branch - this indicates the base has moved
         // ahead since the task was created, which should block the merge
-        let (_, task_behind) =
-            self.get_branch_status(base_worktree_path, task_branch_name, base_branch_name)?;
+        let task_behind = match expected_task_tip {
+            Some(tip) => {
+                let tip = git2::Oid::from_str(tip)?;
+                let base = Self::find_branch(&base_repo, base_branch_name)?;
+                let base_oid = base
+                    .get()
+                    .target()
+                    .ok_or_else(|| GitServiceError::BranchNotFound(base_branch_name.to_string()))?;
+                base_repo.graph_ahead_behind(tip, base_oid)?.1
+            }
+            None => {
+                self.get_branch_status(base_worktree_path, task_branch_name, base_branch_name)?
+                    .1
+            }
+        };
+        let merge_source = expected_task_tip.unwrap_or(task_branch_name);
 
         if task_behind > 0 {
             return Err(GitServiceError::BranchesDiverged(format!(
@@ -735,36 +849,63 @@ impl GitService {
                     .merge_squash_commit(
                         &base_checkout_path,
                         base_branch_name,
-                        task_branch_name,
+                        merge_source,
                         commit_message,
                     )
                     .map_err(|e| {
                         GitServiceError::InvalidRepository(format!("CLI merge failed: {e}"))
                     })?;
 
-                // Update task branch ref for continuity
+                // Update task branch ref for continuity — only from the pinned
+                // tip, so a commit that landed meanwhile is not overwritten.
                 let task_refname = format!("refs/heads/{task_branch_name}");
-                git_cli
-                    .update_ref(base_worktree_path, &task_refname, &sha)
-                    .map_err(|e| {
-                        GitServiceError::InvalidRepository(format!("git update-ref failed: {e}"))
-                    })?;
+                match expected_task_tip {
+                    // Pinned (a clustered workspace): the task branch here is
+                    // only a courtesy copy. It is moved by the caller with
+                    // `advance_lagging_copy`, after the authoritative branch
+                    // has moved — never before, or a commit that landed
+                    // meanwhile would leave the copy off the real history.
+                    Some(_) => {}
+                    None => {
+                        git_cli
+                            .update_ref(base_worktree_path, &task_refname, &sha)
+                            .map_err(|e| {
+                                GitServiceError::InvalidRepository(format!(
+                                    "git update-ref failed: {e}"
+                                ))
+                            })?;
+                    }
+                }
 
                 Ok(sha)
             }
             None => {
-                // base branch not checked out anywhere - use libgit2 pure ref operations
-                let task_branch = Self::find_branch(&task_repo, task_branch_name)?;
-                let base_branch = Self::find_branch(&task_repo, base_branch_name)?;
+                // base branch not checked out anywhere - use libgit2 pure ref operations.
+                // Pinned, the task worktree may belong to a different
+                // repository (a clustered workspace's shared store) whose copy
+                // of the base branch is not the registered one: then read the
+                // base from, and write the squash into, the base repository,
+                // which the caller has already given the pinned commit.
+                let merge_repo = if expected_task_tip.is_some() {
+                    &base_repo
+                } else {
+                    &task_repo
+                };
+                let base_branch = Self::find_branch(merge_repo, base_branch_name)?;
 
                 // Resolve commits
                 let base_commit = base_branch.get().peel_to_commit()?;
-                let task_commit = task_branch.get().peel_to_commit()?;
+                let task_commit = match expected_task_tip {
+                    Some(tip) => merge_repo.find_commit(git2::Oid::from_str(tip)?)?,
+                    None => Self::find_branch(&task_repo, task_branch_name)?
+                        .get()
+                        .peel_to_commit()?,
+                };
 
                 // Create the squash commit in-memory (no checkout) and update the base branch ref
-                let signature = self.signature_with_fallback(&task_repo)?;
+                let signature = self.signature_with_fallback(merge_repo)?;
                 let squash_commit_id = self.perform_squash_merge(
-                    &task_repo,
+                    merge_repo,
                     &base_commit,
                     &task_commit,
                     &signature,
@@ -775,12 +916,22 @@ impl GitService {
                 // Update the task branch to the new squash commit so follow-up
                 // work can continue from the merged state without conflicts.
                 let task_refname = format!("refs/heads/{task_branch_name}");
-                base_repo.reference(
-                    &task_refname,
-                    squash_commit_id,
-                    true,
-                    "Reset task branch after squash merge",
-                )?;
+                match expected_task_tip {
+                    // Pinned (a clustered workspace): the task branch here is
+                    // only a courtesy copy. It is moved by the caller with
+                    // `advance_lagging_copy`, after the authoritative branch
+                    // has moved — never before, or a commit that landed
+                    // meanwhile would leave the copy off the real history.
+                    Some(_) => {}
+                    None => {
+                        base_repo.reference(
+                            &task_refname,
+                            squash_commit_id,
+                            true,
+                            "Reset task branch after squash merge",
+                        )?;
+                    }
+                }
 
                 Ok(squash_commit_id.to_string())
             }
@@ -859,6 +1010,13 @@ impl GitService {
         .into_reference();
         let remote = self.get_remote_from_branch_ref(&repo, &base_branch_ref)?;
         self.fetch_all_from_remote(&repo, &remote, credentials)?;
+        // Re-resolve after fetching: the reference read above still holds the
+        // pre-fetch target, which would compare against the stale tip.
+        let base_name = base_branch_ref.name().map(str::to_string);
+        let base_branch_ref = match base_name {
+            Some(name) => repo.find_reference(&name)?,
+            None => base_branch_ref,
+        };
         self.get_branch_status_inner(&repo, &branch_ref, &base_branch_ref)
     }
 

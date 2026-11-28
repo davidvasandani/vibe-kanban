@@ -107,4 +107,30 @@ describe('deriveRepoInfos', () => {
       isTargetRemote: true,
     });
   });
+  it('surfaces a source-checkout mirror failure only on its own repository', () => {
+    const [failing, healthy] = deriveRepoInfos(
+      [repo('homelab'), repo('ansible')],
+      [
+        {
+          ...status('homelab'),
+          source_mirror_error: {
+            kind: 'deterministic',
+            message:
+              "branch 'vk/x' is checked out at /srv/ws/x/homelab in /srv/src/homelab",
+            attempts: 1,
+            last_attempt_at: '2026-11-28T10:00:00Z',
+            next_attempt_at: '2026-11-28T10:01:00Z',
+          },
+        },
+        { ...status('ansible'), source_mirror_error: null },
+      ]
+    );
+
+    expect(failing.sourceMirrorError).toEqual({
+      message:
+        "branch 'vk/x' is checked out at /srv/ws/x/homelab in /srv/src/homelab",
+      nextAttemptAt: '2026-11-28T10:01:00Z',
+    });
+    expect(healthy.sourceMirrorError).toBeUndefined();
+  });
 });

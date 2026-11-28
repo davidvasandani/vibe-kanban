@@ -211,6 +211,10 @@
       "states": {
         "creating": "创建中..."
       }
+    },
+    "sourceMirror": {
+      "failed": "无法将此分支同步到源检出：{{message}}",
+      "retryAfter": "{{time}} 之后可重试"
     }
   },
   "viewProcessesDialog": {

@@ -348,6 +348,16 @@ contributed to it.
   classify full error evidence and preserve Claude failed-result diagnostics
   (`vk/723d-don-t-run-auto-f`). Claude's `5-hour` window limit is matched by an
   explicit qualifier list, never "any word" (`vk/e0b5-auto-fix-persist`).
+- [source-checkout-mirror.md](source-checkout-mirror.md) — The clustered
+  workspace's courtesy branch copy in `/srv/src/<repo>`. Single-flight per
+  branch, never on the request path, git-free when in sync. Every git child is
+  bounded; process groups are killed while still pinned and fenced until they
+  exit (never signalled after reaping). Visible, backed-off failures with a
+  retry gate. Worktree-registration evidence rules: re-linked is retirable,
+  missing needs deletion or device evidence, never `git worktree prune`,
+  snapshot the index and move the entry aside. Readers of the copy (branch
+  status, direct merge) must not trust it. Includes the pinned merge sequence
+  (`vk/2b38-vas-1140-seriali`).
 - [coordinator-nfs-load.md](coordinator-nfs-load.md) — Diagnosing coordinator
   load from NFS waits (io PSI and `procs_blocked` miss it, so count D-state
   threads). Root cause was per-client summaries git sweeps. Bulk worktree scans

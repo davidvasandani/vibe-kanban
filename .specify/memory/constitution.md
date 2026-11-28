@@ -966,6 +966,25 @@ configuration, and is visible and cancellable by the operator. The setting is
 read when the event is handled. Such an error does not also trigger XLI
 remediation.
 
+### LXI. Vk's own background git work is single-flight, time-bounded, and backs off
+A git subprocess vk starts for its own bookkeeping, not as a user-requested
+operation (mirroring a workspace branch into the operator's checkout, for
+example), runs **outside** the request that triggered it. It never blocks a
+request handler or a runtime worker thread. At most one such process runs per
+(destination, ref). A trigger that arrives while one is running is skipped or
+folded into a single follow-up run, and never starts a second process. Every
+run has a timeout. On expiry the whole process group is killed, so children
+such as `git pack-objects` cannot outlive it. A run that would change nothing
+(the destination already holds the commit) spawns nothing. Failures are logged
+at `warn!` with git's own stderr, bounded, and appear on the affected workspace
+through an ordinary product read. Retries back off exponentially up to a cap.
+A deterministic refusal (`remote rejected`, a branch checked out elsewhere) is
+retried only after the input changes, never in a loop. Removing a stale git
+registration that blocks such work follows XV: it is removed only on positive
+evidence (worktree directory definitely gone with its parent storage present,
+or definitely re-linked elsewhere). It is removed per entry, never by a blanket
+`git worktree prune`, and it is logged at `info!`.
+
 ## Review: vk/3ffa-upgrade-codex-mo
 
 Applied `/speckit.constitution`: principles II (exact catalog regression
@@ -1016,7 +1035,12 @@ required.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.57.0 (adds LX: automatic continuation of an existing session
+**Version**: 0.58.0 (adds LXI: vk-initiated background git work such as the
+source-checkout branch mirror is single-flight per destination and ref,
+time-bounded with process-group kill, skipped when it would change nothing,
+loud and visible on failure, backed off, and gated on input change after a
+deterministic refusal; stale registrations are removed per entry on positive
+evidence only); 0.57.0 (adds LX: automatic continuation of an existing session
 after a transient provider error is triggered by terminal error evidence in
 the turn log, backs off exponentially within a per-chain bound, is idempotent
 per failed turn, yields to any newer turn under session admission, never
@@ -1659,3 +1683,14 @@ side effects for operator review. Bound retries, preserve their history across
 restarts, and give stop and pause precedence over recovery. Event replay is
 read-only with respect to execution. LX continues to govern transient provider
 errors in agent turns. These existing principles cover the task.
+
+## Review: vk/2b38-vas-1140-seriali
+
+Applied `/speckit.constitution` and added LXI (0.58.0). The incident was 44
+concurrent, untimed `git push` processes into `/srv/src/homelab`, each
+started inline by a request, so no existing principle bounded vk's own
+bookkeeping subprocesses. XV governs removing stale worktree registrations:
+retain on indeterminate, use a mount guard, act per entry, and log at `info!`.
+XXI governs naming the failure. XLIII and the coordinator-nfs-load
+single-flight pattern govern keeping the work off the request path. LIX's hook
+isolation still applies to the push.

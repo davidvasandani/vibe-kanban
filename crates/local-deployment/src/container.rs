@@ -2207,6 +2207,7 @@ impl LocalContainerService {
             }
         };
 
+        let mut seen_before_cleanup: Vec<(PathBuf, u64)> = Vec::new();
         let cleanup_succeeded = if workspace_inputs.is_empty() {
             tracing::warn!(
                 "No repositories found for workspace {}, cleaning up workspace directory only",
@@ -2224,6 +2225,12 @@ impl LocalContainerService {
                 true
             }
         } else {
+            // Evidence for forgetting source registrations afterwards: which
+            // clustered worktrees were *visibly present* before cleanup. Only
+            // a worktree seen present and then gone was deleted by us; one
+            // that was already invisible may sit on storage that is offline.
+            seen_before_cleanup =
+                Self::clustered_worktrees_present(&workspace_dir, &workspace_inputs).await;
             match WorkspaceManager::cleanup_workspace(&workspace_dir, &workspace_inputs).await {
                 Ok(()) => true,
                 Err(error) => {
@@ -2250,6 +2257,9 @@ impl LocalContainerService {
             }
             return;
         }
+
+        Self::forget_source_registrations(&workspace_dir, &workspace_inputs, &seen_before_cleanup)
+            .await;
 
         if let Err(error) = Workspace::mark_worktree_deleted(&self.db.pool, workspace.id).await {
             tracing::warn!(
@@ -2381,7 +2391,215 @@ impl LocalContainerService {
         ))
     }
 
+    /// A clustered workspace's worktrees are registered in the shared store,
+    /// so deleting one unregisters it there — but a worktree created before
+    /// clustering and later adopted into the store may still have an entry in
+    /// the operator's checkout, holding its branch. Remove that entry too
+    /// (VAS-1140). Best effort: a failure is logged, never fatal.
+    async fn forget_source_registrations(
+        workspace_dir: &Path,
+        inputs: &[RepoWorkspaceInput],
+        seen_before_cleanup: &[(PathBuf, u64)],
+    ) {
+        for input in inputs {
+            if input.git_path == input.repo.path {
+                // Not clustered: `cleanup_workspace` already unregistered it
+                // from the checkout itself.
+                continue;
+            }
+            let source = input.repo.path.clone();
+            let worktree = workspace_dir.join(&input.repo.name);
+            let Some((_, device)) = seen_before_cleanup
+                .iter()
+                .find(|(path, _)| *path == worktree)
+            else {
+                // Not seen present before cleanup, so its absence now is no
+                // proof we deleted it: keep the registration.
+                continue;
+            };
+            // And proof the storage did not merely vanish meanwhile: the
+            // workspace's base directory is still on the very filesystem the
+            // worktree was seen on (an unmounted volume would expose the
+            // mount point's underlying filesystem, or nothing at all).
+            if !Self::still_on_device(workspace_dir, *device).await {
+                tracing::info!(
+                    repo = %input.repo.name,
+                    "kept the source registration of {}: its storage could not be confirmed \
+                     still mounted after cleanup",
+                    worktree.display()
+                );
+                continue;
+            }
+            let (dir, device) = (workspace_dir.to_path_buf(), *device);
+            let task = tokio::task::spawn_blocking(move || {
+                SharedRepositoryStore::forget_source_registrations(&source, &worktree, |_| {
+                    Self::still_on_device_blocking(&dir, device)
+                })
+            });
+            // Bounded: a stalled checkout filesystem must not hold up marking
+            // the workspace deleted. The scan itself finishes (or not) on its
+            // own; it only ever removes provably orphaned bookkeeping.
+            let Ok(result) = tokio::time::timeout(Duration::from_secs(30), task).await else {
+                tracing::warn!(
+                    repo = %input.repo.name,
+                    "clearing the deleted workspace's registrations in {} took over 30s; \
+                     not waiting for it",
+                    input.repo.path.display()
+                );
+                continue;
+            };
+            match result {
+                Ok(Ok(0)) => {}
+                Ok(Ok(removed)) => tracing::info!(
+                    repo = %input.repo.name,
+                    "removed {removed} stale registration(s) of the deleted workspace from {}",
+                    input.repo.path.display()
+                ),
+                Ok(Err(e)) => tracing::warn!(
+                    repo = %input.repo.name,
+                    "could not clear the deleted workspace's registrations in {}: {e}",
+                    input.repo.path.display()
+                ),
+                Err(e) => tracing::warn!("source registration cleanup task failed: {e}"),
+            }
+        }
+    }
+
+    /// The clustered worktrees of `inputs` that definitely exist right now.
+    /// Bounded; anything that cannot be confirmed in time is left out.
+    /// Also records the device each one lives on, for [`Self::still_on_device`].
+    async fn clustered_worktrees_present(
+        workspace_dir: &Path,
+        inputs: &[RepoWorkspaceInput],
+    ) -> Vec<(PathBuf, u64)> {
+        let candidates: Vec<PathBuf> = inputs
+            .iter()
+            .filter(|input| input.git_path != input.repo.path)
+            .map(|input| workspace_dir.join(&input.repo.name))
+            .collect();
+        if candidates.is_empty() {
+            return Vec::new();
+        }
+        let probe = tokio::task::spawn_blocking(move || {
+            candidates
+                .into_iter()
+                .filter_map(|path| {
+                    let meta = std::fs::metadata(path.join(".git")).ok()?;
+                    Some((path, Self::device_of(&meta)?))
+                })
+                .collect::<Vec<_>>()
+        });
+        match tokio::time::timeout(Duration::from_secs(30), probe).await {
+            Ok(Ok(present)) => present,
+            _ => Vec::new(),
+        }
+    }
+
+    #[cfg(unix)]
+    fn device_of(meta: &std::fs::Metadata) -> Option<u64> {
+        use std::os::unix::fs::MetadataExt;
+        Some(meta.dev())
+    }
+
+    #[cfg(not(unix))]
+    fn device_of(_meta: &std::fs::Metadata) -> Option<u64> {
+        None
+    }
+
+    /// Whether `workspace_dir` is definitely gone while its parent (the
+    /// workspace base) is present on filesystem `device`. Bounded.
+    async fn still_on_device(workspace_dir: &Path, device: u64) -> bool {
+        let workspace_dir = workspace_dir.to_path_buf();
+        let probe = tokio::task::spawn_blocking(move || {
+            Self::still_on_device_blocking(&workspace_dir, device)
+        });
+        matches!(
+            tokio::time::timeout(Duration::from_secs(10), probe).await,
+            Ok(Ok(true))
+        )
+    }
+
+    fn still_on_device_blocking(workspace_dir: &Path, device: u64) -> bool {
+        let gone = matches!(
+            std::fs::symlink_metadata(workspace_dir),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound
+        );
+        gone && workspace_dir
+            .parent()
+            .and_then(|base| std::fs::metadata(base).ok())
+            .and_then(|meta| Self::device_of(&meta))
+            == Some(device)
+    }
+
+    /// Once per boot: retire provably orphaned (re-linked) worktree
+    /// registrations from every registered repository's checkout. Per entry
+    /// and only on positive evidence — never `git worktree prune`, which over
+    /// NFS can unregister live worktrees — and never an entry under a live
+    /// workspace's directory. Entries whose worktree is merely missing are
+    /// kept (see `SharedRepositoryStore::sweep_source_registrations`).
+    async fn sweep_source_registrations(&self) {
+        const PER_REPO_BUDGET: Duration = Duration::from_secs(120);
+        let repos = match Repo::list_all(&self.db.pool).await {
+            Ok(repos) => repos,
+            Err(e) => {
+                tracing::warn!("startup registration sweep: could not list repositories: {e}");
+                return;
+            }
+        };
+        let live_dirs: Vec<PathBuf> = match Workspace::fetch_all(&self.db.pool).await {
+            Ok(workspaces) => workspaces
+                .into_iter()
+                .filter(|w| !w.worktree_deleted)
+                .filter_map(|w| w.container_ref.map(PathBuf::from))
+                .collect(),
+            Err(e) => {
+                // Without the live set the guard cannot be applied: skip.
+                tracing::warn!(
+                    "startup registration sweep skipped: could not list workspaces: {e}"
+                );
+                return;
+            }
+        };
+        let live_dirs = Arc::new(live_dirs);
+        for repo in repos {
+            let source = repo.path.clone();
+            let live = live_dirs.clone();
+            let task = tokio::task::spawn_blocking(move || {
+                SharedRepositoryStore::sweep_source_registrations(&source, |worktree| {
+                    live.iter().any(|dir| worktree.starts_with(dir))
+                })
+            });
+            match tokio::time::timeout(PER_REPO_BUDGET, task).await {
+                Ok(Ok(Ok(report))) if report.removed > 0 => tracing::info!(
+                    repo = %repo.name,
+                    removed = report.removed,
+                    kept = report.kept,
+                    unreadable = report.unreadable,
+                    "removed stale worktree registrations from {}",
+                    repo.path.display()
+                ),
+                Ok(Ok(Ok(_))) => {}
+                Ok(Ok(Err(e))) => tracing::debug!(
+                    repo = %repo.name,
+                    "startup registration sweep skipped {}: {e}",
+                    repo.path.display()
+                ),
+                Ok(Err(e)) => tracing::warn!("startup registration sweep task failed: {e}"),
+                Err(_) => tracing::warn!(
+                    repo = %repo.name,
+                    "startup registration sweep of {} exceeded {}s; moving on",
+                    repo.path.display(),
+                    PER_REPO_BUDGET.as_secs()
+                ),
+            }
+        }
+    }
+
     fn spawn_workspace_cleanup(&self) {
+        // Independent of workspace cleanup, so slow checkouts never delay it.
+        let sweeper = self.clone();
+        tokio::spawn(async move { sweeper.sweep_source_registrations().await });
+
         let container = self.clone();
         tokio::spawn(async move {
             container
@@ -2547,6 +2765,47 @@ impl LocalContainerService {
     }
 
     /// Commit changes to each repo. Logs failures but continues with other repos.
+    /// Warn-only guard against generated output landing in a workspace branch
+    /// (VAS-1140: a 28k-file, 1.6 GB auto-commit made every later push of the
+    /// branch take over an hour). Never refuses the commit.
+    fn warn_if_commit_is_large(repo: &Repo, worktree_path: &Path, commit: &str) {
+        fn threshold(name: &str, default: u64) -> u64 {
+            std::env::var(name)
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(default)
+        }
+        let max_files = threshold("VK_LARGE_COMMIT_WARN_FILES", 5_000);
+        let max_mb = threshold("VK_LARGE_COMMIT_WARN_MB", 200);
+        // A total budget with a process-level deadline per call, so a stalled
+        // store never leaves this diagnostic (or its git children) behind.
+        match git::GitCli::new().commit_added_size_within(
+            worktree_path,
+            commit,
+            Duration::from_secs(60),
+        ) {
+            Ok((files, bytes)) => {
+                let mb = bytes / (1024 * 1024);
+                if files as u64 > max_files || mb > max_mb {
+                    tracing::warn!(
+                        repo = %repo.name,
+                        worktree = %worktree_path.display(),
+                        added_files = files,
+                        added_mb = mb,
+                        max_files,
+                        max_mb,
+                        "agent auto-commit added {files} files ({mb} MB), above the \
+                         large-commit threshold; generated output may have been committed"
+                    );
+                }
+            }
+            Err(e) => tracing::debug!(
+                repo = %repo.name,
+                "could not measure the auto-commit's size: {e}"
+            ),
+        }
+    }
+
     fn commit_repos(&self, repos_with_changes: Vec<(Repo, PathBuf)>, message: &str) -> bool {
         let mut any_committed = false;
 
@@ -2561,6 +2820,23 @@ impl LocalContainerService {
                 Ok(true) => {
                     any_committed = true;
                     tracing::info!("Committed changes in repo '{}'", repo.name);
+                    // Diagnostic only: measured off the completion path, on
+                    // the commit just made (not whatever HEAD is later).
+                    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                        let (repo, worktree_path) = (repo.clone(), worktree_path.clone());
+                        runtime.spawn_blocking(move || {
+                            // Resolved here, first thing, under a deadline.
+                            let Ok(head) = git::GitCli::new().git_within(
+                                &worktree_path,
+                                ["rev-parse", "HEAD"],
+                                None,
+                                Duration::from_secs(10),
+                            ) else {
+                                return;
+                            };
+                            Self::warn_if_commit_is_large(&repo, &worktree_path, head.trim())
+                        });
+                    }
                 }
                 Ok(false) => {
                     tracing::warn!("No changes committed in repo '{}' (unexpected)", repo.name);
@@ -6564,7 +6840,26 @@ impl ContainerService for LocalContainerService {
             return Ok(false);
         }
 
-        Ok(self.commit_repos(repos_with_changes, &message))
+        let committed = self.commit_repos(repos_with_changes, &message);
+        if committed {
+            // A clustered workspace's branch reaches the registered checkout
+            // only through the background mirror: ask for it now, without
+            // waiting, rather than on the next request that happens by.
+            if let Ok(Some(store)) = self.shared_repository_store_for(ctx.workspace.id).await {
+                for repo in &ctx.repos {
+                    let outcome = workspace_manager::SourceMirror::global().request(
+                        &store.path_for(repo.id),
+                        &repo.path,
+                        &ctx.workspace.branch,
+                    );
+                    tracing::debug!(
+                        repo = %repo.name,
+                        "post-commit source mirror request: {outcome:?}"
+                    );
+                }
+            }
+        }
+        Ok(committed)
     }
 
     async fn commit_interrupted_wip(

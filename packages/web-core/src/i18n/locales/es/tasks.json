@@ -202,6 +202,10 @@
       "commits_other": "commits",
       "conflicts": "Conflictos",
       "upToDate": "Al día"
+    },
+    "sourceMirror": {
+      "failed": "No se pudo sincronizar esta rama con el repositorio de origen: {{message}}",
+      "retryAfter": "Reintento posible después de las {{time}}"
     }
   },
   "loading": "Cargando tareas...",

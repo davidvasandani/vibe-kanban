@@ -20,11 +20,14 @@ use std::path::{Path, PathBuf};
 use db::models::repo::Repo;
 use git::GitCli;
 use tracing::{debug, info, warn};
-use utils::worktree_linkage::{LinkageStatus, WorktreeLinkage};
+use utils::worktree_linkage::{self, LinkageStatus, RegistrationState, WorktreeLinkage};
 use uuid::Uuid;
 use worktree_manager::RepositoryAdminLockManager;
 
-use crate::workspace_manager::{SharedWorkspacePaths, WorkspaceError};
+use crate::{
+    source_mirror::SourceMirror,
+    workspace_manager::{SharedWorkspacePaths, WorkspaceError},
+};
 
 /// Prefix for the per-attempt staging directory a store is built in before it is
 /// renamed into place. Leading dot so a partially built store is not mistaken
@@ -37,6 +40,31 @@ const STAGING_SUFFIX: &str = ".incoming";
 /// reachable, and so the store can be seeded without network access.
 const REGISTERED_REMOTE: &str = "vk-registered";
 const ORIGIN_FETCH_REFSPEC: &str = "+refs/heads/*:refs/remotes/origin/*";
+
+/// One lock per registration directory, so adoption, mirror pre-flight and
+/// the startup sweep never act on the same entry at once — while a stall on
+/// one checkout's entry never blocks cleanup of another.
+static REGISTRATION_LOCKS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, std::sync::Arc<std::sync::Mutex<()>>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+fn registration_lock(admin_dir: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
+    REGISTRATION_LOCKS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(admin_dir.to_path_buf())
+        .or_default()
+        .clone()
+}
+
+/// What [`SharedRepositoryStore::sweep_source_registrations`] did.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SweepReport {
+    pub removed: usize,
+    /// Live, locked, indeterminate, or claimed by a live workspace.
+    pub kept: usize,
+    pub unreadable: usize,
+}
 
 /// What [`SharedRepositoryStore::adopt`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -275,6 +303,12 @@ impl SharedRepositoryStore {
             status.describe()
         );
 
+        // Remember the registration this worktree is leaving. Once the
+        // worktree points at the store, that entry still records the branch as
+        // checked out, and git refuses every later push of the branch into the
+        // checkout (`branch is currently checked out`) — the VAS-1140 incident.
+        let previous_admin_dir = worktree_linkage::gitdir_target(worktree_path);
+
         let admin_name = Self::admin_dir_name(worktree_path);
         let admin_dir = store.join("worktrees").join(&admin_name);
         Self::write_linkage(&admin_dir, worktree_path, branch)?;
@@ -306,12 +340,251 @@ impl SharedRepositoryStore {
                     "adopted; now resolves to {}",
                     common_dir.display()
                 );
+                if let Some(previous) = previous_admin_dir {
+                    // The old checkout may sit on a stalled mount; the
+                    // workspace already works from the store, so never let
+                    // this best-effort step hold the request.
+                    // Detached: it logs its own outcome.
+                    let current = admin_dir.clone();
+                    tokio::task::spawn_blocking(move || {
+                        Self::retire_previous_registration(&previous, &current)
+                    });
+                }
                 Ok(AdoptOutcome::Adopted { common_dir })
             }
             other => Err(WorkspaceError::WorktreeNotPortable {
                 repo_name: repo.name.clone(),
                 detail: format!("after adoption the worktree {}", other.describe()),
             }),
+        }
+    }
+
+    /// Remove the registrations a deleted worktree left in the operator's
+    /// checkout (`source_repo`), for a clustered workspace whose own
+    /// registration lived in the store. Call only after `worktree_path` was
+    /// deleted. Only entries naming `worktree_path` are considered; each is
+    /// re-read and kept if it changed, is locked, or the path exists again.
+    /// Blocking; returns how many were removed.
+    pub fn forget_source_registrations(
+        source_repo: &Path,
+        worktree_path: &Path,
+        still_evident: impl Fn(&Path) -> bool,
+    ) -> Result<usize, String> {
+        let common_dir = Self::common_dir_of(source_repo)?;
+        let mut removed = 0;
+        for entry in worktree_linkage::registrations(&common_dir)?
+            .into_iter()
+            .flatten()
+        {
+            if entry.worktree_path() != worktree_path {
+                continue;
+            }
+            // The caller has just deleted this worktree; `still_evident`
+            // re-confirms, at the removal boundary, that its storage is still
+            // the mounted one (it can vanish while this scan runs).
+            if Self::preserve_and_remove_deleted(&entry, &still_evident)? {
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+
+    /// Startup sweep of one operator checkout. Per entry, never `git worktree
+    /// prune`. Blocking. Only an entry whose worktree was **re-linked** to
+    /// another registration (provably orphaned) and that `is_live` does not
+    /// claim is retired — moved aside, its index snapshotted first.
+    ///
+    /// An entry whose worktree directory is merely *missing* is kept: from
+    /// here a deletion cannot be told from storage that is offline (a hidden
+    /// mount can even expose an underlying directory with other content), and
+    /// removing a live worktree's registration breaks it when the storage
+    /// returns. Such entries are removed on real deletion evidence instead —
+    /// by workspace deletion, which saw the worktree and then removed it — and
+    /// mirror pre-flight names any that block a branch.
+    pub fn sweep_source_registrations(
+        source_repo: &Path,
+        is_live: impl Fn(&Path) -> bool,
+    ) -> Result<SweepReport, String> {
+        let common_dir = Self::common_dir_of(source_repo)?;
+        let mut report = SweepReport::default();
+        for entry in worktree_linkage::registrations(&common_dir)? {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(e) => {
+                    report.unreadable += 1;
+                    debug!("kept an unreadable worktree registration: {e}");
+                    continue;
+                }
+            };
+            if is_live(entry.worktree_path()) {
+                report.kept += 1;
+                continue;
+            }
+            let removed = match worktree_linkage::registration_state(&entry) {
+                RegistrationState::Stale(_) => Self::preserve_and_retire(&entry),
+                _ => Ok(false),
+            };
+            match removed {
+                Ok(true) => report.removed += 1,
+                Ok(false) => report.kept += 1,
+                Err(e) => {
+                    report.unreadable += 1;
+                    warn!("could not remove a stale worktree registration: {e}");
+                }
+            }
+        }
+        Ok(report)
+    }
+
+    /// Move a re-linked (stale) registration aside — but first snapshot its
+    /// `index` into `refs/vk-retired/<name>-<epoch>` of the repository that
+    /// owns it, so staged-only content stays reachable from a ref and survives
+    /// gc (constitution XV). When the snapshot cannot be taken the
+    /// registration is kept, never retired on a guess. Blocking.
+    pub(crate) fn preserve_and_retire(
+        entry: &worktree_linkage::Registration,
+    ) -> Result<bool, String> {
+        // Adoption, mirror pre-flight and the startup sweep can reach the same
+        // entry at once; one at a time, snapshot and move together.
+        let lock = registration_lock(&entry.admin_dir);
+        let _one_at_a_time = lock.lock().unwrap_or_else(|e| e.into_inner());
+        if !Self::snapshot_registration_index(entry) {
+            return Ok(false);
+        }
+        worktree_linkage::retire_stale_registration(entry).map(|r| r.is_some())
+    }
+
+    /// Remove a registration whose worktree is gone, on the caller's deletion
+    /// evidence — after snapshotting its index like [`Self::preserve_and_retire`]:
+    /// a deleted directory says nothing about staged-only work in the entry's
+    /// index. Kept if the snapshot cannot be taken. Blocking.
+    /// `still_evident` is re-evaluated right before removal (after the lock
+    /// and the snapshot, which can take a while): storage evidence gathered
+    /// earlier is not trusted at the removal boundary.
+    pub(crate) fn preserve_and_remove_deleted(
+        entry: &worktree_linkage::Registration,
+        still_evident: impl Fn(&Path) -> bool,
+    ) -> Result<bool, String> {
+        let lock = registration_lock(&entry.admin_dir);
+        let _one_at_a_time = lock.lock().unwrap_or_else(|e| e.into_inner());
+        if !Self::snapshot_registration_index(entry) {
+            return Ok(false);
+        }
+        if !still_evident(entry.worktree_path()) {
+            return Ok(false);
+        }
+        worktree_linkage::remove_registration_of_deleted_worktree(entry)
+    }
+
+    /// Snapshot `entry`'s index (if any) to `refs/vk-retired/<name>-<epoch>`
+    /// of the repository that owns it. `false` means "keep the registration".
+    fn snapshot_registration_index(entry: &worktree_linkage::Registration) -> bool {
+        let index = entry.admin_dir.join("index");
+        let has_index = match index.try_exists() {
+            Ok(has_index) => has_index,
+            // Cannot tell whether there is staged state to preserve: keep.
+            Err(e) => {
+                warn!(
+                    admin_dir = %entry.admin_dir.display(),
+                    "kept a stale worktree registration: could not check its index: {e}"
+                );
+                return false;
+            }
+        };
+        if has_index {
+            let (Some(name), Some(common_dir)) = (
+                entry.admin_dir.file_name(),
+                entry.admin_dir.parent().and_then(Path::parent),
+            ) else {
+                return false;
+            };
+            let epoch = chrono::Utc::now().timestamp();
+            let refname = format!("refs/vk-retired/{}-{epoch}", name.to_string_lossy());
+            if let Err(e) = GitCli::new().snapshot_index(
+                common_dir,
+                &index,
+                &refname,
+                &format!(
+                    "Index of worktree {} before its registration was retired",
+                    entry.worktree_path().display()
+                ),
+                std::time::Duration::from_secs(30),
+            ) {
+                warn!(
+                    admin_dir = %entry.admin_dir.display(),
+                    "kept a stale worktree registration: could not snapshot its index: {e}"
+                );
+                return false;
+            }
+            info!(
+                admin_dir = %entry.admin_dir.display(),
+                "snapshotted the retiring registration's index to {refname}"
+            );
+        }
+        // A detached HEAD may name a commit no ref reaches: pin it too, so gc
+        // cannot take it once the entry is out of git's view.
+        if entry.head_branch.is_none() {
+            // Detached: the commit must be read and pinned, or the entry stays.
+            let head = std::fs::read_to_string(entry.admin_dir.join("HEAD"));
+            let head = head.as_deref().map(str::trim).unwrap_or_default();
+            let is_oid = head.len() >= 40 && head.bytes().all(|b| b.is_ascii_hexdigit());
+            let (Some(name), Some(common_dir), true) = (
+                entry.admin_dir.file_name(),
+                entry.admin_dir.parent().and_then(Path::parent),
+                is_oid,
+            ) else {
+                warn!(
+                    admin_dir = %entry.admin_dir.display(),
+                    "kept a stale worktree registration: could not read its detached HEAD"
+                );
+                return false;
+            };
+            let refname = format!(
+                "refs/vk-retired/{}-{}-head",
+                name.to_string_lossy(),
+                chrono::Utc::now().timestamp()
+            );
+            if let Err(e) = GitCli::new().git_within(
+                common_dir,
+                ["update-ref", &refname, head],
+                None,
+                std::time::Duration::from_secs(30),
+            ) {
+                warn!(
+                    admin_dir = %entry.admin_dir.display(),
+                    "kept a stale worktree registration: could not pin its detached HEAD: {e}"
+                );
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Filesystem-only, so a sweep or a delete never waits on a git child.
+    fn common_dir_of(repo: &Path) -> Result<PathBuf, String> {
+        worktree_linkage::common_dir_of(repo).map(|(common_dir, _bare)| common_dir)
+    }
+
+    /// After a verified adoption: move aside the entry the worktree left behind
+    /// in its previous repository, if that entry is now provably orphaned.
+    fn retire_previous_registration(previous: &Path, current: &Path) {
+        if previous == current || !previous.exists() {
+            return;
+        }
+        // Moved aside, not deleted: its `index` may be the only record of
+        // staged work (constitution XV).
+        match worktree_linkage::read_registration(previous)
+            .and_then(|entry| Self::preserve_and_retire(&entry))
+        {
+            Ok(true) => {}
+            Ok(false) => debug!(
+                "left the previous registration {} in place: it is not provably stale",
+                previous.display()
+            ),
+            Err(e) => warn!(
+                "could not retire the previous registration {} after adoption: {e}",
+                previous.display()
+            ),
         }
     }
 
@@ -634,8 +907,8 @@ impl SharedRepositoryStore {
         Ok(())
     }
 
-    /// Best-effort: keep the workspace branch present in the registered
-    /// checkout too.
+    /// Best-effort, asynchronous: keep the workspace branch present in the
+    /// registered checkout too.
     ///
     /// This exists for rollback. A release without this change resolves
     /// branch-scoped operations against `repo.path`, so a branch that lives only
@@ -644,22 +917,20 @@ impl SharedRepositoryStore {
     /// would trade a working workspace for a tidy one.
     fn mirror_branch_back(&self, repo: &Repo, branch: &str) -> Result<(), WorkspaceError> {
         let store = self.path_for(repo.id);
-        let cli = GitCli::new();
-        // Local heads only: `GitCli::push` sends
-        // `refs/heads/{branch}:refs/heads/{branch}`, so a match on a
-        // remote-tracking ref would spawn a push whose source ref does not
-        // exist — a guaranteed failure, once per repository per provisioning,
-        // swallowed into a debug line. There is also nothing to mirror back: a
-        // remote-tracking ref came *from* the checkout.
-        if !Self::local_branch_commit_present(&cli, &store, branch).unwrap_or(false) {
-            return Ok(());
-        }
-        if let Err(e) = cli.push(&store, &repo.path.to_string_lossy(), branch, false) {
-            debug!(
-                repo = %repo.name,
-                "could not mirror branch '{branch}' back to the registered checkout: {e}"
-            );
-        }
+        // No probe here, not even a cheap one: every git call on this path is
+        // paid by a request. `SourceMirror` checks the store's *local* head
+        // (`refs/heads/{branch}`) under a timeout after admission, and does
+        // nothing when it is absent — a remote-tracking ref came *from* the
+        // checkout, so there is nothing to mirror back.
+        // Never inline: this runs on nearly every request that touches a
+        // clustered workspace. `SourceMirror` runs at most one push per
+        // (checkout, branch), off the request path, under a timeout, and
+        // backs off — see its module docs for the incident behind that.
+        let outcome = SourceMirror::global().request(&store, &repo.path, branch);
+        debug!(
+            repo = %repo.name,
+            "mirror of branch '{branch}' back to the registered checkout: {outcome:?}"
+        );
         Ok(())
     }
 
@@ -2489,5 +2760,187 @@ mod tests {
         // which does no locking of its own.
         let pool = sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap();
         RepositoryAdminLockManager::new(pool, std::time::Duration::from_secs(30)).unwrap()
+    }
+
+    /// VAS-1140: adoption must not leave the worktree's old registration in a
+    /// checkout that is still reachable, or that entry keeps holding the
+    /// branch and every later mirror push is refused.
+    #[tokio::test]
+    async fn adoption_removes_the_registration_left_in_a_reachable_checkout() {
+        let fixture = TempDir::new().unwrap();
+        let shared_root = fixture.path().join("shared");
+        let checkout = fixture.path().join("srv-src").join("repo");
+        fs::create_dir_all(&shared_root).unwrap();
+        seed_repo(&checkout);
+        git::GitService::new()
+            .create_branch(&checkout, "vk/work", "main")
+            .unwrap();
+        let worktree = shared_root.join("workspaces").join("ws-1").join("repo");
+        fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+        cli()
+            .worktree_add(&checkout, &worktree, "vk/work", false)
+            .unwrap();
+        let old_admin = worktree_linkage::gitdir_target(&worktree).unwrap();
+        assert!(old_admin.starts_with(&checkout));
+
+        let repo = repo_record("repo", &checkout);
+        let store = shared_root.join("repositories").join(repo.id.to_string());
+        fs::create_dir_all(store.parent().unwrap()).unwrap();
+        cli().clone_bare(&checkout, &store).unwrap();
+        cli()
+            .fetch_with_refspec(
+                &store,
+                &checkout.to_string_lossy(),
+                "+refs/heads/*:refs/heads/*",
+            )
+            .unwrap();
+        SharedRepositoryStore::configure(&cli(), &store, &repo).unwrap();
+
+        let outcome = store_for(&shared_root)
+            .adopt(&repo, &worktree, "vk/work")
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome, AdoptOutcome::Adopted { .. }),
+            "{outcome:?}"
+        );
+        // Retirement is detached from the request: give it a bounded moment.
+        for _ in 0..100 {
+            if !old_admin.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(
+            !old_admin.exists(),
+            "the checkout's old registration must be gone after adoption"
+        );
+        let retired = checkout.join(".git").join("vk-retired-worktrees");
+        assert_eq!(
+            fs::read_dir(&retired).unwrap().count(),
+            1,
+            "moved aside with its index, not deleted"
+        );
+        let refs = cli()
+            .git(
+                &checkout,
+                ["for-each-ref", "--format=%(refname)", "refs/vk-retired/"],
+            )
+            .unwrap();
+        assert!(
+            refs.trim().lines().count() == 1,
+            "its staged state is reachable from a recovery ref: {refs}"
+        );
+        let list = cli()
+            .git(&checkout, ["worktree", "list", "--porcelain"])
+            .unwrap();
+        assert!(!list.contains("vk/work"), "{list}");
+    }
+
+    #[test]
+    fn forgetting_a_deleted_workspace_removes_only_its_own_registration() {
+        let fixture = TempDir::new().unwrap();
+        let checkout = fixture.path().join("srv-src").join("repo");
+        seed_repo(&checkout);
+        let base = fixture.path().join("workspaces");
+        let gone = base.join("gone").join("repo");
+        let other = base.join("other").join("repo");
+        for (branch, path) in [("vk/gone", &gone), ("vk/other-gone", &other)] {
+            git::GitService::new()
+                .create_branch(&checkout, branch, "main")
+                .unwrap();
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            cli().worktree_add(&checkout, path, branch, false).unwrap();
+        }
+        fs::remove_dir_all(base.join("gone")).unwrap();
+        fs::remove_dir_all(base.join("other")).unwrap();
+        // A live sibling on the same storage: evidence that it is mounted.
+        git::GitService::new()
+            .create_branch(&checkout, "vk/live", "main")
+            .unwrap();
+        fs::create_dir_all(base.join("live")).unwrap();
+        cli()
+            .worktree_add(&checkout, &base.join("live").join("repo"), "vk/live", false)
+            .unwrap();
+
+        assert_eq!(
+            SharedRepositoryStore::forget_source_registrations(&checkout, &gone, |_| true).unwrap(),
+            1
+        );
+        let list = cli()
+            .git(&checkout, ["worktree", "list", "--porcelain"])
+            .unwrap();
+        assert!(!list.contains("vk/gone\n"), "{list}");
+        assert!(
+            list.contains("vk/other-gone"),
+            "another workspace's entry is not this delete's to remove: {list}"
+        );
+    }
+
+    #[test]
+    fn the_startup_sweep_retires_relinked_entries_and_keeps_missing_ones() {
+        let fixture = TempDir::new().unwrap();
+        let checkout = fixture.path().join("srv-src").join("repo");
+        seed_repo(&checkout);
+        let base = fixture.path().join("workspaces");
+        for name in ["live", "relinked", "missing", "claimed"] {
+            let branch = format!("vk/{name}");
+            git::GitService::new()
+                .create_branch(&checkout, &branch, "main")
+                .unwrap();
+            let path = base.join(name).join("repo");
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            cli()
+                .worktree_add(&checkout, &path, &branch, false)
+                .unwrap();
+        }
+        // Re-linked elsewhere (what adoption by an older release left behind).
+        let elsewhere = fixture
+            .path()
+            .join("store")
+            .join("worktrees")
+            .join("relinked");
+        fs::create_dir_all(&elsewhere).unwrap();
+        fs::write(
+            elsewhere.join("gitdir"),
+            format!(
+                "{}\n",
+                base.join("relinked").join("repo").join(".git").display()
+            ),
+        )
+        .unwrap();
+        fs::write(
+            base.join("relinked").join("repo").join(".git"),
+            format!("gitdir: {}\n", elsewhere.display()),
+        )
+        .unwrap();
+        // Missing: deleted, or on offline storage — cannot tell.
+        fs::remove_dir_all(base.join("missing")).unwrap();
+        // Claimed by a live workspace record, even though it is gone.
+        fs::remove_dir_all(base.join("claimed")).unwrap();
+        let claimed = base.join("claimed");
+
+        let report = SharedRepositoryStore::sweep_source_registrations(&checkout, |p| {
+            p.starts_with(&claimed)
+        })
+        .unwrap();
+        assert_eq!(
+            report,
+            SweepReport {
+                removed: 1,
+                kept: 3,
+                unreadable: 0
+            }
+        );
+        let list = cli()
+            .git(&checkout, ["worktree", "list", "--porcelain"])
+            .unwrap();
+        assert!(list.contains("vk/live"), "{list}");
+        assert!(list.contains("vk/claimed"), "{list}");
+        assert!(
+            list.contains("vk/missing"),
+            "kept without deletion evidence: {list}"
+        );
+        assert!(!list.contains("vk/relinked"), "{list}");
     }
 }

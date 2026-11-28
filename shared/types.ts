@@ -1231,7 +1231,21 @@ export type CreateWorkspaceFromPrResponse = { workspace: Workspace, };
 
 export type CreateFromPrError = { "type": "pr_not_found" } | { "type": "branch_fetch_failed", message: string, } | { "type": "cli_not_installed", provider: ProviderKind, } | { "type": "auth_failed", message: string, } | { "type": "unsupported_provider" };
 
-export type RepoBranchStatus = { repo_id: string, repo_name: string, commits_behind: number | null, commits_ahead: number | null, has_uncommitted_changes: boolean | null, head_oid: string | null, uncommitted_count: number | null, untracked_count: number | null, target_branch_name: string, remote_commits_behind: number | null, remote_commits_ahead: number | null, merges: Array<Merge>, is_rebase_in_progress: boolean, conflict_op: ConflictOp | null, conflicted_files: Array<string>, is_target_remote: boolean, };
+export type RepoBranchStatus = { repo_id: string, repo_name: string, 
+/**
+ * Why the background mirror of this workspace's branch into the
+ * operator's registered checkout is failing, if it is. `None` when the
+ * mirror is healthy, disabled, or has not run since the server started.
+ */
+source_mirror_error: SourceMirrorError | null, commits_behind: number | null, commits_ahead: number | null, has_uncommitted_changes: boolean | null, head_oid: string | null, uncommitted_count: number | null, untracked_count: number | null, target_branch_name: string, remote_commits_behind: number | null, remote_commits_ahead: number | null, merges: Array<Merge>, is_rebase_in_progress: boolean, conflict_op: ConflictOp | null, conflicted_files: Array<string>, is_target_remote: boolean, };
+
+export type SourceMirrorError = { kind: SourceMirrorErrorKind, 
+/**
+ * Includes a bounded excerpt of git's own error output.
+ */
+message: string, attempts: number, last_attempt_at: string, next_attempt_at: string, };
+
+export type SourceMirrorErrorKind = "deterministic" | "transient" | "timeout";
 
 export type UpdateWorkspace = { archived: boolean | null, pinned: boolean | null, name: string | null, };
 

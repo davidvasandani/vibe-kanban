@@ -9,6 +9,7 @@ use axum::{
     response::{IntoResponse, Json as ResponseJson},
     routing::{get, post},
 };
+use chrono::{DateTime, Utc};
 use db::models::{
     merge::{Merge, MergeStatus, PrMerge, PullRequestInfo},
     repo::{Repo, RepoError},
@@ -24,6 +25,7 @@ use services::services::{
 use ts_rs::TS;
 use utils::response::ApiResponse;
 use uuid::Uuid;
+use workspace_manager::{SourceMirror, SourceMirrorFailure, SourceMirrorFailureKind};
 
 use super::streams::{DiffStreamQuery, stream_workspace_diff_ws};
 use crate::{DeploymentImpl, error::ApiError, middleware::signed_ws::SignedWsUpgrade};
@@ -99,6 +101,45 @@ pub struct RepoBranchStatus {
     pub repo_name: String,
     #[serde(flatten)]
     pub status: BranchStatus,
+    /// Why the background mirror of this workspace's branch into the
+    /// operator's registered checkout is failing, if it is. `None` when the
+    /// mirror is healthy, disabled, or has not run since the server started.
+    pub source_mirror_error: Option<SourceMirrorError>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum SourceMirrorErrorKind {
+    Deterministic,
+    Transient,
+    Timeout,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+pub struct SourceMirrorError {
+    pub kind: SourceMirrorErrorKind,
+    /// Includes a bounded excerpt of git's own error output.
+    pub message: String,
+    pub attempts: u32,
+    pub last_attempt_at: DateTime<Utc>,
+    pub next_attempt_at: DateTime<Utc>,
+}
+
+impl From<SourceMirrorFailure> for SourceMirrorError {
+    fn from(failure: SourceMirrorFailure) -> Self {
+        Self {
+            kind: match failure.kind {
+                SourceMirrorFailureKind::Deterministic => SourceMirrorErrorKind::Deterministic,
+                SourceMirrorFailureKind::Transient => SourceMirrorErrorKind::Transient,
+                SourceMirrorFailureKind::Timeout => SourceMirrorErrorKind::Timeout,
+            },
+            message: failure.message,
+            attempts: failure.attempts,
+            last_attempt_at: failure.last_attempt_at,
+            next_attempt_at: failure.next_attempt_at,
+        }
+    }
 }
 
 #[derive(Deserialize, Debug, TS)]
@@ -225,12 +266,145 @@ pub async fn merge_workspace(
     let vk_id = resolve_vibe_kanban_identifier(&deployment, workspace.id).await;
     let commit_message = format!("{} (vibe-kanban {})", workspace_label, vk_id);
 
-    let merge_commit_id = deployment.git().merge_changes(
+    // Every await happens above this point: from the pinned-tip check below to
+    // `merge_changes` there is none, so the verified tip is what gets merged
+    // (as tight as a coordinator-local workspace, whose agent can also commit
+    // concurrently with a merge).
+    // `merge_changes` reads the workspace branch from the registered checkout.
+    // For a clustered workspace that copy arrives through the background
+    // mirror, so make sure it holds the worktree's HEAD before merging —
+    // otherwise the merge could silently omit the latest commits.
+    let (worktree_for_probe, checkout_for_probe) = (worktree_path.clone(), repo.path.clone());
+    let identities = tokio::task::spawn_blocking(move || {
+        let identity = |path: &Path| {
+            let (common, _) = utils::worktree_linkage::common_dir_of(path)?;
+            std::fs::canonicalize(&common)
+                .map_err(|e| format!("canonicalize {}: {e}", common.display()))
+        };
+        Ok::<_, String>((
+            identity(&worktree_for_probe)?,
+            identity(&checkout_for_probe)?,
+        ))
+    });
+    let (store, checkout_git) =
+        match tokio::time::timeout(std::time::Duration::from_secs(10), identities).await {
+            Ok(Ok(Ok(identities))) => identities,
+            Ok(Ok(Err(e))) => {
+                return Err(ApiError::BadRequest(format!(
+                    "Cannot merge: could not identify the workspace's repository: {e}"
+                )));
+            }
+            _ => {
+                return Err(ApiError::BadRequest(
+                    "Cannot merge yet: the repositories did not answer in time".to_string(),
+                ));
+            }
+        };
+    // For a clustered workspace, the exact commit verified below is what gets
+    // merged (`merge_changes_pinned`), never a re-read of the branch name.
+    let mut pinned_tip: Option<String> = None;
+    if store != checkout_git {
+        // The branch `merge_changes` merges, as the store has it — not the
+        // worktree's HEAD, which may be detached or on another branch.
+        let (store_dir, branch_ref) = (store.clone(), format!("refs/heads/{}", workspace.branch));
+        let head = tokio::task::spawn_blocking(move || {
+            git::GitCli::new().resolve_commit_within(
+                &store_dir,
+                &branch_ref,
+                std::time::Duration::from_secs(10),
+            )
+        })
+        .await
+        .map_err(|e| ApiError::BadRequest(format!("Cannot merge yet: {e}")))?
+        .map_err(|e| ApiError::BadRequest(format!("Cannot merge yet: {e}")))?
+        .ok_or_else(|| {
+            ApiError::BadRequest(format!(
+                "Cannot merge: branch '{}' does not exist in the workspace's repository",
+                workspace.branch
+            ))
+        })?;
+        // The merge needs the pinned commit's *objects* in the checkout, not
+        // its branch ref: the courtesy mirror's non-forced push cannot move a
+        // ref that was rebased or amended, and that must not block a merge.
+        // Fetch the commit into the checkout (FETCH_HEAD only, no ref is
+        // touched; bounded), then confirm it is there.
+        let (store_dir, checkout_dir, branch_ref, tip) = (
+            store.clone(),
+            repo.path.clone(),
+            format!("refs/heads/{}", workspace.branch),
+            head.clone(),
+        );
+        let fetched = tokio::task::spawn_blocking(move || {
+            let cli = git::GitCli::new();
+            let deadline = std::time::Duration::from_secs(120);
+            let present = |cli: &git::GitCli| {
+                cli.git_within(
+                    &checkout_dir,
+                    ["cat-file", "-e", &format!("{tip}^{{commit}}")],
+                    None,
+                    std::time::Duration::from_secs(10),
+                )
+                .is_ok()
+            };
+            if present(&cli) {
+                return Ok(());
+            }
+            cli.git_within(
+                &checkout_dir,
+                [
+                    "fetch",
+                    "--no-tags",
+                    "--no-write-fetch-head",
+                    &store_dir.to_string_lossy(),
+                    &branch_ref,
+                ],
+                None,
+                deadline,
+            )
+            .map_err(|e| e.to_string())?;
+            if present(&cli) {
+                Ok(())
+            } else {
+                Err(format!("{tip} did not arrive in the registered checkout"))
+            }
+        })
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()));
+        fetched.map_err(|e| {
+            ApiError::BadRequest(format!(
+                "Cannot merge yet: could not bring the workspace's commits into the registered \
+                 checkout: {e}"
+            ))
+        })?;
+        // Pinned: if the workspace moved on meanwhile, refuse instead of
+        // merging a tip that omits the newer commits. Nothing is awaited
+        // between this and `merge_changes_pinned`.
+        let (store_dir, branch_ref) = (store.clone(), format!("refs/heads/{}", workspace.branch));
+        let now = tokio::task::spawn_blocking(move || {
+            git::GitCli::new()
+                .resolve_commit_within(&store_dir, &branch_ref, std::time::Duration::from_secs(10))
+                .ok()
+                .flatten()
+        })
+        .await
+        .unwrap_or(None);
+        if now.as_deref() != Some(head.as_str()) {
+            return Err(ApiError::BadRequest(
+                "Cannot merge yet: the workspace received new commits while preparing the \
+                 merge; try again"
+                    .to_string(),
+            ));
+        }
+        pinned_tip = Some(head);
+    }
+
+    let merge_commit_id = deployment.git().merge_changes_pinned(
         &repo.path,
         &worktree_path,
         &workspace.branch,
         &workspace_repo.target_branch,
         &commit_message,
+        pinned_tip.as_deref(),
     )?;
 
     Merge::create_direct(
@@ -241,6 +415,73 @@ pub async fn merge_workspace(
         &merge_commit_id,
     )
     .await?;
+
+    // A clustered workspace's branch lives in the shared store: move it to the
+    // squash commit too (compare-and-swap against the pinned tip, so a commit
+    // that landed meanwhile is kept), exactly as `merge_changes` does for a
+    // coordinator-local workspace's branch. Best effort, bounded, off-worker.
+    if let Some(pinned) = pinned_tip.clone() {
+        let (store_dir, checkout_dir, target_ref, branch_ref, squash) = (
+            store.clone(),
+            repo.path.clone(),
+            format!("refs/heads/{}", workspace_repo.target_branch),
+            format!("refs/heads/{}", workspace.branch),
+            merge_commit_id.clone(),
+        );
+        // Detached: the merge is already recorded; this must finish (or
+        // log) on its own even if the request goes away.
+        let repo_display = repo.path.display().to_string();
+        let branch_name = workspace.branch.clone();
+        let handoff = tokio::spawn(async move {
+            let moved = tokio::task::spawn_blocking(move || {
+                let cli = git::GitCli::new();
+                let deadline = std::time::Duration::from_secs(60);
+                // The squash commit is the checkout target's tip: fetchable as a ref.
+                cli.git_within(
+                    &store_dir,
+                    [
+                        "fetch",
+                        "--no-tags",
+                        "--no-write-fetch-head",
+                        &checkout_dir.to_string_lossy(),
+                        &target_ref,
+                    ],
+                    None,
+                    deadline,
+                )?;
+                cli.git_within(
+                    &store_dir,
+                    ["update-ref", &branch_ref, &squash, &pinned],
+                    None,
+                    deadline,
+                )?;
+                // Only now, with the authoritative branch moved, the courtesy
+                // copy in the checkout follows (if it lagged and is not
+                // checked out); later mirror pushes then fast-forward.
+                let branch = branch_ref.trim_start_matches("refs/heads/");
+                if let Err(e) = git::GitService::new().advance_lagging_copy(
+                    &checkout_dir,
+                    branch,
+                    &pinned,
+                    &squash,
+                ) {
+                    tracing::warn!("left the checkout's copy of {branch} as is: {e}");
+                }
+                Ok::<_, git::GitCliError>(String::new())
+            })
+            .await;
+            if !matches!(moved, Ok(Ok(_))) {
+                tracing::warn!(
+                    repo = %repo_display,
+                    "merged {branch_name}, but could not move the workspace branch in the shared \
+                     store to the squash commit: {moved:?}"
+                );
+            }
+        });
+        // Archive only after the hand-off (bounded): archiving first would let
+        // a restore resume from the pre-squash branch.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(130), handoff).await;
+    }
 
     if let Ok(client) = deployment.remote_client() {
         let workspace_id = workspace.id;
@@ -452,9 +693,19 @@ pub async fn get_workspace_branch_status(
 
         let has_uncommitted_changes = uncommitted_count.map(|c| c > 0);
 
+        // The target's kind comes from the registered checkout — the same
+        // local-first resolution merge and rebase use — with the worktree's
+        // repository as the fallback; failing both, assume local rather than
+        // failing the response and hiding `source_mirror_error` with it.
         let is_target_remote = deployment
             .git()
-            .is_remote_branch(&repo.path, &target_branch)?;
+            .is_remote_branch(&repo.path, &target_branch)
+            .or_else(|_| {
+                deployment
+                    .git()
+                    .is_remote_branch(&worktree_path, &target_branch)
+            })
+            .unwrap_or(false);
 
         let has_open_pr = matches!(
             repo_merges.first(),
@@ -473,40 +724,177 @@ pub async fn get_workspace_branch_status(
             Default::default()
         };
 
-        let (commits_ahead, commits_behind) = if is_target_remote {
-            let (ahead, behind) = deployment.git().get_remote_branch_status(
-                &repo.path,
-                &workspace.branch,
-                Some(&target_branch),
-                &credentials,
-            )?;
-            (Some(ahead), Some(behind))
+        // Which repository to read. The registered checkout, exactly as
+        // before, whenever it already holds the worktree's HEAD for this
+        // branch: then its target branch is the current one (the same source
+        // rebase uses). Otherwise — a clustered workspace whose background
+        // mirror is pending, disabled or failing — the worktree's own
+        // repository, the shared store, which has the real branch tip. The
+        // other is the fallback; failing both, report unknown counts rather
+        // than failing the response and hiding `source_mirror_error`.
+
+        // The workspace side is always read from the worktree's own
+        // repository — the shared store, for a clustered workspace — never
+        // from the checkout's courtesy copy, which may lag or have been moved.
+        // (A coordinator-local worktree shares its checkout's refs anyway.)
+        let primary: &std::path::Path = &worktree_path;
+        // A local target is compared as the checkout has it *now* (the same
+        // source direct merge and rebase use), against the worktree's HEAD.
+        // Off the runtime workers. When it cannot compare against the current
+        // target (e.g. the store lacks that commit yet), the counts are
+        // unknown — never a comparison against an older copy of the target.
+        let counts = if is_target_remote {
+            // Off the runtime workers: this fetches from the forge.
+            let (repo_dir, branch, target, creds) = (
+                primary.to_path_buf(),
+                workspace.branch.clone(),
+                target_branch.clone(),
+                credentials.clone(),
+            );
+            let via_git = bounded_remote_status(repo_dir, branch, Some(target), creds).await;
+            match via_git {
+                Ok(counts) => Ok(counts),
+                // E.g. `upstream/main`, whose remote the store has no fetch
+                // mapping for: compare the workspace branch against the
+                // checkout's remote-tracking ref instead (bounded, off-worker).
+                Err(_) => {
+                    // Refresh the target in the checkout first (the same
+                    // credentialed fetch this status always did there),
+                    // whether or not its copy of the workspace branch is
+                    // current; its own counts are ignored.
+                    // Comparing the target with itself: a fetch of its remote
+                    // through the usual credentialed path that needs nothing
+                    // but the target ref (counts ignored).
+                    // Bounded and single-flight, like the primary comparison.
+                    let refreshed = bounded_remote_status(
+                        repo.path.clone(),
+                        target_branch.clone(),
+                        Some(target_branch.clone()),
+                        credentials.clone(),
+                    )
+                    .await;
+                    match refreshed {
+                        // Unknown rather than a comparison against a cached,
+                        // possibly stale tracking ref.
+                        Err(e) => Err(format!("could not refresh '{target_branch}': {e}")),
+                        Ok(_) => {
+                            let (worktree, checkout, branch, target) = (
+                                worktree_path.clone(),
+                                repo.path.clone(),
+                                workspace.branch.clone(),
+                                target_branch.clone(),
+                            );
+                            tokio::task::spawn_blocking(move || {
+                                counts_against_checkout_target(
+                                    &worktree, &checkout, &branch, &target,
+                                )
+                            })
+                            .await
+                            .unwrap_or_else(|e| Err(e.to_string()))
+                        }
+                    }
+                }
+            }
         } else {
-            let (a, b) = deployment.git().get_branch_status(
-                &repo.path,
-                &workspace.branch,
-                &target_branch,
-            )?;
-            (Some(a), Some(b))
+            let (worktree, checkout, branch, target) = (
+                worktree_path.clone(),
+                repo.path.clone(),
+                workspace.branch.clone(),
+                target_branch.clone(),
+            );
+            tokio::task::spawn_blocking(move || {
+                // Bounded throughout; it brings a missing target commit in.
+                counts_against_checkout_target(&worktree, &checkout, &branch, &target)
+            })
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()))
+        };
+        let (commits_ahead, commits_behind) = match counts {
+            Ok((ahead, behind)) => (Some(ahead), Some(behind)),
+            Err(e) => {
+                tracing::debug!(
+                    repo = %repo.name,
+                    "branch status unavailable for '{}': {e}",
+                    workspace.branch
+                );
+                (None, None)
+            }
         };
 
         let (remote_ahead, remote_behind) = if has_open_pr {
-            match deployment.git().get_remote_branch_status(
-                &repo.path,
-                &workspace.branch,
-                None,
-                &credentials,
-            ) {
+            // The worktree's repository, for the same reason as above.
+            // Off the runtime workers: this fetches from the forge.
+            let (repo_dir, branch, creds) = (
+                primary.to_path_buf(),
+                workspace.branch.clone(),
+                credentials.clone(),
+            );
+            let pr_counts = bounded_remote_status(repo_dir, branch, None, creds).await;
+            match pr_counts {
                 Ok((ahead, behind)) => (Some(ahead), Some(behind)),
-                Err(_) => (None, None),
+                // The branch's upstream may be configured only in the
+                // checkout (a PR opened before the workspace moved to the
+                // store): resolve it there, compare it with the store's branch.
+                Err(_) => {
+                    // Refresh the checkout's remote first (the same
+                    // credentialed fetch this status always did there); its
+                    // own counts may rest on a stale workspace copy, so they
+                    // are ignored in favour of the store's branch below.
+                    let refreshed = bounded_remote_status(
+                        repo.path.clone(),
+                        workspace.branch.clone(),
+                        None,
+                        credentials.clone(),
+                    )
+                    .await
+                    .is_ok();
+                    let (worktree, checkout, branch) = (
+                        worktree_path.clone(),
+                        repo.path.clone(),
+                        workspace.branch.clone(),
+                    );
+                    let counts = tokio::task::spawn_blocking(move || {
+                        let upstream = git::GitCli::new()
+                            .git_within(
+                                &checkout,
+                                [
+                                    "rev-parse",
+                                    "--abbrev-ref",
+                                    "--symbolic-full-name",
+                                    &format!("{branch}@{{upstream}}"),
+                                ],
+                                None,
+                                std::time::Duration::from_secs(5),
+                            )
+                            .map_err(|e| e.to_string())?;
+                        counts_against_checkout_target(
+                            &worktree,
+                            &checkout,
+                            &branch,
+                            upstream.trim(),
+                        )
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()));
+                    match counts {
+                        // Only against a freshly fetched upstream.
+                        Ok((ahead, behind)) if refreshed => (Some(ahead), Some(behind)),
+                        _ => (None, None),
+                    }
+                }
             }
         } else {
             (None, None)
         };
 
+        let source_mirror_error = SourceMirror::global()
+            .failure(&repo.path, &workspace.branch)
+            .map(SourceMirrorError::from);
+
         results.push(RepoBranchStatus {
             repo_id: repo.id,
             repo_name: repo.name,
+            source_mirror_error,
             status: BranchStatus {
                 commits_ahead,
                 commits_behind,
@@ -527,6 +915,206 @@ pub async fn get_workspace_branch_status(
     }
 
     Ok(ResponseJson(ApiResponse::success(results)))
+}
+
+/// Commits ahead of / behind `target` *as the registered checkout has it now*,
+/// for the workspace branch in the worktree's own repository — which, for a
+/// clustered workspace, is the
+/// authoritative workspace tip even while its courtesy mirror into the
+/// checkout is pending, disabled or failing. Computed in the worktree's
+/// repository; fails if the checkout's target commit is not present there.
+/// Repositories (canonical common git directories) with a remote comparison —
+/// and so a fetch — in flight.
+static REMOTE_STATUS_IN_FLIGHT: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<PathBuf>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// `get_remote_branch_status` (which fetches from the forge) off the runtime
+/// workers, at most one at a time per (repository, branch, target), and
+/// waited on for a bounded time: a stalled forge or credential helper yields
+/// unknown counts — and the response still carries `source_mirror_error` —
+/// instead of a poll that never returns or polls that stack up fetches.
+async fn bounded_remote_status(
+    repo_dir: PathBuf,
+    branch: String,
+    target: Option<String>,
+    credentials: utils::github_credentials::GitHubCredentials,
+) -> Result<(usize, usize), String> {
+    // One fetch at a time per *repository* (several workspaces share one
+    // store, and every comparison fetches into the same remote-tracking
+    // refs): keyed by the canonical common git directory, resolved off-worker.
+    let probe_dir = repo_dir.clone();
+    let repository = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::task::spawn_blocking(move || {
+            utils::worktree_linkage::common_dir_of(&probe_dir)
+                .ok()
+                .and_then(|(common, _)| std::fs::canonicalize(common).ok())
+                .unwrap_or(probe_dir)
+        }),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .ok_or_else(|| "the repository did not answer in time".to_string())?;
+    let key = repository;
+    if !REMOTE_STATUS_IN_FLIGHT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(key.clone())
+    {
+        return Err("a remote fetch into this repository is still running".to_string());
+    }
+    let task = tokio::task::spawn_blocking(move || {
+        let result = git::GitService::new()
+            .get_remote_branch_status(&repo_dir, &branch, target.as_deref(), &credentials)
+            .map_err(|e| e.to_string());
+        REMOTE_STATUS_IN_FLIGHT
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&key);
+        result
+    });
+    match tokio::time::timeout(std::time::Duration::from_secs(20), task).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => Err("the remote comparison did not finish within 20s".to_string()),
+    }
+}
+
+/// Background target fetches (see `counts_against_checkout_target`), keyed by
+/// (repository, target ref).
+static TARGET_FETCHES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<(PathBuf, String), TargetFetch>>,
+> = std::sync::LazyLock::new(Default::default);
+const TARGET_FETCH_BACKOFF: std::time::Duration = std::time::Duration::from_secs(60);
+
+enum TargetFetch {
+    Running,
+    FailedAt(std::time::Instant),
+}
+
+fn counts_against_checkout_target(
+    worktree: &std::path::Path,
+    checkout: &std::path::Path,
+    branch: &str,
+    target: &str,
+) -> Result<(usize, usize), String> {
+    // One stuck probe per stalled checkout at most: while an earlier one has
+    // not exited, report unknown rather than start another.
+    if git::GitCli::has_stuck_command(checkout) || git::GitCli::has_stuck_command(worktree) {
+        return Err(format!(
+            "an earlier read of {} has not finished (stalled storage?)",
+            checkout.display()
+        ));
+    }
+    // Every call under a process-level deadline: the checkout may be stalled.
+    let deadline = std::time::Duration::from_secs(5);
+    let cli = git::GitCli::new();
+    // As a branch — local first, then remote-tracking — the way
+    // `GitService::find_branch` resolves it; never a same-named tag.
+    let mut found = None;
+    for candidate in [
+        format!("refs/heads/{target}"),
+        format!("refs/remotes/{target}"),
+    ] {
+        if let Some(oid) = cli
+            .resolve_commit_within(checkout, &candidate, deadline)
+            .map_err(|e| e.to_string())?
+        {
+            found = Some((candidate, oid));
+            break;
+        }
+    }
+    let (target_ref, tip) =
+        found.ok_or_else(|| format!("'{target}' was not found in {}", checkout.display()))?;
+    let present = |cli: &git::GitCli| {
+        cli.git_within(
+            worktree,
+            ["cat-file", "-e", &format!("{tip}^{{commit}}")],
+            None,
+            deadline,
+        )
+        .is_ok()
+    };
+    if !present(&cli) {
+        // The workspace's repository (the shared store, for a clustered
+        // workspace) lacks the checkout's current target commit. Fetch just
+        // that ref's objects (FETCH_HEAD only, no ref moves; bounded) in the
+        // background, at most once at a time per (repository, ref) however
+        // many polls ask; counts are unknown until it lands.
+        // Keyed by the repository itself (many worktrees share one store),
+        // with a back-off after a failed fetch.
+        let repository = utils::worktree_linkage::common_dir_of(worktree)
+            .ok()
+            .and_then(|(common, _)| std::fs::canonicalize(common).ok())
+            .unwrap_or_else(|| worktree.to_path_buf());
+        let key = (repository.clone(), target_ref.clone());
+        if git::GitCli::has_stuck_command(&repository) {
+            return Err(format!(
+                "an earlier fetch into {} has not exited (stalled storage?)",
+                repository.display()
+            ));
+        }
+        let started = {
+            let mut fetches = TARGET_FETCHES.lock().unwrap_or_else(|e| e.into_inner());
+            match fetches.get(&key) {
+                Some(TargetFetch::Running) => false,
+                Some(TargetFetch::FailedAt(at)) if at.elapsed() < TARGET_FETCH_BACKOFF => false,
+                _ => {
+                    fetches.insert(key.clone(), TargetFetch::Running);
+                    true
+                }
+            }
+        };
+        if started {
+            let checkout = checkout.to_path_buf();
+            std::thread::spawn(move || {
+                let fetched = git::GitCli::new().git_within(
+                    &repository,
+                    [
+                        "fetch",
+                        "--no-tags",
+                        "--no-write-fetch-head",
+                        &checkout.to_string_lossy(),
+                        &key.1,
+                    ],
+                    None,
+                    std::time::Duration::from_secs(120),
+                );
+                let mut fetches = TARGET_FETCHES.lock().unwrap_or_else(|e| e.into_inner());
+                match fetched {
+                    Ok(_) => {
+                        fetches.remove(&key);
+                    }
+                    Err(_) => {
+                        fetches.insert(key, TargetFetch::FailedAt(std::time::Instant::now()));
+                    }
+                }
+            });
+        }
+        return Err(format!(
+            "{tip} is not in the workspace's repository yet; fetching it"
+        ));
+    }
+    let out = cli
+        .git_within(
+            worktree,
+            [
+                "rev-list",
+                "--left-right",
+                "--count",
+                &format!("refs/heads/{branch}...{tip}"),
+            ],
+            None,
+            deadline,
+        )
+        .map_err(|e| e.to_string())?;
+    let mut counts = out.split_whitespace().map(str::parse::<usize>);
+    match (counts.next(), counts.next()) {
+        (Some(Ok(ahead)), Some(Ok(behind))) => Ok((ahead, behind)),
+        _ => Err(format!("unexpected rev-list output: {out}")),
+    }
 }
 
 #[axum::debug_handler]
@@ -556,12 +1144,117 @@ pub async fn change_target_branch(
         )));
     };
 
-    WorkspaceRepo::update_target_branch(pool, workspace.id, repo_id, &new_target_branch).await?;
+    // Validate before persisting. The worktree's HEAD is authoritative (for a
+    // clustered workspace the checkout's copy of the branch may lag or be
+    // missing); the checkout's own comparison is the fallback.
+    let worktree = workspace
+        .container_ref
+        .as_ref()
+        .filter(|_| !workspace.worktree_deleted)
+        .map(|dir| PathBuf::from(dir).join(&repo.name));
+    let status = match worktree {
+        // Off the runtime workers, every git call under a deadline; a failure
+        // here is reported, never retried against an unbounded checkout read.
+        Some(worktree) => {
+            // The authoritative tip of the workspace branch (the worktree's
+            // own repository — the shared store for a clustered workspace).
+            let worktree_tip = {
+                let (worktree, branch_ref) =
+                    (worktree.clone(), format!("refs/heads/{}", workspace.branch));
+                tokio::task::spawn_blocking(move || {
+                    git::GitCli::new()
+                        .resolve_commit_within(
+                            &worktree,
+                            &branch_ref,
+                            std::time::Duration::from_secs(5),
+                        )
+                        .ok()
+                        .flatten()
+                })
+                .await
+                .unwrap_or(None)
+            };
+            let (checkout, branch, target) = (
+                repo.path.clone(),
+                workspace.branch.clone(),
+                new_target_branch.clone(),
+            );
+            let counts = tokio::task::spawn_blocking(move || {
+                // A mutation: give a background fetch of a target the store
+                // lacks a bounded moment to land, then compare again.
+                let mut result =
+                    counts_against_checkout_target(&worktree, &checkout, &branch, &target);
+                for _ in 0..30 {
+                    match &result {
+                        Err(e) if e.ends_with("fetching it") => {
+                            std::thread::sleep(std::time::Duration::from_secs(1));
+                            result = counts_against_checkout_target(
+                                &worktree, &checkout, &branch, &target,
+                            );
+                        }
+                        _ => break,
+                    }
+                }
+                result
+            })
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()));
+            match counts {
+                Ok(status) => status,
+                // E.g. a new target whose tip the store has not got yet: the
+                // checkout can still compare its own refs (off-worker,
+                // bounded wait).
+                Err(first) => {
+                    let (checkout, branch, target) = (
+                        repo.path.clone(),
+                        workspace.branch.clone(),
+                        new_target_branch.clone(),
+                    );
+                    let authoritative = worktree_tip.clone();
+                    let fallback = tokio::task::spawn_blocking(move || {
+                        // Only if the checkout's copy of the workspace branch
+                        // is verifiably the authoritative tip; otherwise its
+                        // counts would describe an older commit.
+                        let checkout_tip = git::GitCli::new()
+                            .resolve_commit_within(
+                                &checkout,
+                                &format!("refs/heads/{branch}"),
+                                std::time::Duration::from_secs(5),
+                            )
+                            .ok()
+                            .flatten();
+                        if authoritative.is_none() || checkout_tip != authoritative {
+                            return Err("the registered checkout's copy of the workspace \
+                                        branch is not current"
+                                .to_string());
+                        }
+                        git::GitService::new()
+                            .get_branch_status(&checkout, &branch, &target)
+                            .map_err(|e| e.to_string())
+                    });
+                    match tokio::time::timeout(std::time::Duration::from_secs(10), fallback).await {
+                        Ok(Ok(Ok(status))) => status,
+                        _ => {
+                            return Ok(ResponseJson(ApiResponse::error(
+                                format!(
+                                    "Could not compare the workspace with \
+                                     '{new_target_branch}': {first}"
+                                )
+                                .as_str(),
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+        None => {
+            deployment
+                .git()
+                .get_branch_status(&repo.path, &workspace.branch, &new_target_branch)?
+        }
+    };
 
-    let status =
-        deployment
-            .git()
-            .get_branch_status(&repo.path, &workspace.branch, &new_target_branch)?;
+    WorkspaceRepo::update_target_branch(pool, workspace.id, repo_id, &new_target_branch).await?;
 
     deployment
         .track_if_analytics_allowed(
