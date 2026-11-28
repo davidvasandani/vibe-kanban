@@ -2666,7 +2666,13 @@ mod tests {
         fs::remove_dir_all(base.join("gone")).unwrap();
         fs::remove_dir_all(base.join("other")).unwrap();
         // A live sibling on the same storage: evidence that it is mounted.
+        git::GitService::new()
+            .create_branch(&checkout, "vk/live", "main")
+            .unwrap();
         fs::create_dir_all(base.join("live")).unwrap();
+        cli()
+            .worktree_add(&checkout, &base.join("live").join("repo"), "vk/live", false)
+            .unwrap();
 
         assert_eq!(
             SharedRepositoryStore::forget_source_registrations(&checkout, &gone).unwrap(),

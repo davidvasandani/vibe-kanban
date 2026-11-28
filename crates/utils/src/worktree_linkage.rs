@@ -355,30 +355,29 @@ pub fn registration_state(registration: &Registration) -> RegistrationState {
 /// was deleted (stale) or because the storage holding it is not there right
 /// now (indeterminate).
 ///
-/// Evidence of present storage: the nearest existing ancestor — the parent,
-/// or failing that the grandparent, never further — exists **and is not
-/// empty**. An unmounted mount point is an existing, empty directory, so a
-/// worktree directly under an offline mount reads as "cannot tell", not
-/// "deleted". The cost of being wrong in the other direction is only that a
-/// stale entry is kept, e.g. when the last workspace of a base directory goes.
+/// Positive evidence of present storage: the nearest existing ancestor — the
+/// parent, or failing that the grandparent, never further — holds **another
+/// worktree** (a sibling directory with a `.git` entry, directly or one level
+/// down). An unmounted mount point is empty, and a stale local directory left
+/// under an offline mount does not hold other workspaces' worktrees, so both
+/// read as "cannot tell". The cost of erring this way is only that a stale
+/// entry is kept, e.g. when the last workspace on some storage goes.
 fn storage_evidence(worktree: &Path) -> RegistrationState {
     let candidates = [worktree.parent(), worktree.parent().and_then(Path::parent)];
     for dir in candidates.into_iter().flatten() {
         match dir.try_exists() {
             Ok(false) => continue,
             Ok(true) => {
-                return match fs::read_dir(dir).map(|mut entries| entries.next().is_some()) {
+                return match holds_a_worktree(dir, worktree) {
                     Ok(true) => RegistrationState::Stale(format!(
                         "worktree directory {} was removed",
                         worktree.display()
                     )),
                     Ok(false) => RegistrationState::Indeterminate(format!(
-                        "{} is empty (storage not mounted?)",
+                        "{} holds no other worktree (storage not mounted?)",
                         dir.display()
                     )),
-                    Err(e) => {
-                        RegistrationState::Indeterminate(format!("read {}: {e}", dir.display()))
-                    }
+                    Err(e) => RegistrationState::Indeterminate(e),
                 };
             }
             Err(e) => {
@@ -392,6 +391,35 @@ fn storage_evidence(worktree: &Path) -> RegistrationState {
     ))
 }
 
+/// Whether `dir` holds a worktree other than `except`: a child, or a child's
+/// child, with a `.git` entry. Bounded, so a huge directory costs a fixed
+/// number of stats.
+fn holds_a_worktree(dir: &Path, except: &Path) -> Result<bool, String> {
+    const MAX_CHILDREN: usize = 64;
+    let read = |d: &Path| fs::read_dir(d).map_err(|e| format!("read {}: {e}", d.display()));
+    for child in read(dir)?.take(MAX_CHILDREN) {
+        let child = child
+            .map_err(|e| format!("read {}: {e}", dir.display()))?
+            .path();
+        if child == except || !child.is_dir() {
+            continue;
+        }
+        if child.join(".git").try_exists().unwrap_or(false) {
+            return Ok(true);
+        }
+        let Ok(grandchildren) = fs::read_dir(&child) else {
+            continue;
+        };
+        for grandchild in grandchildren.take(MAX_CHILDREN).flatten() {
+            let grandchild = grandchild.path();
+            if grandchild != except && grandchild.join(".git").try_exists().unwrap_or(false) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
 /// Where a repository's shared Git directory is, read from the filesystem
 /// only (no `git` subprocess, so it cannot hang on a child process), and
 /// whether the repository is bare.
@@ -402,7 +430,9 @@ fn storage_evidence(worktree: &Path) -> RegistrationState {
 /// - no `.git`, but `<repo>/HEAD` and `<repo>/objects`: a bare repository.
 pub fn common_dir_of(repo: &Path) -> Result<(PathBuf, bool), String> {
     let dot_git = repo.join(".git");
-    match fs::symlink_metadata(&dot_git) {
+    // `metadata`, not `symlink_metadata`: git follows a `.git` symlink to a
+    // directory, and so must we.
+    match fs::metadata(&dot_git) {
         Ok(meta) if meta.is_dir() => Ok((dot_git, false)),
         Ok(_) => {
             let contents = fs::read_to_string(&dot_git)
@@ -538,7 +568,9 @@ mod tests {
         )
         .unwrap();
         // Another workspace on the same storage: evidence that it is mounted.
-        fs::create_dir_all(root.join("ws").join("sibling")).unwrap();
+        let sibling = root.join("ws").join("sibling").join("repo");
+        fs::create_dir_all(&sibling).unwrap();
+        fs::write(sibling.join(".git"), "gitdir: /elsewhere\n").unwrap();
         (common, admin, worktree)
     }
 
@@ -605,6 +637,35 @@ mod tests {
         ));
         assert!(!remove_stale_registration(&reg).unwrap());
         assert!(admin.exists());
+    }
+
+    #[test]
+    fn a_non_empty_directory_without_worktrees_is_not_evidence_of_storage() {
+        let root = TempDir::new().unwrap();
+        let (common, _, _) = source_registration(root.path());
+        // An offline mount whose local mount point holds leftover files.
+        fs::remove_dir_all(root.path().join("ws")).unwrap();
+        fs::create_dir_all(root.path().join("ws")).unwrap();
+        fs::write(root.path().join("ws").join("README"), "local\n").unwrap();
+        assert!(matches!(
+            registration_state(&only(&common)),
+            RegistrationState::Indeterminate(_)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_git_directory_is_followed() {
+        let root = TempDir::new().unwrap();
+        let real = root.path().join("real-git");
+        fs::create_dir_all(&real).unwrap();
+        let checkout = root.path().join("checkout");
+        fs::create_dir_all(&checkout).unwrap();
+        std::os::unix::fs::symlink(&real, checkout.join(".git")).unwrap();
+        assert_eq!(
+            common_dir_of(&checkout).unwrap(),
+            (checkout.join(".git"), false)
+        );
     }
 
     #[test]

@@ -150,7 +150,15 @@ struct Slot {
     in_flight: bool,
     rerun: bool,
     failure: Option<SourceMirrorFailure>,
+    /// Work an earlier round abandoned at its deadline but could not prove
+    /// finished: a killed git process that has not been reaped (D-state on a
+    /// hard NFS mount) or a filesystem scan still blocked. No new round starts
+    /// while any is alive, so timed-out work never overlaps its replacement.
+    leftovers: Vec<tokio::task::JoinHandle<()>>,
 }
+
+/// Collects work a round abandons at a deadline (see [`Slot::leftovers`]).
+type Leftovers = Vec<tokio::task::JoinHandle<()>>;
 
 struct Inner {
     config: SourceMirrorConfig,
@@ -264,10 +272,37 @@ async fn lead(inner: Arc<Inner>, key: MirrorKey, store: PathBuf) {
             let slots = inner.slots.lock().unwrap_or_else(|e| e.into_inner());
             slots.get(&key).and_then(|slot| slot.failure.clone())
         };
-        let round = run_round(&inner.config, &store, dest, branch, previous.as_ref()).await;
+        let still_running = {
+            let mut slots = inner.slots.lock().unwrap_or_else(|e| e.into_inner());
+            let slot = slots.entry(key.clone()).or_default();
+            slot.leftovers.retain(|task| !task.is_finished());
+            slot.leftovers.len()
+        };
+        let mut leftovers = Leftovers::new();
+        let round = if still_running > 0 {
+            Round::Failed {
+                kind: SourceMirrorFailureKind::Timeout,
+                message: format!(
+                    "{still_running} timed-out git process(es) or filesystem scan(s) from an \
+                     earlier attempt have not exited yet (stuck storage?); not starting another"
+                ),
+                gate: None,
+            }
+        } else {
+            run_round(
+                &inner.config,
+                &store,
+                dest,
+                branch,
+                previous.as_ref(),
+                &mut leftovers,
+            )
+            .await
+        };
 
         let mut slots = inner.slots.lock().unwrap_or_else(|e| e.into_inner());
         let slot = slots.entry(key.clone()).or_default();
+        slot.leftovers.extend(leftovers);
         let succeeded = match round {
             Round::Synced { pushed } => {
                 if let Some(old) = slot.failure.take() {
@@ -356,6 +391,7 @@ async fn run_round(
     dest: &Path,
     branch: &str,
     previous: Option<&SourceMirrorFailure>,
+    leftovers: &mut Leftovers,
 ) -> Round {
     let git = config
         .git_binary
@@ -368,7 +404,7 @@ async fn run_round(
     };
 
     // 1. The store's commit. Absent means nothing to mirror.
-    let store_tip = match branch_tip(&git, store, branch, config.probe_timeout).await {
+    let store_tip = match branch_tip(&git, store, branch, config.probe_timeout, leftovers).await {
         Ok(Some(tip)) => tip,
         Ok(None) => return Round::Synced { pushed: false },
         Err(e) => {
@@ -384,7 +420,7 @@ async fn run_round(
 
     // 2. Nothing to do when the destination already has it — including when
     //    an operator fixed it by hand after a failure.
-    let dest_tip = match branch_tip(&git, dest, branch, config.probe_timeout).await {
+    let dest_tip = match branch_tip(&git, dest, branch, config.probe_timeout, leftovers).await {
         Ok(Some(tip)) if tip == store_tip => return Round::Synced { pushed: false },
         Ok(tip) => tip,
         Err(e) => {
@@ -399,7 +435,7 @@ async fn run_round(
     //    push. Remove it if it is provably stale; refuse without pushing if it
     //    is live. Re-run on every round, so an obstruction an operator has
     //    since removed is noticed without waiting for the branch to move.
-    if let Some(round) = preflight(dest, branch).await {
+    if let Some(round) = preflight(dest, branch, config.probe_timeout, leftovers).await {
         return round;
     }
 
@@ -424,6 +460,7 @@ async fn run_round(
         store,
         &["push", &dest_arg, &refspec],
         config.push_timeout,
+        leftovers,
     )
     .await
     {
@@ -451,22 +488,27 @@ async fn run_round(
     }
 }
 
-async fn preflight(dest: &Path, branch: &str) -> Option<Round> {
+async fn preflight(
+    dest: &Path,
+    branch: &str,
+    deadline: Duration,
+    leftovers: &mut Leftovers,
+) -> Option<Round> {
     let failed = |kind, message: String| Round::Failed {
         kind,
         message,
         gate: None,
     };
-    let dest = dest.to_path_buf();
+    let owned_dest = dest.to_path_buf();
     let branch = branch.to_string();
     // Filesystem reads only (no git subprocess), over possibly-NFS storage:
     // off the async workers. Re-run on every round, so an obstruction an
     // operator has since removed — or a main checkout switched to another
     // branch — is noticed without waiting for either commit to move.
-    let verdict =
+    let mut scan =
         tokio::task::spawn_blocking(move || -> Result<(), (SourceMirrorFailureKind, String)> {
-            let dest_display = dest.display();
-            let (common_dir, bare) = worktree_linkage::common_dir_of(&dest)
+            let dest_display = owned_dest.display();
+            let (common_dir, bare) = worktree_linkage::common_dir_of(&owned_dest)
                 .map_err(|e| (SourceMirrorFailureKind::Deterministic, e))?;
             let held = format!("ref: refs/heads/{branch}");
             if !bare
@@ -511,8 +553,24 @@ async fn preflight(dest: &Path, branch: &str) -> Option<Round> {
                 }
             }
             Ok(())
-        })
-        .await;
+        });
+    let verdict = match tokio::time::timeout(deadline, &mut scan).await {
+        Ok(verdict) => verdict,
+        Err(_) => {
+            // A blocking task cannot be cancelled. Fence it instead.
+            leftovers.push(tokio::spawn(async move {
+                let _ = scan.await;
+            }));
+            return Some(failed(
+                SourceMirrorFailureKind::Timeout,
+                format!(
+                    "scanning the worktree registrations of {} did not finish within {}s",
+                    dest.display(),
+                    deadline.as_secs()
+                ),
+            ));
+        }
+    };
     match verdict {
         Ok(Ok(())) => None,
         Ok(Err((kind, message))) => Some(failed(kind, message)),
@@ -529,6 +587,7 @@ async fn branch_tip(
     repo: &Path,
     branch: &str,
     timeout: Duration,
+    leftovers: &mut Leftovers,
 ) -> Result<Option<String>, String> {
     let spec = format!("refs/heads/{branch}^{{commit}}");
     match run_git_bounded(
@@ -536,6 +595,7 @@ async fn branch_tip(
         repo,
         &["rev-parse", "--verify", "--quiet", &spec],
         timeout,
+        leftovers,
     )
     .await
     {
@@ -617,6 +677,7 @@ async fn run_git_bounded(
     dir: &Path,
     args: &[&str],
     timeout: Duration,
+    leftovers: &mut Leftovers,
 ) -> Result<BoundedOutput, BoundedError> {
     let mut cmd = tokio::process::Command::new(git);
     cmd.arg("-C")
@@ -665,10 +726,21 @@ async fn run_git_bounded(
             if let Some(pid) = pid {
                 utils::process::kill_process_group_now(pid);
             }
-            let _ = child.kill().await;
-            let _ = child.wait().await;
+            let _ = child.start_kill();
             stdout_task.abort();
             stderr_task.abort();
+            // A process blocked in uninterruptible I/O does not die on
+            // SIGKILL until the I/O returns. Report the timeout now either
+            // way; if it has not been reaped within the grace period, hand the
+            // reaping to a fenced leftover rather than waiting here.
+            if tokio::time::timeout(PIPE_DRAIN_GRACE, child.wait())
+                .await
+                .is_err()
+            {
+                leftovers.push(tokio::spawn(async move {
+                    let _ = child.wait().await;
+                }));
+            }
             return Err(BoundedError::Timeout(timeout));
         }
     };
@@ -993,7 +1065,9 @@ mod tests {
         );
         fs::remove_dir_all(root.path().join("ws").join("one")).unwrap();
         // Another workspace on the same storage: evidence it is mounted.
-        fs::create_dir_all(root.path().join("ws").join("other")).unwrap();
+        let other = root.path().join("ws").join("other").join("repo");
+        fs::create_dir_all(&other).unwrap();
+        fs::write(other.join(".git"), "gitdir: /elsewhere\n").unwrap();
 
         let m = mirror(SourceMirrorConfig::default());
         m.request(&store, &src, "vk/b");
@@ -1061,6 +1135,38 @@ mod tests {
         m.wait_idle(&src, "vk/b").await;
         assert_eq!(m.failure(&src, "vk/b"), None);
         assert_eq!(tip(&src), tip(&store));
+    }
+
+    #[tokio::test]
+    async fn no_new_attempt_starts_while_timed_out_work_is_still_alive() {
+        let root = TempDir::new().unwrap();
+        let (src, store) = fixture(root.path());
+        let tools = TempDir::new().unwrap();
+        let m = mirror(SourceMirrorConfig {
+            git_binary: Some(fake_git(tools.path(), "exec git \"$@\"")),
+            ..Default::default()
+        });
+        // An earlier round's killed-but-unreaped push.
+        let stuck = tokio::spawn(std::future::pending::<()>());
+        m.inner
+            .slots
+            .lock()
+            .unwrap()
+            .entry((src.clone(), "vk/b".to_string()))
+            .or_default()
+            .leftovers
+            .push(stuck);
+
+        assert_eq!(m.request(&store, &src, "vk/b"), RequestOutcome::Started);
+        m.wait_idle(&src, "vk/b").await;
+        let failure = m.failure(&src, "vk/b").expect("recorded");
+        assert_eq!(failure.kind, SourceMirrorFailureKind::Timeout);
+        assert!(
+            failure.message.contains("not exited"),
+            "{}",
+            failure.message
+        );
+        assert_eq!(push_count(tools.path()), 0, "nothing overlaps stuck work");
     }
 
     #[tokio::test]
