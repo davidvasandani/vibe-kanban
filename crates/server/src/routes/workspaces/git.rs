@@ -712,26 +712,15 @@ pub async fn get_workspace_branch_status(
         // repository, the shared store, which has the real branch tip. The
         // other is the fallback; failing both, report unknown counts rather
         // than failing the response and hiding `source_mirror_error`.
-        // From the mirror's own record, not a probe: no git call can pile up
-        // here on a stalled checkout. A workspace that is not clustered never
-        // records one, and reading its worktree first is equivalent anyway
-        // (the worktree shares the checkout's refs).
-        let checkout_is_current = head_oid.as_deref().is_some_and(|head| {
-            SourceMirror::global()
-                .synced_tip(&repo.path, &workspace.branch)
-                .is_some_and(|tip| tip == head)
-        });
+
         // A checkout that does not hold the worktree's HEAD is never read as a
         // fallback: its copy of the branch is stale and would under-report.
-        // The worktree's repository is always read first (the workspace side
-        // is authoritative there); the checkout is a fallback only while the
-        // mirror last saw it holding this very HEAD.
+        // The workspace side is always read from the worktree's own
+        // repository — the shared store, for a clustered workspace — never
+        // from the checkout's courtesy copy, which may lag or have been moved.
+        // (A coordinator-local worktree shares its checkout's refs anyway.)
         let (primary, secondary): (&std::path::Path, Option<&std::path::Path>) =
-            if checkout_is_current {
-                (&worktree_path, Some(&repo.path))
-            } else {
-                (&worktree_path, None)
-            };
+            (&worktree_path, None);
         let branch_status_in = |repo_path: &std::path::Path| {
             if is_target_remote {
                 deployment.git().get_remote_branch_status(
@@ -765,14 +754,15 @@ pub async fn get_workspace_branch_status(
                     // credentialed fetch this status always did there),
                     // whether or not its copy of the workspace branch is
                     // current; its own counts are ignored.
-                    if secondary.is_none() {
-                        let _ = deployment.git().get_remote_branch_status(
-                            &repo.path,
-                            &workspace.branch,
-                            Some(&target_branch),
-                            &credentials,
-                        );
-                    }
+                    // Comparing the target with itself: a fetch of its remote
+                    // through the usual credentialed path that needs nothing
+                    // but the target ref (counts ignored).
+                    let _ = deployment.git().get_remote_branch_status(
+                        &repo.path,
+                        &target_branch,
+                        Some(&target_branch),
+                        &credentials,
+                    );
                     let (worktree, checkout, branch, target) = (
                         worktree_path.clone(),
                         repo.path.clone(),
@@ -1030,6 +1020,7 @@ pub async fn change_target_branch(
     let worktree = workspace
         .container_ref
         .as_ref()
+        .filter(|_| !workspace.worktree_deleted)
         .map(|dir| PathBuf::from(dir).join(&repo.name));
     let status = match worktree {
         // Off the runtime workers, every git call under a deadline; a failure
