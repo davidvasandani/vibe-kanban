@@ -2443,14 +2443,12 @@ impl LocalContainerService {
                 return;
             }
         };
-        let live_dirs: Arc<Vec<PathBuf>> = match Workspace::fetch_all(&self.db.pool).await {
-            Ok(workspaces) => Arc::new(
-                workspaces
-                    .into_iter()
-                    .filter(|w| !w.worktree_deleted)
-                    .filter_map(|w| w.container_ref.map(PathBuf::from))
-                    .collect(),
-            ),
+        let live_dirs: Vec<PathBuf> = match Workspace::fetch_all(&self.db.pool).await {
+            Ok(workspaces) => workspaces
+                .into_iter()
+                .filter(|w| !w.worktree_deleted)
+                .filter_map(|w| w.container_ref.map(PathBuf::from))
+                .collect(),
             Err(e) => {
                 // Without the live set the guard cannot be applied: skip.
                 tracing::warn!(
@@ -2459,13 +2457,45 @@ impl LocalContainerService {
                 return;
             }
         };
+        // Storage evidence for a registration whose worktree directory is gone:
+        // its workspace base directory holds a live workspace that is visible
+        // on disk right now, so that storage is mounted and the absence is a
+        // deletion. Computed off the async workers (NFS stats).
+        let evidence = tokio::task::spawn_blocking(move || {
+            let present_bases: Vec<PathBuf> = live_dirs
+                .iter()
+                .filter(|dir| matches!(dir.try_exists(), Ok(true)))
+                .filter_map(|dir| dir.parent().map(Path::to_path_buf))
+                .collect();
+            (live_dirs, present_bases)
+        });
+        let Ok(Ok((live_dirs, present_bases))) =
+            tokio::time::timeout(Duration::from_secs(120), evidence).await
+        else {
+            tracing::warn!(
+                "startup registration sweep skipped: workspace directories did not answer"
+            );
+            return;
+        };
+        let live_dirs = Arc::new(live_dirs);
+        let present_bases = Arc::new(present_bases);
         for repo in repos {
             let source = repo.path.clone();
             let live = live_dirs.clone();
+            let bases = present_bases.clone();
             let task = tokio::task::spawn_blocking(move || {
-                SharedRepositoryStore::sweep_source_registrations(&source, |worktree| {
-                    live.iter().any(|dir| worktree.starts_with(dir))
-                })
+                SharedRepositoryStore::sweep_source_registrations(
+                    &source,
+                    |worktree| live.iter().any(|dir| worktree.starts_with(dir)),
+                    // `<base>/<workspace>/<repo>`: its base must be one that
+                    // visibly holds a live workspace.
+                    |worktree| {
+                        worktree
+                            .parent()
+                            .and_then(Path::parent)
+                            .is_some_and(|base| bases.iter().any(|b| b == base))
+                    },
+                )
             });
             match tokio::time::timeout(PER_REPO_BUDGET, task).await {
                 Ok(Ok(Ok(report))) if report.removed > 0 => tracing::info!(
@@ -2494,9 +2524,12 @@ impl LocalContainerService {
     }
 
     fn spawn_workspace_cleanup(&self) {
+        // Independent of workspace cleanup, so slow checkouts never delay it.
+        let sweeper = self.clone();
+        tokio::spawn(async move { sweeper.sweep_source_registrations().await });
+
         let container = self.clone();
         tokio::spawn(async move {
-            container.sweep_source_registrations().await;
             container
                 .workspace_manager
                 .cleanup_orphan_workspaces(!container.cluster_config.enabled)

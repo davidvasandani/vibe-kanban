@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use db::models::repo::Repo;
 use git::GitCli;
 use tracing::{debug, info, warn};
-use utils::worktree_linkage::{self, LinkageStatus, WorktreeLinkage};
+use utils::worktree_linkage::{self, LinkageStatus, RegistrationState, WorktreeLinkage};
 use uuid::Uuid;
 use worktree_manager::RepositoryAdminLockManager;
 
@@ -364,13 +364,21 @@ impl SharedRepositoryStore {
         Ok(removed)
     }
 
-    /// Startup sweep of one operator checkout: remove every registration that
-    /// is provably stale (see [`worktree_linkage::registration_state`]) and is
-    /// not claimed by `is_live` (a live workspace directory, by the caller's
-    /// records). Per entry, never `git worktree prune`. Blocking.
+    /// Startup sweep of one operator checkout. Per entry, never `git worktree
+    /// prune`. Blocking. An entry is removed when it is not claimed by
+    /// `is_live` (a live workspace directory, by the caller's records) and
+    /// either
+    ///
+    /// - its worktree was re-linked to another registration (provably
+    ///   orphaned), or
+    /// - its worktree directory is gone **and** `storage_present` vouches for
+    ///   the storage that held it (e.g. that base directory visibly holds a
+    ///   live workspace right now) — a missing directory alone cannot tell a
+    ///   deletion from an offline mount.
     pub fn sweep_source_registrations(
         source_repo: &Path,
         is_live: impl Fn(&Path) -> bool,
+        storage_present: impl Fn(&Path) -> bool,
     ) -> Result<SweepReport, String> {
         let common_dir = Self::common_dir_of(source_repo)?;
         let mut report = SweepReport::default();
@@ -387,7 +395,14 @@ impl SharedRepositoryStore {
                 report.kept += 1;
                 continue;
             }
-            match worktree_linkage::remove_stale_registration(&entry) {
+            let removed = match worktree_linkage::registration_state(&entry) {
+                RegistrationState::Stale(_) => worktree_linkage::remove_stale_registration(&entry),
+                RegistrationState::WorktreeMissing(_) if storage_present(entry.worktree_path()) => {
+                    worktree_linkage::remove_registration_of_deleted_worktree(&entry)
+                }
+                _ => Ok(false),
+            };
+            match removed {
                 Ok(true) => report.removed += 1,
                 Ok(false) => report.kept += 1,
                 Err(e) => {
@@ -2715,9 +2730,12 @@ mod tests {
         }
         let claimed = base.join("claimed");
 
-        let report = SharedRepositoryStore::sweep_source_registrations(&checkout, |p| {
-            p.starts_with(&claimed)
-        })
+        let report = SharedRepositoryStore::sweep_source_registrations(
+            &checkout,
+            |p| p.starts_with(&claimed),
+            // The base directory visibly holds the live workspace.
+            |p| p.parent().and_then(Path::parent) == Some(base.as_path()),
+        )
         .unwrap();
         assert_eq!(
             report,

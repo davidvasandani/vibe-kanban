@@ -493,9 +493,20 @@ pub async fn get_workspace_branch_status(
 
         let has_uncommitted_changes = uncommitted_count.map(|c| c > 0);
 
+        // Resolved from the worktree's own repository first (for a clustered
+        // workspace that is the shared store, which every branch reaches
+        // before the background mirror copies it to the checkout), then the
+        // registered checkout; failing both, assume local rather than failing
+        // the response and hiding `source_mirror_error` with it.
         let is_target_remote = deployment
             .git()
-            .is_remote_branch(&repo.path, &target_branch)?;
+            .is_remote_branch(&worktree_path, &target_branch)
+            .or_else(|_| {
+                deployment
+                    .git()
+                    .is_remote_branch(&repo.path, &target_branch)
+            })
+            .unwrap_or(false);
 
         let has_open_pr = matches!(
             repo_merges.first(),
@@ -514,12 +525,12 @@ pub async fn get_workspace_branch_status(
             Default::default()
         };
 
-        // The registered checkout first, as before. For a clustered workspace
-        // the branch reaches the checkout only through the background source
-        // mirror, so it may not be there yet (or the mirror may be failing):
-        // fall back to the worktree's own repository — the shared store —
-        // and, failing both, report unknown counts rather than failing the
-        // whole response and hiding `source_mirror_error` with it.
+        // The worktree's own repository first: for a clustered workspace that
+        // is the shared store, which is authoritative — the registered
+        // checkout gets the branch only through the background mirror, which
+        // may be pending, disabled or failing (an older copy there would
+        // under-report commits ahead). The checkout is the fallback; failing
+        // both, report unknown counts rather than failing the response.
         let branch_status_in = |repo_path: &std::path::Path| {
             if is_target_remote {
                 deployment.git().get_remote_branch_status(
@@ -535,7 +546,7 @@ pub async fn get_workspace_branch_status(
             }
         };
         let (commits_ahead, commits_behind) =
-            match branch_status_in(&repo.path).or_else(|_| branch_status_in(&worktree_path)) {
+            match branch_status_in(&worktree_path).or_else(|_| branch_status_in(&repo.path)) {
                 Ok((ahead, behind)) => (Some(ahead), Some(behind)),
                 Err(e) => {
                     tracing::debug!(

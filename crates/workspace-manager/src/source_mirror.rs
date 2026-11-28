@@ -48,6 +48,9 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long to wait for a killed child's output pipes to close. A grandchild
 /// that escaped the process group could otherwise hold them open forever.
 const PIPE_DRAIN_GRACE: Duration = Duration::from_secs(5);
+/// Longest a slot stays fenced on a killed push's surviving group members once
+/// its leader is reaped (see `run_git_bounded`).
+const GROUP_FENCE_MAX: Duration = Duration::from_secs(15 * 60);
 const STDERR_MAX_LINES: usize = 20;
 const STDERR_MAX_BYTES: usize = 2048;
 
@@ -540,6 +543,24 @@ async fn preflight(
                         worktree_linkage::remove_stale_registration(&entry)
                             .map_err(|e| (SourceMirrorFailureKind::Transient, e))?;
                     }
+                    // Deleted, or on storage that is offline right now: this
+                    // path cannot tell, so it reports rather than removes.
+                    // The startup sweep removes such entries when their
+                    // storage is verifiably present; workspace deletion
+                    // removes its own.
+                    RegistrationState::WorktreeMissing(_) => {
+                        return Err((
+                            SourceMirrorFailureKind::Deterministic,
+                            format!(
+                                "branch '{branch}' is held by the worktree registration {} in \
+                                 {dest_display}, whose worktree {} no longer exists; remove it \
+                                 with `git -C {dest_display} worktree prune` if that storage is \
+                                 not just offline",
+                                entry.admin_dir.display(),
+                                entry.worktree_path().display()
+                            ),
+                        ));
+                    }
                     RegistrationState::Indeterminate(reason) => {
                         return Err((
                             SourceMirrorFailureKind::Transient,
@@ -614,6 +635,15 @@ async fn branch_tip(
 
 /// Sorts git's error text into a failure kind.
 fn classify(stderr: &str) -> SourceMirrorFailureKind {
+    // A ref lock held by a concurrent update is reported as `remote rejected
+    // … (failed to update ref)` but clears on its own: never gate it.
+    const TRANSIENT: &[&str] = &[
+        "failed to update ref",
+        "cannot lock ref",
+        "unable to lock",
+        "unable to create",
+        "index.lock",
+    ];
     const DETERMINISTIC: &[&str] = &[
         "remote rejected",
         "[rejected]",
@@ -626,6 +656,9 @@ fn classify(stderr: &str) -> SourceMirrorFailureKind {
         "cannot change to",
     ];
     let lower = stderr.to_ascii_lowercase();
+    if TRANSIENT.iter().any(|marker| lower.contains(marker)) {
+        return SourceMirrorFailureKind::Transient;
+    }
     if DETERMINISTIC.iter().any(|marker| lower.contains(marker)) {
         SourceMirrorFailureKind::Deterministic
     } else {
@@ -739,14 +772,20 @@ async fn run_git_bounded(
             // helper like `receive-pack` while the leader is already gone.
             // Report the timeout now; fence the slot with a leftover that ends
             // only once the leader is reaped *and* the whole group is gone.
+            //
+            // Every member already has SIGKILL pending (sent above, while the
+            // unreaped leader pinned the pgid). After reaping, the number could
+            // be reused, so the leftover only *probes* the group (signal 0,
+            // harmless to anyone) and never signals it again; a reused id can
+            // at worst extend the fence, which is bounded.
             leftovers.push(tokio::spawn(async move {
                 let _ = child.wait().await;
                 #[cfg(unix)]
-                if let Some(pid) = pid
-                    && let Ok(pgid) = i32::try_from(pid)
-                {
-                    while utils::process::process_group_alive(pgid) {
-                        utils::process::kill_process_group_now(pid);
+                if let Some(pgid) = pid.and_then(|pid| i32::try_from(pid).ok()) {
+                    let until = tokio::time::Instant::now() + GROUP_FENCE_MAX;
+                    while utils::process::process_group_alive(pgid)
+                        && tokio::time::Instant::now() < until
+                    {
                         tokio::time::sleep(Duration::from_secs(1)).await;
                     }
                 }
@@ -1062,11 +1101,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_stale_registration_holding_the_branch_is_removed_then_the_push_lands() {
+    async fn a_registration_of_a_missing_worktree_is_reported_not_removed() {
         let root = TempDir::new().unwrap();
         let (src, store) = fixture(root.path());
-        // A worktree under <root>/ws/one/repo holding vk/b, then deleted
-        // without unregistering — the incident's "prunable" entry.
+        // A worktree holding vk/b whose directory has gone — deleted without
+        // unregistering (the incident's "prunable" entry), or offline storage.
         let wt = root.path().join("ws").join("one").join("repo");
         fs::create_dir_all(wt.parent().unwrap()).unwrap();
         git(
@@ -1074,10 +1113,52 @@ mod tests {
             &["worktree", "add", "-q", &wt.to_string_lossy(), "vk/b"],
         );
         fs::remove_dir_all(root.path().join("ws").join("one")).unwrap();
-        // Another workspace on the same storage: evidence it is mounted.
-        let other = root.path().join("ws").join("other").join("repo");
-        fs::create_dir_all(&other).unwrap();
-        fs::write(other.join(".git"), "gitdir: /elsewhere\n").unwrap();
+        let tools = TempDir::new().unwrap();
+        let m = mirror(SourceMirrorConfig {
+            git_binary: Some(fake_git(tools.path(), "exec git \"$@\"")),
+            ..Default::default()
+        });
+
+        m.request(&store, &src, "vk/b");
+        m.wait_idle(&src, "vk/b").await;
+
+        let failure = m.failure(&src, "vk/b").expect("recorded");
+        assert_eq!(failure.kind, SourceMirrorFailureKind::Deterministic);
+        assert!(
+            failure.message.contains("worktree prune"),
+            "{}",
+            failure.message
+        );
+        assert_eq!(push_count(tools.path()), 0);
+        let list = git(&src, &["worktree", "list", "--porcelain"]);
+        assert!(
+            list.contains("prunable"),
+            "left for evidence-backed cleanup: {list}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_relinked_registration_holding_the_branch_is_removed_then_the_push_lands() {
+        let root = TempDir::new().unwrap();
+        let (src, store) = fixture(root.path());
+        let wt = root.path().join("ws").join("one").join("repo");
+        fs::create_dir_all(wt.parent().unwrap()).unwrap();
+        git(
+            &src,
+            &["worktree", "add", "-q", &wt.to_string_lossy(), "vk/b"],
+        );
+        // Adopted elsewhere by an older release that left this entry behind.
+        let elsewhere = root
+            .path()
+            .join("other-store")
+            .join("worktrees")
+            .join("repo");
+        fs::create_dir_all(&elsewhere).unwrap();
+        fs::write(
+            wt.join(".git"),
+            format!("gitdir: {}\n", elsewhere.display()),
+        )
+        .unwrap();
 
         let m = mirror(SourceMirrorConfig::default());
         m.request(&store, &src, "vk/b");
@@ -1085,8 +1166,6 @@ mod tests {
 
         assert_eq!(m.failure(&src, "vk/b"), None);
         assert_eq!(tip(&src), tip(&store));
-        let list = git(&src, &["worktree", "list", "--porcelain"]);
-        assert!(!list.contains("prunable"), "{list}");
     }
 
     #[tokio::test]
@@ -1205,6 +1284,10 @@ mod tests {
         );
         assert_eq!(
             classify("error: unable to write sha1 file"),
+            SourceMirrorFailureKind::Transient
+        );
+        assert_eq!(
+            classify(" ! [remote rejected] vk/b -> vk/b (failed to update ref)"),
             SourceMirrorFailureKind::Transient
         );
 

@@ -204,9 +204,16 @@ pub enum RegistrationState {
     /// The worktree exists and points back at this entry, or the entry is
     /// locked. Never removed.
     Live,
-    /// Positive evidence that nothing uses this entry any more. The reason is
-    /// operator-readable.
+    /// Positive evidence that nothing uses this entry any more: the worktree
+    /// it names now points at a *different*, existing registration (it was
+    /// re-linked elsewhere). Removable as is. The reason is operator-readable.
     Stale(String),
+    /// The worktree directory definitely does not exist. That alone does not
+    /// say whether it was deleted or its storage is offline (a missing mount
+    /// looks exactly like this), so it is removable only with evidence about
+    /// that storage from the caller — see
+    /// [`remove_registration_of_deleted_worktree`].
+    WorktreeMissing(String),
     /// Could not tell. Treated exactly like `Live`: an error is never evidence
     /// that a registration is unused.
     Indeterminate(String),
@@ -281,18 +288,13 @@ pub fn read_registration(admin_dir: &Path) -> Result<Registration, String> {
     })
 }
 
-/// Decides whether `registration` is still in use, from positive evidence
-/// only. An entry is [`RegistrationState::Stale`] when it is not locked and
-/// either
-///
-/// - its worktree directory definitely does not exist **and** the directory
-///   two levels above it (the storage the workspace lived on) definitely does
-///   — so a missing mount reads as "cannot tell", never as "deleted"; or
-/// - the worktree's `.git` now names a *different*, existing administration
-///   directory: the worktree was re-linked (adopted) elsewhere and this entry
-///   is an orphan that still holds its branch.
-///
-/// Every read or stat failure is [`RegistrationState::Indeterminate`].
+/// Decides whether `registration` is still in use, from what this entry and its
+/// worktree path show. Locked means [`RegistrationState::Live`]. A worktree
+/// re-linked to another existing registration means
+/// [`RegistrationState::Stale`]. A definitely absent worktree directory means
+/// [`RegistrationState::WorktreeMissing`] — never `Stale`, because only the
+/// caller can know whether the storage that held it is mounted. Every read or
+/// stat failure is [`RegistrationState::Indeterminate`].
 pub fn registration_state(registration: &Registration) -> RegistrationState {
     if registration.locked {
         return RegistrationState::Live;
@@ -340,7 +342,10 @@ pub fn registration_state(registration: &Registration) -> RegistrationState {
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => match worktree.try_exists() {
-            Ok(false) => storage_evidence(worktree),
+            Ok(false) => RegistrationState::WorktreeMissing(format!(
+                "worktree directory {} does not exist",
+                worktree.display()
+            )),
             Ok(true) => RegistrationState::Indeterminate(format!(
                 "{} exists but has no .git entry",
                 worktree.display()
@@ -351,84 +356,11 @@ pub fn registration_state(registration: &Registration) -> RegistrationState {
     }
 }
 
-/// A worktree directory is definitely gone. Decide whether that is because it
-/// was deleted (stale) or because the storage holding it is not there right
-/// now (indeterminate).
-///
-/// Positive evidence of present storage: the nearest existing ancestor — the
-/// parent, or failing that the grandparent, never further — holds **another
-/// worktree** (a sibling directory with a `.git` entry, directly or one level
-/// down). An unmounted mount point is empty, and a stale local directory left
-/// under an offline mount does not hold other workspaces' worktrees, so both
-/// read as "cannot tell". The cost of erring this way is only that a stale
-/// entry is kept, e.g. when the last workspace on some storage goes.
-///
-/// Nested mounts are covered by the same walk: an offline mount's mount point
-/// is itself an existing, empty directory on the worktree's path, so it is the
-/// nearest existing ancestor found here (and holds no worktree), or it lies
-/// more than two levels up and nothing is found at all.
-fn storage_evidence(worktree: &Path) -> RegistrationState {
-    let candidates = [worktree.parent(), worktree.parent().and_then(Path::parent)];
-    for dir in candidates.into_iter().flatten() {
-        match dir.try_exists() {
-            Ok(false) => continue,
-            Ok(true) => {
-                return match holds_a_worktree(dir, worktree) {
-                    Ok(true) => RegistrationState::Stale(format!(
-                        "worktree directory {} was removed",
-                        worktree.display()
-                    )),
-                    Ok(false) => RegistrationState::Indeterminate(format!(
-                        "{} holds no other worktree (storage not mounted?)",
-                        dir.display()
-                    )),
-                    Err(e) => RegistrationState::Indeterminate(e),
-                };
-            }
-            Err(e) => {
-                return RegistrationState::Indeterminate(format!("stat {}: {e}", dir.display()));
-            }
-        }
-    }
-    RegistrationState::Indeterminate(format!(
-        "neither the parent nor the grandparent of {} is visible (storage not mounted?)",
-        worktree.display()
-    ))
-}
-
-/// Whether `dir` holds a worktree other than `except`: a child, or a child's
-/// child, with a `.git` entry. Bounded, so a huge directory costs a fixed
-/// number of stats.
-fn holds_a_worktree(dir: &Path, except: &Path) -> Result<bool, String> {
-    const MAX_CHILDREN: usize = 64;
-    let read = |d: &Path| fs::read_dir(d).map_err(|e| format!("read {}: {e}", d.display()));
-    for child in read(dir)?.take(MAX_CHILDREN) {
-        let child = child
-            .map_err(|e| format!("read {}: {e}", dir.display()))?
-            .path();
-        if child == except || !child.is_dir() {
-            continue;
-        }
-        if child.join(".git").try_exists().unwrap_or(false) {
-            return Ok(true);
-        }
-        let Ok(grandchildren) = fs::read_dir(&child) else {
-            continue;
-        };
-        for grandchild in grandchildren.take(MAX_CHILDREN).flatten() {
-            let grandchild = grandchild.path();
-            if grandchild != except && grandchild.join(".git").try_exists().unwrap_or(false) {
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
-}
-
-/// Removes `registration` because the caller has **just deleted** the worktree
-/// it names — positive evidence the generic [`registration_state`] cannot have
-/// when that worktree was the last one on its storage. Still re-reads the entry
-/// and refuses if it changed, is locked, or its worktree path exists again.
+/// Removes a [`RegistrationState::WorktreeMissing`] entry on the caller's
+/// evidence that the worktree was really deleted rather than made invisible by
+/// offline storage: the caller just deleted it, or the storage it lived on is
+/// verifiably present (e.g. it visibly holds a live workspace). Still re-reads
+/// the entry and refuses if it changed, is locked, or its path exists again.
 pub fn remove_registration_of_deleted_worktree(
     registration: &Registration,
 ) -> Result<bool, String> {
@@ -625,67 +557,6 @@ mod tests {
         assert!(admin.exists());
     }
 
-    #[test]
-    fn a_removed_worktree_on_present_storage_is_stale_and_removed() {
-        let root = TempDir::new().unwrap();
-        let (common, admin, _) = source_registration(root.path());
-        fs::remove_dir_all(root.path().join("ws").join("one")).unwrap();
-        let reg = only(&common);
-        assert!(matches!(
-            registration_state(&reg),
-            RegistrationState::Stale(_)
-        ));
-        assert!(remove_stale_registration(&reg).unwrap());
-        assert!(!admin.exists());
-        assert!(registrations(&common).unwrap().is_empty());
-    }
-
-    #[test]
-    fn missing_storage_is_indeterminate_never_stale() {
-        let root = TempDir::new().unwrap();
-        let (common, admin, _) = source_registration(root.path());
-        // The whole `ws` tree vanishes, as an unmounted share would.
-        fs::remove_dir_all(root.path().join("ws")).unwrap();
-        let reg = only(&common);
-        assert!(matches!(
-            registration_state(&reg),
-            RegistrationState::Indeterminate(_)
-        ));
-        assert!(!remove_stale_registration(&reg).unwrap());
-        assert!(admin.exists());
-    }
-
-    #[test]
-    fn an_empty_mount_point_is_indeterminate_never_stale() {
-        let root = TempDir::new().unwrap();
-        let (common, admin, _) = source_registration(root.path());
-        // The worktree lives directly under an offline mount: the mount point
-        // directory exists, empty.
-        fs::remove_dir_all(root.path().join("ws")).unwrap();
-        fs::create_dir_all(root.path().join("ws").join("one")).unwrap();
-        let reg = only(&common);
-        assert!(matches!(
-            registration_state(&reg),
-            RegistrationState::Indeterminate(_)
-        ));
-        assert!(!remove_stale_registration(&reg).unwrap());
-        assert!(admin.exists());
-    }
-
-    #[test]
-    fn a_non_empty_directory_without_worktrees_is_not_evidence_of_storage() {
-        let root = TempDir::new().unwrap();
-        let (common, _, _) = source_registration(root.path());
-        // An offline mount whose local mount point holds leftover files.
-        fs::remove_dir_all(root.path().join("ws")).unwrap();
-        fs::create_dir_all(root.path().join("ws")).unwrap();
-        fs::write(root.path().join("ws").join("README"), "local\n").unwrap();
-        assert!(matches!(
-            registration_state(&only(&common)),
-            RegistrationState::Indeterminate(_)
-        ));
-    }
-
     #[cfg(unix)]
     #[test]
     fn a_symlinked_git_directory_is_followed() {
@@ -702,6 +573,21 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_worktree_is_never_stale_on_its_own() {
+        let root = TempDir::new().unwrap();
+        let (common, admin, _) = source_registration(root.path());
+        // Deleted, or behind an offline mount: indistinguishable from here.
+        fs::remove_dir_all(root.path().join("ws").join("one")).unwrap();
+        let reg = only(&common);
+        assert!(matches!(
+            registration_state(&reg),
+            RegistrationState::WorktreeMissing(_)
+        ));
+        assert!(!remove_stale_registration(&reg).unwrap());
+        assert!(admin.exists());
+    }
+
+    #[test]
     fn a_just_deleted_last_worktree_is_removed_on_the_callers_evidence() {
         let root = TempDir::new().unwrap();
         let (common, admin, _) = source_registration(root.path());
@@ -710,7 +596,7 @@ mod tests {
         let listed = only(&common);
         assert!(matches!(
             registration_state(&listed),
-            RegistrationState::Indeterminate(_)
+            RegistrationState::WorktreeMissing(_)
         ));
         assert!(remove_registration_of_deleted_worktree(&listed).unwrap());
         assert!(!admin.exists());
@@ -784,9 +670,19 @@ mod tests {
     #[test]
     fn an_entry_replaced_or_locked_after_listing_is_not_removed() {
         let root = TempDir::new().unwrap();
-        let (common, admin, _) = source_registration(root.path());
-        fs::remove_dir_all(root.path().join("ws").join("one")).unwrap();
+        let (common, admin, worktree) = source_registration(root.path());
+        let other = root.path().join("store").join("worktrees").join("wt");
+        fs::create_dir_all(&other).unwrap();
+        fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", other.display()),
+        )
+        .unwrap();
         let listed = only(&common);
+        assert!(matches!(
+            registration_state(&listed),
+            RegistrationState::Stale(_)
+        ));
 
         // Git reuses the admin path for a new, live worktree.
         let fresh = root.path().join("ws").join("two").join("repo");
@@ -801,8 +697,11 @@ mod tests {
         assert!(admin.exists());
 
         // Or the original entry gets locked.
-        let (common, admin, _) = source_registration(&root.path().join("other"));
-        fs::remove_dir_all(root.path().join("other").join("ws").join("one")).unwrap();
+        fs::write(
+            admin.join("gitdir"),
+            format!("{}\n", worktree.join(".git").display()),
+        )
+        .unwrap();
         let listed = only(&common);
         fs::write(admin.join("locked"), "").unwrap();
         assert!(!remove_stale_registration(&listed).unwrap());
