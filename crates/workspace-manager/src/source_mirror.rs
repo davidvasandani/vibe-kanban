@@ -146,6 +146,17 @@ pub enum RequestOutcome {
 
 type MirrorKey = (PathBuf, String);
 
+/// The slot key for (`dest`, `branch`): the canonical destination path, so a
+/// checkout reached through a symlinked alias shares one slot (and one
+/// single-flight guarantee) with its real path. Falls back to the path as
+/// given when it cannot be canonicalised (then there is nothing to push into).
+fn key_for(dest: &Path, branch: &str) -> MirrorKey {
+    (
+        std::fs::canonicalize(dest).unwrap_or_else(|_| dest.to_path_buf()),
+        branch.to_string(),
+    )
+}
+
 #[derive(Debug, Default)]
 struct Slot {
     in_flight: bool,
@@ -221,7 +232,7 @@ impl SourceMirror {
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return RequestOutcome::NoRuntime;
         };
-        let key: MirrorKey = (dest.to_path_buf(), branch.to_string());
+        let key = key_for(dest, branch);
         {
             let mut slots = self.inner.slots.lock().unwrap_or_else(|e| e.into_inner());
             let slot = slots.entry(key.clone()).or_default();
@@ -247,7 +258,7 @@ impl SourceMirror {
     pub fn failure(&self, dest: &Path, branch: &str) -> Option<SourceMirrorFailure> {
         let slots = self.inner.slots.lock().unwrap_or_else(|e| e.into_inner());
         slots
-            .get(&(dest.to_path_buf(), branch.to_string()))
+            .get(&key_for(dest, branch))
             .and_then(|slot| slot.failure.clone())
     }
 
@@ -257,7 +268,7 @@ impl SourceMirror {
     pub fn synced_tip(&self, dest: &Path, branch: &str) -> Option<String> {
         let slots = self.inner.slots.lock().unwrap_or_else(|e| e.into_inner());
         slots
-            .get(&(dest.to_path_buf(), branch.to_string()))
+            .get(&key_for(dest, branch))
             .and_then(|slot| slot.synced_tip.clone())
     }
 
@@ -332,7 +343,7 @@ impl SourceMirror {
         if !leftovers.is_empty() {
             let mut slots = self.inner.slots.lock().unwrap_or_else(|e| e.into_inner());
             slots
-                .entry((dest.to_path_buf(), branch.to_string()))
+                .entry(key_for(dest, branch))
                 .or_default()
                 .leftovers
                 .extend(leftovers);
@@ -342,7 +353,7 @@ impl SourceMirror {
 
     /// Wait until no leader is running for (`dest`, `branch`).
     pub async fn wait_idle(&self, dest: &Path, branch: &str) {
-        let key: MirrorKey = (dest.to_path_buf(), branch.to_string());
+        let key = key_for(dest, branch);
         loop {
             let notified = self.inner.idle.notified();
             tokio::pin!(notified);
@@ -1437,7 +1448,7 @@ mod tests {
             .slots
             .lock()
             .unwrap()
-            .entry((src.clone(), "vk/b".to_string()))
+            .entry(key_for(&src, "vk/b"))
             .or_default()
             .leftovers
             .push(stuck);

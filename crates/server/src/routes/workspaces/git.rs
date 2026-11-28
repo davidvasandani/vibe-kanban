@@ -591,12 +591,26 @@ pub async fn get_workspace_branch_status(
         };
         // A local target is compared as the checkout has it *now* (the same
         // source direct merge and rebase use), against the worktree's HEAD.
-        let local_counts = (!is_target_remote)
-            .then(|| counts_against_checkout_target(&worktree_path, &repo.path, &target_branch))
-            .and_then(Result::ok);
-        let (commits_ahead, commits_behind) = match local_counts.map(Ok).unwrap_or_else(|| {
-            branch_status_in(primary).or_else(|e| secondary.map_or(Err(e), &branch_status_in))
-        }) {
+        // Off the runtime workers. When it cannot compare against the current
+        // target (e.g. the store lacks that commit yet), the counts are
+        // unknown — never a comparison against an older copy of the target.
+        let counts = if is_target_remote {
+            branch_status_in(primary)
+                .or_else(|e| secondary.map_or(Err(e), &branch_status_in))
+                .map_err(|e| e.to_string())
+        } else {
+            let (worktree, checkout, target) = (
+                worktree_path.clone(),
+                repo.path.clone(),
+                target_branch.clone(),
+            );
+            tokio::task::spawn_blocking(move || {
+                counts_against_checkout_target(&worktree, &checkout, &target)
+            })
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()))
+        };
+        let (commits_ahead, commits_behind) = match counts {
             Ok((ahead, behind)) => (Some(ahead), Some(behind)),
             Err(e) => {
                 tracing::debug!(
@@ -666,15 +680,22 @@ fn counts_against_checkout_target(
     checkout: &std::path::Path,
     target: &str,
 ) -> Result<(usize, usize), String> {
+    // Every call under a process-level deadline: the checkout may be stalled.
+    let deadline = std::time::Duration::from_secs(5);
     let cli = git::GitCli::new();
     let tip = cli
-        .resolve_commit(checkout, target)
+        .resolve_commit_within(checkout, target, deadline)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("'{target}' was not found in {}", checkout.display()))?;
-    cli.git(worktree, ["cat-file", "-e", &format!("{tip}^{{commit}}")])
-        .map_err(|_| format!("{tip} is not present in the workspace's repository"))?;
+    cli.git_within(
+        worktree,
+        ["cat-file", "-e", &format!("{tip}^{{commit}}")],
+        None,
+        deadline,
+    )
+    .map_err(|_| format!("{tip} is not present in the workspace's repository"))?;
     let out = cli
-        .git(
+        .git_within(
             worktree,
             [
                 "rev-list",
@@ -682,6 +703,8 @@ fn counts_against_checkout_target(
                 "--count",
                 &format!("HEAD...{tip}"),
             ],
+            None,
+            deadline,
         )
         .map_err(|e| e.to_string())?;
     let mut counts = out.split_whitespace().map(str::parse::<usize>);

@@ -2207,7 +2207,7 @@ impl LocalContainerService {
             }
         };
 
-        let mut seen_before_cleanup = Vec::new();
+        let mut seen_before_cleanup: Vec<(PathBuf, u64)> = Vec::new();
         let cleanup_succeeded = if workspace_inputs.is_empty() {
             tracing::warn!(
                 "No repositories found for workspace {}, cleaning up workspace directory only",
@@ -2399,7 +2399,7 @@ impl LocalContainerService {
     async fn forget_source_registrations(
         workspace_dir: &Path,
         inputs: &[RepoWorkspaceInput],
-        seen_before_cleanup: &[PathBuf],
+        seen_before_cleanup: &[(PathBuf, u64)],
     ) {
         for input in inputs {
             if input.git_path == input.repo.path {
@@ -2409,9 +2409,25 @@ impl LocalContainerService {
             }
             let source = input.repo.path.clone();
             let worktree = workspace_dir.join(&input.repo.name);
-            if !seen_before_cleanup.contains(&worktree) {
+            let Some((_, device)) = seen_before_cleanup
+                .iter()
+                .find(|(path, _)| *path == worktree)
+            else {
                 // Not seen present before cleanup, so its absence now is no
                 // proof we deleted it: keep the registration.
+                continue;
+            };
+            // And proof the storage did not merely vanish meanwhile: the
+            // workspace's base directory is still on the very filesystem the
+            // worktree was seen on (an unmounted volume would expose the
+            // mount point's underlying filesystem, or nothing at all).
+            if !Self::still_on_device(workspace_dir, *device).await {
+                tracing::info!(
+                    repo = %input.repo.name,
+                    "kept the source registration of {}: its storage could not be confirmed \
+                     still mounted after cleanup",
+                    worktree.display()
+                );
                 continue;
             }
             let task = tokio::task::spawn_blocking(move || {
@@ -2448,28 +2464,64 @@ impl LocalContainerService {
 
     /// The clustered worktrees of `inputs` that definitely exist right now.
     /// Bounded; anything that cannot be confirmed in time is left out.
+    /// Also records the device each one lives on, for [`Self::still_on_device`].
     async fn clustered_worktrees_present(
         workspace_dir: &Path,
         inputs: &[RepoWorkspaceInput],
-    ) -> Vec<PathBuf> {
+    ) -> Vec<(PathBuf, u64)> {
         let candidates: Vec<PathBuf> = inputs
             .iter()
             .filter(|input| input.git_path != input.repo.path)
             .map(|input| workspace_dir.join(&input.repo.name))
             .collect();
         if candidates.is_empty() {
-            return candidates;
+            return Vec::new();
         }
         let probe = tokio::task::spawn_blocking(move || {
             candidates
                 .into_iter()
-                .filter(|path| matches!(path.join(".git").try_exists(), Ok(true)))
+                .filter_map(|path| {
+                    let meta = std::fs::metadata(path.join(".git")).ok()?;
+                    Some((path, Self::device_of(&meta)?))
+                })
                 .collect::<Vec<_>>()
         });
         match tokio::time::timeout(Duration::from_secs(30), probe).await {
             Ok(Ok(present)) => present,
             _ => Vec::new(),
         }
+    }
+
+    #[cfg(unix)]
+    fn device_of(meta: &std::fs::Metadata) -> Option<u64> {
+        use std::os::unix::fs::MetadataExt;
+        Some(meta.dev())
+    }
+
+    #[cfg(not(unix))]
+    fn device_of(_meta: &std::fs::Metadata) -> Option<u64> {
+        None
+    }
+
+    /// Whether `workspace_dir` is definitely gone while its parent (the
+    /// workspace base) is present on filesystem `device`. Bounded.
+    async fn still_on_device(workspace_dir: &Path, device: u64) -> bool {
+        let workspace_dir = workspace_dir.to_path_buf();
+        let probe = tokio::task::spawn_blocking(move || {
+            let gone = matches!(
+                std::fs::symlink_metadata(&workspace_dir),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound
+            );
+            gone && workspace_dir
+                .parent()
+                .and_then(|base| std::fs::metadata(base).ok())
+                .and_then(|meta| Self::device_of(&meta))
+                == Some(device)
+        });
+        matches!(
+            tokio::time::timeout(Duration::from_secs(10), probe).await,
+            Ok(Ok(true))
+        )
     }
 
     /// Once per boot: remove provably stale worktree registrations from every
