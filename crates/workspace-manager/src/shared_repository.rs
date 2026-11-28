@@ -41,9 +41,21 @@ const STAGING_SUFFIX: &str = ".incoming";
 const REGISTERED_REMOTE: &str = "vk-registered";
 const ORIGIN_FETCH_REFSPEC: &str = "+refs/heads/*:refs/remotes/origin/*";
 
-/// Serializes snapshotting and retiring/removing worktree registrations
-/// within this process (see `snapshot_registration_index`).
-static REGISTRATION_CLEANUP: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// One lock per registration directory, so adoption, mirror pre-flight and
+/// the startup sweep never act on the same entry at once — while a stall on
+/// one checkout's entry never blocks cleanup of another.
+static REGISTRATION_LOCKS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, std::sync::Arc<std::sync::Mutex<()>>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+fn registration_lock(admin_dir: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
+    REGISTRATION_LOCKS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(admin_dir.to_path_buf())
+        .or_default()
+        .clone()
+}
 
 /// What [`SharedRepositoryStore::sweep_source_registrations`] did.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -368,7 +380,8 @@ impl SharedRepositoryStore {
             }
             // The caller has just deleted this worktree: that is the
             // evidence, even when it was the last one on its storage.
-            if Self::preserve_and_remove_deleted(&entry)? {
+            // Deleted by our caller just now: that evidence does not expire.
+            if Self::preserve_and_remove_deleted(&entry, |_| true)? {
                 removed += 1;
             }
         }
@@ -409,7 +422,7 @@ impl SharedRepositoryStore {
             let removed = match worktree_linkage::registration_state(&entry) {
                 RegistrationState::Stale(_) => Self::preserve_and_retire(&entry),
                 RegistrationState::WorktreeMissing(_) if storage_present(entry.worktree_path()) => {
-                    Self::preserve_and_remove_deleted(&entry)
+                    Self::preserve_and_remove_deleted(&entry, &storage_present)
                 }
                 _ => Ok(false),
             };
@@ -435,9 +448,8 @@ impl SharedRepositoryStore {
     ) -> Result<bool, String> {
         // Adoption, mirror pre-flight and the startup sweep can reach the same
         // entry at once; one at a time, snapshot and move together.
-        let _one_at_a_time = REGISTRATION_CLEANUP
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let lock = registration_lock(&entry.admin_dir);
+        let _one_at_a_time = lock.lock().unwrap_or_else(|e| e.into_inner());
         if !Self::snapshot_registration_index(entry) {
             return Ok(false);
         }
@@ -448,13 +460,19 @@ impl SharedRepositoryStore {
     /// evidence — after snapshotting its index like [`Self::preserve_and_retire`]:
     /// a deleted directory says nothing about staged-only work in the entry's
     /// index. Kept if the snapshot cannot be taken. Blocking.
+    /// `still_evident` is re-evaluated right before removal (after the lock
+    /// and the snapshot, which can take a while): storage evidence gathered
+    /// earlier is not trusted at the removal boundary.
     pub(crate) fn preserve_and_remove_deleted(
         entry: &worktree_linkage::Registration,
+        still_evident: impl Fn(&Path) -> bool,
     ) -> Result<bool, String> {
-        let _one_at_a_time = REGISTRATION_CLEANUP
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let lock = registration_lock(&entry.admin_dir);
+        let _one_at_a_time = lock.lock().unwrap_or_else(|e| e.into_inner());
         if !Self::snapshot_registration_index(entry) {
+            return Ok(false);
+        }
+        if !still_evident(entry.worktree_path()) {
             return Ok(false);
         }
         worktree_linkage::remove_registration_of_deleted_worktree(entry)

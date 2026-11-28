@@ -453,6 +453,49 @@ pub fn remove_registration_of_deleted_worktree(
         .map_err(|e| format!("remove {}: {e}", current.admin_dir.display()))
 }
 
+/// `refs/heads/{branch}` read straight from a common Git directory: the loose
+/// ref file, else `packed-refs`. `Ok(None)`: the branch does not exist.
+/// `Err`: cannot tell without git (a symbolic ref, the reftable backend, an
+/// unreadable file) — callers fall back to `git rev-parse`. No subprocess.
+pub fn read_branch_tip(common_dir: &Path, branch: &str) -> Result<Option<String>, String> {
+    let is_oid =
+        |s: &str| (s.len() == 40 || s.len() == 64) && s.bytes().all(|b| b.is_ascii_hexdigit());
+    if common_dir.join("reftable").exists() {
+        return Err("reftable repository".to_string());
+    }
+    let refname = format!("refs/heads/{branch}");
+    let loose = common_dir.join(&refname);
+    match fs::read_to_string(&loose) {
+        Ok(contents) => {
+            let oid = contents.trim();
+            return if is_oid(oid) {
+                Ok(Some(oid.to_string()))
+            } else {
+                Err(format!("{} is not a plain object id", loose.display()))
+            };
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        // A directory (refs/heads/vk is a namespace) means no such branch.
+        Err(_) if loose.is_dir() => return Ok(None),
+        Err(e) => return Err(format!("read {}: {e}", loose.display())),
+    }
+    let packed = common_dir.join("packed-refs");
+    let contents = match fs::read_to_string(&packed) {
+        Ok(contents) => contents,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("read {}: {e}", packed.display())),
+    };
+    for line in contents.lines() {
+        if let Some((oid, name)) = line.split_once(' ')
+            && name == refname
+            && is_oid(oid)
+        {
+            return Ok(Some(oid.to_string()));
+        }
+    }
+    Ok(None)
+}
+
 /// Where a repository's shared Git directory is, read from the filesystem
 /// only (no `git` subprocess, so it cannot hang on a child process), and
 /// whether the repository is bare.
@@ -715,6 +758,27 @@ mod tests {
             "staged state"
         );
         assert!(retired.starts_with(common.join("vk-retired-worktrees")));
+    }
+
+    #[test]
+    fn branch_tips_are_read_from_loose_and_packed_refs() {
+        let root = TempDir::new().unwrap();
+        let common = root.path();
+        let a = "a".repeat(40);
+        let b = "b".repeat(40);
+        fs::create_dir_all(common.join("refs/heads/vk")).unwrap();
+        fs::write(common.join("refs/heads/vk/loose"), format!("{a}\n")).unwrap();
+        fs::write(
+            common.join("packed-refs"),
+            format!("# pack-refs with: peeled fully-peeled sorted\n{b} refs/heads/vk/packed\n"),
+        )
+        .unwrap();
+        assert_eq!(read_branch_tip(common, "vk/loose").unwrap(), Some(a));
+        assert_eq!(read_branch_tip(common, "vk/packed").unwrap(), Some(b));
+        assert_eq!(read_branch_tip(common, "vk/missing").unwrap(), None);
+        assert_eq!(read_branch_tip(common, "vk").unwrap(), None);
+        fs::write(common.join("refs/heads/sym"), "ref: refs/heads/vk/loose\n").unwrap();
+        assert!(read_branch_tip(common, "sym").is_err());
     }
 
     #[test]

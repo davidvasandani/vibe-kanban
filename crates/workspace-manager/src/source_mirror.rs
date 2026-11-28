@@ -274,7 +274,9 @@ impl SourceMirror {
         expected: &str,
         deadline: Duration,
     ) -> Result<(), String> {
-        if self.synced_tip(dest, branch).as_deref() == Some(expected) {
+        // Always confirmed against the live destination ref, never only the
+        // recorded tip: the checkout may have been reset since that round.
+        if self.destination_holds(dest, branch, expected).await {
             return Ok(());
         }
         let outcome = self.request(store, dest, branch);
@@ -293,7 +295,7 @@ impl SourceMirror {
             ));
         }
         let _ = tokio::time::timeout(deadline, self.wait_idle(dest, branch)).await;
-        if self.synced_tip(dest, branch).as_deref() == Some(expected) {
+        if self.destination_holds(dest, branch, expected).await {
             return Ok(());
         }
         Err(match self.failure(dest, branch) {
@@ -307,6 +309,35 @@ impl SourceMirror {
                 dest.display()
             ),
         })
+    }
+
+    /// Whether `dest`'s `refs/heads/{branch}` is `expected` right now, by a
+    /// bounded `git rev-parse` (no slot, no fence: a single read).
+    async fn destination_holds(&self, dest: &Path, branch: &str, expected: &str) -> bool {
+        let git = self
+            .inner
+            .config
+            .git_binary
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("git"));
+        let mut leftovers = Leftovers::new();
+        let tip = branch_tip(
+            &git,
+            dest,
+            branch,
+            self.inner.config.probe_timeout,
+            &mut leftovers,
+        )
+        .await;
+        if !leftovers.is_empty() {
+            let mut slots = self.inner.slots.lock().unwrap_or_else(|e| e.into_inner());
+            slots
+                .entry((dest.to_path_buf(), branch.to_string()))
+                .or_default()
+                .leftovers
+                .extend(leftovers);
+        }
+        matches!(tip, Ok(Some(tip)) if tip == expected)
     }
 
     /// Wait until no leader is running for (`dest`, `branch`).
@@ -469,6 +500,16 @@ async fn run_round(
         message,
         gate: None,
     };
+
+    // 0. The steady state spawns nothing: compare both refs straight from the
+    //    filesystem (off the async workers, bounded). Anything this cannot
+    //    tell falls through to the git probes below.
+    if let Some(tip) = fs_tips_agree(store, dest, branch, config.probe_timeout, leftovers).await {
+        return Round::Synced {
+            pushed: false,
+            tip: Some(tip),
+        };
+    }
 
     // 1. The store's commit. Absent means nothing to mirror.
     let store_tip = match branch_tip(&git, store, branch, config.probe_timeout, leftovers).await {
@@ -694,6 +735,35 @@ async fn preflight(
             SourceMirrorFailureKind::Transient,
             format!("pre-flight check panicked: {e}"),
         )),
+    }
+}
+
+/// The commit both sides hold, if their `refs/heads/{branch}` provably agree
+/// from filesystem reads alone; `None` when they differ or it cannot tell.
+async fn fs_tips_agree(
+    store: &Path,
+    dest: &Path,
+    branch: &str,
+    deadline: Duration,
+    leftovers: &mut Leftovers,
+) -> Option<String> {
+    let (store, dest, branch) = (store.to_path_buf(), dest.to_path_buf(), branch.to_string());
+    let mut read = tokio::task::spawn_blocking(move || {
+        let tip_of = |repo: &Path| {
+            let (common_dir, _) = worktree_linkage::common_dir_of(repo).ok()?;
+            worktree_linkage::read_branch_tip(&common_dir, &branch).ok()?
+        };
+        let store_tip = tip_of(&store)?;
+        (tip_of(&dest)? == store_tip).then_some(store_tip)
+    });
+    match tokio::time::timeout(deadline, &mut read).await {
+        Ok(result) => result.ok().flatten(),
+        Err(_) => {
+            leftovers.push(tokio::spawn(async move {
+                let _ = read.await;
+            }));
+            None
+        }
     }
 }
 
@@ -1385,6 +1455,52 @@ mod tests {
             .unwrap_err();
         assert!(err.contains("checked out"), "{err}");
         assert_eq!(m.synced_tip(&src, "vk/b"), None);
+    }
+
+    #[tokio::test]
+    async fn an_in_sync_round_spawns_no_git_at_all() {
+        let root = TempDir::new().unwrap();
+        let (src, store) = fixture(root.path());
+        let tools = TempDir::new().unwrap();
+        // Logs every invocation, then delegates to the real git.
+        let script = tools.path().join("counting-git");
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\necho call >> {}/calls\nexec {} \"$@\"\n",
+                tools.path().display(),
+                which_git().display()
+            ),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let calls = || {
+            fs::read_to_string(tools.path().join("calls"))
+                .map(|s| s.lines().count())
+                .unwrap_or(0)
+        };
+        let m = mirror(SourceMirrorConfig {
+            git_binary: Some(script),
+            ..Default::default()
+        });
+        m.request(&store, &src, "vk/b");
+        m.wait_idle(&src, "vk/b").await;
+        assert_eq!(tip(&src), tip(&store));
+        let after_push = calls();
+        assert!(after_push > 0);
+
+        for _ in 0..5 {
+            m.request(&store, &src, "vk/b");
+            m.wait_idle(&src, "vk/b").await;
+        }
+        assert_eq!(
+            calls(),
+            after_push,
+            "in sync: read from the filesystem only"
+        );
     }
 
     #[tokio::test]
