@@ -2430,8 +2430,11 @@ impl LocalContainerService {
                 );
                 continue;
             }
+            let (dir, device) = (workspace_dir.to_path_buf(), *device);
             let task = tokio::task::spawn_blocking(move || {
-                SharedRepositoryStore::forget_source_registrations(&source, &worktree)
+                SharedRepositoryStore::forget_source_registrations(&source, &worktree, |_| {
+                    Self::still_on_device_blocking(&dir, device)
+                })
             });
             // Bounded: a stalled checkout filesystem must not hold up marking
             // the workspace deleted. The scan itself finishes (or not) on its
@@ -2508,20 +2511,24 @@ impl LocalContainerService {
     async fn still_on_device(workspace_dir: &Path, device: u64) -> bool {
         let workspace_dir = workspace_dir.to_path_buf();
         let probe = tokio::task::spawn_blocking(move || {
-            let gone = matches!(
-                std::fs::symlink_metadata(&workspace_dir),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound
-            );
-            gone && workspace_dir
-                .parent()
-                .and_then(|base| std::fs::metadata(base).ok())
-                .and_then(|meta| Self::device_of(&meta))
-                == Some(device)
+            Self::still_on_device_blocking(&workspace_dir, device)
         });
         matches!(
             tokio::time::timeout(Duration::from_secs(10), probe).await,
             Ok(Ok(true))
         )
+    }
+
+    fn still_on_device_blocking(workspace_dir: &Path, device: u64) -> bool {
+        let gone = matches!(
+            std::fs::symlink_metadata(workspace_dir),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound
+        );
+        gone && workspace_dir
+            .parent()
+            .and_then(|base| std::fs::metadata(base).ok())
+            .and_then(|meta| Self::device_of(&meta))
+            == Some(device)
     }
 
     /// Once per boot: retire provably orphaned (re-linked) worktree

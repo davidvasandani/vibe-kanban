@@ -1110,7 +1110,22 @@ pub async fn change_target_branch(
                 new_target_branch.clone(),
             );
             let counts = tokio::task::spawn_blocking(move || {
-                counts_against_checkout_target(&worktree, &checkout, &branch, &target)
+                // A mutation: give a background fetch of a target the store
+                // lacks a bounded moment to land, then compare again.
+                let mut result =
+                    counts_against_checkout_target(&worktree, &checkout, &branch, &target);
+                for _ in 0..30 {
+                    match &result {
+                        Err(e) if e.ends_with("fetching it") => {
+                            std::thread::sleep(std::time::Duration::from_secs(1));
+                            result = counts_against_checkout_target(
+                                &worktree, &checkout, &branch, &target,
+                            );
+                        }
+                        _ => break,
+                    }
+                }
+                result
             })
             .await
             .unwrap_or_else(|e| Err(e.to_string()));

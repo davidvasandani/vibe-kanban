@@ -368,6 +368,7 @@ impl SharedRepositoryStore {
     pub fn forget_source_registrations(
         source_repo: &Path,
         worktree_path: &Path,
+        still_evident: impl Fn(&Path) -> bool,
     ) -> Result<usize, String> {
         let common_dir = Self::common_dir_of(source_repo)?;
         let mut removed = 0;
@@ -378,10 +379,10 @@ impl SharedRepositoryStore {
             if entry.worktree_path() != worktree_path {
                 continue;
             }
-            // The caller has just deleted this worktree: that is the
-            // evidence, even when it was the last one on its storage.
-            // Deleted by our caller just now: that evidence does not expire.
-            if Self::preserve_and_remove_deleted(&entry, |_| true)? {
+            // The caller has just deleted this worktree; `still_evident`
+            // re-confirms, at the removal boundary, that its storage is still
+            // the mounted one (it can vanish while this scan runs).
+            if Self::preserve_and_remove_deleted(&entry, &still_evident)? {
                 removed += 1;
             }
         }
@@ -2827,7 +2828,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            SharedRepositoryStore::forget_source_registrations(&checkout, &gone).unwrap(),
+            SharedRepositoryStore::forget_source_registrations(&checkout, &gone, |_| true).unwrap(),
             1
         );
         let list = cli()

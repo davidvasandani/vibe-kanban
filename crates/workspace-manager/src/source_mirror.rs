@@ -777,8 +777,10 @@ async fn preflight(
                                 "branch '{branch}' is held by the worktree registration {} in \
                                  {dest_display}, whose worktree {} no longer exists; once you \
                                  have confirmed that worktree was deleted (not on storage that \
-                                 is offline), remove that one registration directory — not \
-                                 `git worktree prune`, which also drops entries of other \
+                                 is offline), keep its staged state (`GIT_INDEX_FILE=<that \
+                                 directory>/index git write-tree`, saved under a ref) and then \
+                                 move that one registration directory out of `worktrees/` — \
+                                 not `git worktree prune`, which also drops entries of other \
                                  worktrees whose storage is offline",
                                 entry.admin_dir.display(),
                                 entry.worktree_path().display()
@@ -1430,7 +1432,7 @@ mod tests {
         assert!(
             failure
                 .message
-                .contains("remove that one registration directory"),
+                .contains("move that one registration directory"),
             "{}",
             failure.message
         );

@@ -947,6 +947,13 @@ impl GitService {
         .into_reference();
         let remote = self.get_remote_from_branch_ref(&repo, &base_branch_ref)?;
         self.fetch_all_from_remote(&repo, &remote, credentials)?;
+        // Re-resolve after fetching: the reference read above still holds the
+        // pre-fetch target, which would compare against the stale tip.
+        let base_name = base_branch_ref.name().map(str::to_string);
+        let base_branch_ref = match base_name {
+            Some(name) => repo.find_reference(&name)?,
+            None => base_branch_ref,
+        };
         self.get_branch_status_inner(&repo, &branch_ref, &base_branch_ref)
     }
 
