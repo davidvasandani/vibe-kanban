@@ -270,11 +270,25 @@ pub async fn merge_workspace(
         && let Ok((checkout_git, _)) = utils::worktree_linkage::common_dir_of(&repo.path)
         && std::fs::canonicalize(&store).ok() != std::fs::canonicalize(&checkout_git).ok()
     {
-        let head = deployment
-            .git()
-            .get_head_info(&worktree_path)
-            .map_err(ApiError::GitService)?
-            .oid;
+        // The branch `merge_changes` merges, as the store has it — not the
+        // worktree's HEAD, which may be detached or on another branch.
+        let (store_dir, branch_ref) = (store.clone(), format!("refs/heads/{}", workspace.branch));
+        let head = tokio::task::spawn_blocking(move || {
+            git::GitCli::new().resolve_commit_within(
+                &store_dir,
+                &branch_ref,
+                std::time::Duration::from_secs(10),
+            )
+        })
+        .await
+        .map_err(|e| ApiError::BadRequest(format!("Cannot merge yet: {e}")))?
+        .map_err(|e| ApiError::BadRequest(format!("Cannot merge yet: {e}")))?
+        .ok_or_else(|| {
+            ApiError::BadRequest(format!(
+                "Cannot merge: branch '{}' does not exist in the workspace's repository",
+                workspace.branch
+            ))
+        })?;
         SourceMirror::global()
             .ensure_synced(
                 &store,
@@ -595,9 +609,27 @@ pub async fn get_workspace_branch_status(
         // target (e.g. the store lacks that commit yet), the counts are
         // unknown — never a comparison against an older copy of the target.
         let counts = if is_target_remote {
-            branch_status_in(primary)
+            let via_git = branch_status_in(primary)
                 .or_else(|e| secondary.map_or(Err(e), &branch_status_in))
-                .map_err(|e| e.to_string())
+                .map_err(|e| e.to_string());
+            match via_git {
+                Ok(counts) => Ok(counts),
+                // E.g. `upstream/main`, whose remote the store has no fetch
+                // mapping for: compare the worktree's HEAD against the
+                // checkout's remote-tracking ref instead (bounded, off-worker).
+                Err(_) => {
+                    let (worktree, checkout, target) = (
+                        worktree_path.clone(),
+                        repo.path.clone(),
+                        target_branch.clone(),
+                    );
+                    tokio::task::spawn_blocking(move || {
+                        counts_against_checkout_target(&worktree, &checkout, &target)
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()))
+                }
+            }
         } else {
             let (worktree, checkout, target) = (
                 worktree_path.clone(),
@@ -748,12 +780,27 @@ pub async fn change_target_branch(
         .container_ref
         .as_ref()
         .map(|dir| PathBuf::from(dir).join(&repo.name));
-    let status = match worktree
-        .as_deref()
-        .map(|w| counts_against_checkout_target(w, &repo.path, &new_target_branch))
-    {
-        Some(Ok(status)) => status,
-        _ => {
+    let status = match worktree {
+        // Off the runtime workers, every git call under a deadline; a failure
+        // here is reported, never retried against an unbounded checkout read.
+        Some(worktree) => {
+            let (checkout, target) = (repo.path.clone(), new_target_branch.clone());
+            let counts = tokio::task::spawn_blocking(move || {
+                counts_against_checkout_target(&worktree, &checkout, &target)
+            })
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()));
+            match counts {
+                Ok(status) => status,
+                Err(e) => {
+                    return Ok(ResponseJson(ApiResponse::error(
+                        format!("Could not compare the workspace with '{new_target_branch}': {e}")
+                            .as_str(),
+                    )));
+                }
+            }
+        }
+        None => {
             deployment
                 .git()
                 .get_branch_status(&repo.path, &workspace.branch, &new_target_branch)?

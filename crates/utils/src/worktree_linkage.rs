@@ -449,7 +449,12 @@ pub fn remove_registration_of_deleted_worktree(
     if current != *registration || current.locked {
         return Ok(false);
     }
-    if !matches!(current.worktree_path().try_exists(), Ok(false)) {
+    // `symlink_metadata`: a path recreated as a symlink (perhaps into an
+    // offline volume) has reappeared, whatever it points at.
+    if !matches!(
+        fs::symlink_metadata(current.worktree_path()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound
+    ) {
         return Ok(false);
     }
     tracing::info!(

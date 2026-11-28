@@ -146,15 +146,12 @@ pub enum RequestOutcome {
 
 type MirrorKey = (PathBuf, String);
 
-/// The slot key for (`dest`, `branch`): the canonical destination path, so a
-/// checkout reached through a symlinked alias shares one slot (and one
-/// single-flight guarantee) with its real path. Falls back to the path as
-/// given when it cannot be canonicalised (then there is nothing to push into).
+/// The slot key for (`dest`, `branch`). `dest` is a repository's registered
+/// path exactly as recorded (one per `Repo` row), so it identifies the
+/// checkout without any filesystem call — none may run on the request path
+/// or under the slot lock, where a stalled mount would stall every mirror.
 fn key_for(dest: &Path, branch: &str) -> MirrorKey {
-    (
-        std::fs::canonicalize(dest).unwrap_or_else(|_| dest.to_path_buf()),
-        branch.to_string(),
-    )
+    (dest.to_path_buf(), branch.to_string())
 }
 
 #[derive(Debug, Default)]
