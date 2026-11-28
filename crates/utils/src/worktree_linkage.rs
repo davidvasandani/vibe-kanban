@@ -363,7 +363,17 @@ pub fn registration_state(registration: &Registration) -> RegistrationState {
                 }
             }
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => match worktree.try_exists() {
+        // `symlink_metadata`, not `try_exists`: a worktree path that is a
+        // symlink into an offline volume dangles — that is not a deletion.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => match fs::symlink_metadata(worktree)
+            .map(|_| true)
+            .or_else(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    Ok(false)
+                } else {
+                    Err(e)
+                }
+            }) {
             Ok(false) => RegistrationState::WorktreeMissing(format!(
                 "worktree directory {} does not exist",
                 worktree.display()
@@ -779,6 +789,19 @@ mod tests {
         assert_eq!(read_branch_tip(common, "vk").unwrap(), None);
         fs::write(common.join("refs/heads/sym"), "ref: refs/heads/vk/loose\n").unwrap();
         assert!(read_branch_tip(common, "sym").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_symlinked_worktree_is_not_missing() {
+        let root = TempDir::new().unwrap();
+        let (common, _, worktree) = source_registration(root.path());
+        fs::remove_dir_all(&worktree).unwrap();
+        std::os::unix::fs::symlink(root.path().join("offline-volume/repo"), &worktree).unwrap();
+        assert!(matches!(
+            registration_state(&only(&common)),
+            RegistrationState::Indeterminate(_)
+        ));
     }
 
     #[test]

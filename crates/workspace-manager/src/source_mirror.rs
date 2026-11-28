@@ -504,11 +504,26 @@ async fn run_round(
     // 0. The steady state spawns nothing: compare both refs straight from the
     //    filesystem (off the async workers, bounded). Anything this cannot
     //    tell falls through to the git probes below.
-    if let Some(tip) = fs_tips_agree(store, dest, branch, config.probe_timeout, leftovers).await {
-        return Round::Synced {
-            pushed: false,
-            tip: Some(tip),
-        };
+    match fs_tips_agree(store, dest, branch, config.probe_timeout, leftovers).await {
+        FsTips::Agree(tip) => {
+            return Round::Synced {
+                pushed: false,
+                tip: Some(tip),
+            };
+        }
+        FsTips::Unknown => {}
+        // The scan is fenced as a leftover; start nothing more on that storage.
+        FsTips::TimedOut => {
+            return failed(
+                SourceMirrorFailureKind::Timeout,
+                format!(
+                    "reading '{branch}' from {} or {} did not finish within {}s",
+                    store.display(),
+                    dest.display(),
+                    config.probe_timeout.as_secs()
+                ),
+            );
+        }
     }
 
     // 1. The store's commit. Absent means nothing to mirror.
@@ -738,15 +753,25 @@ async fn preflight(
     }
 }
 
-/// The commit both sides hold, if their `refs/heads/{branch}` provably agree
-/// from filesystem reads alone; `None` when they differ or it cannot tell.
+/// What [`fs_tips_agree`] found.
+enum FsTips {
+    /// Both sides' `refs/heads/{branch}` hold this commit.
+    Agree(String),
+    /// They differ, or it could not tell from the filesystem alone.
+    Unknown,
+    /// The reads did not finish in time (the scan is fenced as a leftover).
+    TimedOut,
+}
+
+/// Whether both sides' `refs/heads/{branch}` provably agree from filesystem
+/// reads alone.
 async fn fs_tips_agree(
     store: &Path,
     dest: &Path,
     branch: &str,
     deadline: Duration,
     leftovers: &mut Leftovers,
-) -> Option<String> {
+) -> FsTips {
     let (store, dest, branch) = (store.to_path_buf(), dest.to_path_buf(), branch.to_string());
     let mut read = tokio::task::spawn_blocking(move || {
         let tip_of = |repo: &Path| {
@@ -757,12 +782,13 @@ async fn fs_tips_agree(
         (tip_of(&dest)? == store_tip).then_some(store_tip)
     });
     match tokio::time::timeout(deadline, &mut read).await {
-        Ok(result) => result.ok().flatten(),
+        Ok(Ok(Some(tip))) => FsTips::Agree(tip),
+        Ok(_) => FsTips::Unknown,
         Err(_) => {
             leftovers.push(tokio::spawn(async move {
                 let _ = read.await;
             }));
-            None
+            FsTips::TimedOut
         }
     }
 }

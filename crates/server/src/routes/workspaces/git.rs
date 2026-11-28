@@ -589,9 +589,14 @@ pub async fn get_workspace_branch_status(
                     .get_branch_status(repo_path, &workspace.branch, &target_branch)
             }
         };
-        let (commits_ahead, commits_behind) = match branch_status_in(primary)
-            .or_else(|e| secondary.map_or(Err(e), &branch_status_in))
-        {
+        // A local target is compared as the checkout has it *now* (the same
+        // source direct merge and rebase use), against the worktree's HEAD.
+        let local_counts = (!is_target_remote)
+            .then(|| counts_against_checkout_target(&worktree_path, &repo.path, &target_branch))
+            .and_then(Result::ok);
+        let (commits_ahead, commits_behind) = match local_counts.map(Ok).unwrap_or_else(|| {
+            branch_status_in(primary).or_else(|e| secondary.map_or(Err(e), &branch_status_in))
+        }) {
             Ok((ahead, behind)) => (Some(ahead), Some(behind)),
             Err(e) => {
                 tracing::debug!(
@@ -651,6 +656,41 @@ pub async fn get_workspace_branch_status(
     Ok(ResponseJson(ApiResponse::success(results)))
 }
 
+/// Commits ahead of / behind `target` *as the registered checkout has it now*,
+/// for the worktree's own `HEAD` — which, for a clustered workspace, is the
+/// authoritative workspace tip even while its courtesy mirror into the
+/// checkout is pending, disabled or failing. Computed in the worktree's
+/// repository; fails if the checkout's target commit is not present there.
+fn counts_against_checkout_target(
+    worktree: &std::path::Path,
+    checkout: &std::path::Path,
+    target: &str,
+) -> Result<(usize, usize), String> {
+    let cli = git::GitCli::new();
+    let tip = cli
+        .resolve_commit(checkout, target)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("'{target}' was not found in {}", checkout.display()))?;
+    cli.git(worktree, ["cat-file", "-e", &format!("{tip}^{{commit}}")])
+        .map_err(|_| format!("{tip} is not present in the workspace's repository"))?;
+    let out = cli
+        .git(
+            worktree,
+            [
+                "rev-list",
+                "--left-right",
+                "--count",
+                &format!("HEAD...{tip}"),
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+    let mut counts = out.split_whitespace().map(str::parse::<usize>);
+    match (counts.next(), counts.next()) {
+        (Some(Ok(ahead)), Some(Ok(behind))) => Ok((ahead, behind)),
+        _ => Err(format!("unexpected rev-list output: {out}")),
+    }
+}
+
 #[axum::debug_handler]
 pub async fn change_target_branch(
     Extension(workspace): Extension<Workspace>,
@@ -678,12 +718,26 @@ pub async fn change_target_branch(
         )));
     };
 
-    WorkspaceRepo::update_target_branch(pool, workspace.id, repo_id, &new_target_branch).await?;
+    // Validate before persisting. The worktree's HEAD is authoritative (for a
+    // clustered workspace the checkout's copy of the branch may lag or be
+    // missing); the checkout's own comparison is the fallback.
+    let worktree = workspace
+        .container_ref
+        .as_ref()
+        .map(|dir| PathBuf::from(dir).join(&repo.name));
+    let status = match worktree
+        .as_deref()
+        .map(|w| counts_against_checkout_target(w, &repo.path, &new_target_branch))
+    {
+        Some(Ok(status)) => status,
+        _ => {
+            deployment
+                .git()
+                .get_branch_status(&repo.path, &workspace.branch, &new_target_branch)?
+        }
+    };
 
-    let status =
-        deployment
-            .git()
-            .get_branch_status(&repo.path, &workspace.branch, &new_target_branch)?;
+    WorkspaceRepo::update_target_branch(pool, workspace.id, repo_id, &new_target_branch).await?;
 
     deployment
         .track_if_analytics_allowed(

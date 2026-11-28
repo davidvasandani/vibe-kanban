@@ -2522,10 +2522,14 @@ impl LocalContainerService {
                         let Some(base) = workspace_dir.parent() else {
                             return false;
                         };
-                        matches!(workspace_dir.try_exists(), Ok(false))
-                            && live.iter().any(|dir| {
-                                dir.parent() == Some(base) && matches!(dir.try_exists(), Ok(true))
-                            })
+                        // Gone, not merely dangling: a symlink into an
+                        // offline volume still has an entry of its own.
+                        matches!(
+                            std::fs::symlink_metadata(workspace_dir),
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound
+                        ) && live.iter().any(|dir| {
+                            dir.parent() == Some(base) && matches!(dir.try_exists(), Ok(true))
+                        })
                     },
                 )
             });
