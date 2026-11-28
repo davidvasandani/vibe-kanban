@@ -521,6 +521,36 @@ impl SharedRepositoryStore {
                 "snapshotted the retiring registration's index to {refname}"
             );
         }
+        // A detached HEAD may name a commit no ref reaches: pin it too, so gc
+        // cannot take it once the entry is out of git's view.
+        if entry.head_branch.is_none()
+            && let Ok(head) = std::fs::read_to_string(entry.admin_dir.join("HEAD"))
+            && let head = head.trim()
+            && head.len() >= 40
+            && head.bytes().all(|b| b.is_ascii_hexdigit())
+            && let (Some(name), Some(common_dir)) = (
+                entry.admin_dir.file_name(),
+                entry.admin_dir.parent().and_then(Path::parent),
+            )
+        {
+            let refname = format!(
+                "refs/vk-retired/{}-{}-head",
+                name.to_string_lossy(),
+                chrono::Utc::now().timestamp()
+            );
+            if let Err(e) = GitCli::new().git_within(
+                common_dir,
+                ["update-ref", &refname, head],
+                None,
+                std::time::Duration::from_secs(30),
+            ) {
+                warn!(
+                    admin_dir = %entry.admin_dir.display(),
+                    "kept a stale worktree registration: could not pin its detached HEAD: {e}"
+                );
+                return false;
+            }
+        }
         true
     }
 

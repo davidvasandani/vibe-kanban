@@ -486,12 +486,36 @@ pub fn remove_registration_of_deleted_worktree(
     tracing::info!(
         admin_dir = %current.admin_dir.display(),
         branch = current.head_branch.as_deref().unwrap_or("-"),
-        "removing the registration of deleted worktree {}",
+        "retiring the registration of deleted worktree {}",
         current.worktree_path().display()
     );
-    fs::remove_dir_all(&current.admin_dir)
-        .map(|()| true)
-        .map_err(|e| format!("remove {}: {e}", current.admin_dir.display()))
+    // Moved aside, never deleted: its HEAD, reflog and index stay on disk.
+    move_aside(&current.admin_dir).map(|_| true)
+}
+
+/// Move `<common>/worktrees/<name>` to `<common>/vk-retired-worktrees/
+/// <name>.<epoch>`: git stops counting it, its files stay for recovery.
+fn move_aside(admin_dir: &Path) -> Result<PathBuf, String> {
+    let (Some(name), Some(common_dir)) = (
+        admin_dir.file_name(),
+        admin_dir.parent().and_then(Path::parent),
+    ) else {
+        return Err(format!(
+            "{} is not under <common>/worktrees",
+            admin_dir.display()
+        ));
+    };
+    let retired_root = common_dir.join("vk-retired-worktrees");
+    fs::create_dir_all(&retired_root)
+        .map_err(|e| format!("create {}: {e}", retired_root.display()))?;
+    let epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let target = retired_root.join(format!("{}.{epoch}", name.to_string_lossy()));
+    fs::rename(admin_dir, &target)
+        .map(|()| target)
+        .map_err(|e| format!("move {} aside: {e}", admin_dir.display()))
 }
 
 /// `refs/heads/{branch}` read straight from a common Git directory: the loose
