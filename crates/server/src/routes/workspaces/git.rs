@@ -262,6 +262,14 @@ pub async fn merge_workspace(
     let workspace_path = Path::new(&container_ref);
     let worktree_path = workspace_path.join(repo.name);
 
+    let workspace_label = workspace.name.as_deref().unwrap_or(&workspace.branch);
+    let vk_id = resolve_vibe_kanban_identifier(&deployment, workspace.id).await;
+    let commit_message = format!("{} (vibe-kanban {})", workspace_label, vk_id);
+
+    // Every await happens above this point: from the pinned-tip check below to
+    // `merge_changes` there is none, so the verified tip is what gets merged
+    // (as tight as a coordinator-local workspace, whose agent can also commit
+    // concurrently with a merge).
     // `merge_changes` reads the workspace branch from the registered checkout.
     // For a clustered workspace that copy arrives through the background
     // mirror, so make sure it holds the worktree's HEAD before merging —
@@ -322,10 +330,6 @@ pub async fn merge_workspace(
             ));
         }
     }
-
-    let workspace_label = workspace.name.as_deref().unwrap_or(&workspace.branch);
-    let vk_id = resolve_vibe_kanban_identifier(&deployment, workspace.id).await;
-    let commit_message = format!("{} (vibe-kanban {})", workspace_label, vk_id);
 
     let merge_commit_id = deployment.git().merge_changes(
         &repo.path,
@@ -637,29 +641,31 @@ pub async fn get_workspace_branch_status(
             match via_git {
                 Ok(counts) => Ok(counts),
                 // E.g. `upstream/main`, whose remote the store has no fetch
-                // mapping for: compare the worktree's HEAD against the
+                // mapping for: compare the workspace branch against the
                 // checkout's remote-tracking ref instead (bounded, off-worker).
                 Err(_) => {
-                    let (worktree, checkout, target) = (
+                    let (worktree, checkout, branch, target) = (
                         worktree_path.clone(),
                         repo.path.clone(),
+                        workspace.branch.clone(),
                         target_branch.clone(),
                     );
                     tokio::task::spawn_blocking(move || {
-                        counts_against_checkout_target(&worktree, &checkout, &target)
+                        counts_against_checkout_target(&worktree, &checkout, &branch, &target)
                     })
                     .await
                     .unwrap_or_else(|e| Err(e.to_string()))
                 }
             }
         } else {
-            let (worktree, checkout, target) = (
+            let (worktree, checkout, branch, target) = (
                 worktree_path.clone(),
                 repo.path.clone(),
+                workspace.branch.clone(),
                 target_branch.clone(),
             );
             tokio::task::spawn_blocking(move || {
-                counts_against_checkout_target(&worktree, &checkout, &target)
+                counts_against_checkout_target(&worktree, &checkout, &branch, &target)
             })
             .await
             .unwrap_or_else(|e| Err(e.to_string()))
@@ -725,13 +731,15 @@ pub async fn get_workspace_branch_status(
 }
 
 /// Commits ahead of / behind `target` *as the registered checkout has it now*,
-/// for the worktree's own `HEAD` — which, for a clustered workspace, is the
+/// for the workspace branch in the worktree's own repository — which, for a
+/// clustered workspace, is the
 /// authoritative workspace tip even while its courtesy mirror into the
 /// checkout is pending, disabled or failing. Computed in the worktree's
 /// repository; fails if the checkout's target commit is not present there.
 fn counts_against_checkout_target(
     worktree: &std::path::Path,
     checkout: &std::path::Path,
+    branch: &str,
     target: &str,
 ) -> Result<(usize, usize), String> {
     // Every call under a process-level deadline: the checkout may be stalled.
@@ -755,7 +763,7 @@ fn counts_against_checkout_target(
                 "rev-list",
                 "--left-right",
                 "--count",
-                &format!("HEAD...{tip}"),
+                &format!("refs/heads/{branch}...{tip}"),
             ],
             None,
             deadline,
@@ -806,9 +814,13 @@ pub async fn change_target_branch(
         // Off the runtime workers, every git call under a deadline; a failure
         // here is reported, never retried against an unbounded checkout read.
         Some(worktree) => {
-            let (checkout, target) = (repo.path.clone(), new_target_branch.clone());
+            let (checkout, branch, target) = (
+                repo.path.clone(),
+                workspace.branch.clone(),
+                new_target_branch.clone(),
+            );
             let counts = tokio::task::spawn_blocking(move || {
-                counts_against_checkout_target(&worktree, &checkout, &target)
+                counts_against_checkout_target(&worktree, &checkout, &branch, &target)
             })
             .await
             .unwrap_or_else(|e| Err(e.to_string()));

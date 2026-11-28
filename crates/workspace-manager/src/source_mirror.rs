@@ -597,7 +597,7 @@ async fn run_round(
             );
         }
     };
-    let _one_push_per_repository = dest_lock.lock().await;
+    let repository_guard = dest_lock.lock_owned().await;
 
     // 4. A push the destination itself refused is not repeated until the
     //    store or the destination commit changes.
@@ -615,7 +615,8 @@ async fn run_round(
     // 5. The push itself, bounded.
     let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
     let dest_arg = dest.to_string_lossy().to_string();
-    match run_git_bounded(
+    let already_fenced = leftovers.len();
+    let round = match run_git_bounded(
         &git,
         store,
         &["push", &dest_arg, &refspec],
@@ -654,7 +655,22 @@ async fn run_round(
             SourceMirrorFailureKind::Transient,
             format!("could not start git push: {e}"),
         ),
+    };
+    // A push that timed out may still be running (D-state on a hard mount):
+    // the repository stays locked — for every branch and alias — until it
+    // has exited, not just this branch's slot.
+    if leftovers.len() > already_fenced {
+        let pending: Vec<_> = leftovers.drain(already_fenced..).collect();
+        leftovers.push(tokio::spawn(async move {
+            for task in pending {
+                let _ = task.await;
+            }
+            drop(repository_guard);
+        }));
+    } else {
+        drop(repository_guard);
     }
+    round
 }
 
 async fn preflight(
