@@ -530,6 +530,29 @@ pub fn read_branch_tip(common_dir: &Path, branch: &str) -> Result<Option<String>
     Ok(None)
 }
 
+/// Whether `<common_dir>/config` sets `core.bare = true` (a plain, minimal
+/// read of the `[core]` section; anything unreadable counts as not bare).
+fn is_bare_config(common_dir: &Path) -> bool {
+    let Ok(config) = fs::read_to_string(common_dir.join("config")) else {
+        return false;
+    };
+    let mut in_core = false;
+    for line in config.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_core = line.eq_ignore_ascii_case("[core]");
+            continue;
+        }
+        if in_core
+            && let Some((key, value)) = line.split_once('=')
+            && key.trim().eq_ignore_ascii_case("bare")
+        {
+            return value.trim().eq_ignore_ascii_case("true");
+        }
+    }
+    false
+}
+
 /// Where a repository's shared Git directory is, read from the filesystem
 /// only (no `git` subprocess, so it cannot hang on a child process), and
 /// whether the repository is bare.
@@ -550,7 +573,12 @@ pub fn common_dir_of(repo: &Path) -> Result<(PathBuf, bool), String> {
             let admin = parse_gitdir_pointer(&contents, repo)
                 .ok_or_else(|| format!("{} is not a `gitdir:` pointer", dot_git.display()))?;
             match resolve_common_dir(&admin) {
-                Ok(common) => Ok((common, false)),
+                // A linked worktree of a *bare* repository: the common
+                // directory has no main worktree, so its HEAD is no checkout.
+                Ok(common) => {
+                    let bare = is_bare_config(&common);
+                    Ok((common, bare))
+                }
                 // A submodule's gitdir has no `commondir`: it is its own.
                 Err(_) if admin.join("HEAD").exists() => Ok((admin, false)),
                 Err(e) => Err(e),
@@ -832,6 +860,15 @@ mod tests {
             registration_state(&only(&common)),
             RegistrationState::Indeterminate(_)
         ));
+    }
+
+    #[test]
+    fn a_linked_worktree_of_a_bare_repository_reports_bare() {
+        let root = TempDir::new().unwrap();
+        let (common, _, worktree) = source_registration(root.path());
+        fs::write(common.join("config"), "[core]\n\tbare = true\n").unwrap();
+        let (_, bare) = common_dir_of(&worktree).unwrap();
+        assert!(bare);
     }
 
     #[test]

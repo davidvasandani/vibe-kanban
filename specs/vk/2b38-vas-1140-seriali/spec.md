@@ -172,9 +172,14 @@ one that could never succeed. 119 more of them had built up.
   registration from the operator checkout.
 - **FR-010**: Deleting a clustered workspace MUST remove the operator
   checkout's registrations that point at that workspace's worktrees.
-- **FR-011**: On startup, stale registrations in every registered repository's
-  checkout MUST be removed. Removal requires positive evidence and is done per
-  entry, never by a blanket prune (Constitution XV, LXI).
+- **FR-011**: On startup, provably orphaned (re-linked) registrations in every
+  registered repository's checkout MUST be retired (index snapshotted, moved
+  aside). Removal requires positive evidence and is done per entry, never by a
+  blanket prune (Constitution XV, LXI). *Revised during review:* entries whose
+  worktree is merely missing are **kept** by the sweep, because no evidence
+  available at startup tells a deletion from an offline mount in every layout.
+  They are removed on deletion evidence when vk deletes the workspace, and
+  mirror pre-flight names any that block a branch.
 - **FR-012**: Before copying, a stale registration holding the branch MUST be
   removed. A live one MUST produce a deterministic failure without a copy.
 - **FR-013**: The copy MUST be disableable by configuration.

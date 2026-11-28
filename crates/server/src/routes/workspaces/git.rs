@@ -764,12 +764,19 @@ pub async fn get_workspace_branch_status(
                     // Comparing the target with itself: a fetch of its remote
                     // through the usual credentialed path that needs nothing
                     // but the target ref (counts ignored).
-                    let refreshed = deployment.git().get_remote_branch_status(
-                        &repo.path,
-                        &target_branch,
-                        Some(&target_branch),
-                        &credentials,
+                    // Off the runtime workers (a slow remote must not pin one).
+                    let (checkout, target, creds) = (
+                        repo.path.clone(),
+                        target_branch.clone(),
+                        credentials.clone(),
                     );
+                    let refreshed = tokio::task::spawn_blocking(move || {
+                        git::GitService::new()
+                            .get_remote_branch_status(&checkout, &target, Some(&target), &creds)
+                            .map_err(|e| e.to_string())
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()));
                     match refreshed {
                         // Unknown rather than a comparison against a cached,
                         // possibly stale tracking ref.
@@ -838,10 +845,18 @@ pub async fn get_workspace_branch_status(
                     // credentialed fetch this status always did there); its
                     // own counts may rest on a stale workspace copy, so they
                     // are ignored in favour of the store's branch below.
-                    let refreshed = deployment
-                        .git()
-                        .get_remote_branch_status(&repo.path, &workspace.branch, None, &credentials)
-                        .is_ok();
+                    let (checkout, branch, creds) = (
+                        repo.path.clone(),
+                        workspace.branch.clone(),
+                        credentials.clone(),
+                    );
+                    let refreshed = tokio::task::spawn_blocking(move || {
+                        git::GitService::new()
+                            .get_remote_branch_status(&checkout, &branch, None, &creds)
+                            .is_ok()
+                    })
+                    .await
+                    .unwrap_or(false);
                     let (worktree, checkout, branch) = (
                         worktree_path.clone(),
                         repo.path.clone(),
