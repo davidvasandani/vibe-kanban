@@ -1081,9 +1081,27 @@ impl GitCli {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
+        self.git_within_stdin(repo_path, args, envs, None, deadline)
+    }
+
+    /// [`Self::git_within`] that also feeds `stdin` (written on a thread, so a
+    /// large input cannot deadlock against unread output).
+    pub fn git_within_stdin<I, S>(
+        &self,
+        repo_path: &Path,
+        args: I,
+        envs: Option<&[(OsString, OsString)]>,
+        stdin: Option<Vec<u8>>,
+        deadline: std::time::Duration,
+    ) -> Result<String, GitCliError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
         use std::{io::Read, sync::mpsc, time::Instant};
 
-        self.ensure_available()?;
+        // No `ensure_available` here: it runs an unbounded `git --version`.
+        // Resolving the executable is enough; a broken git fails the command.
         let git = resolve_executable_path_blocking("git").ok_or(GitCliError::NotAvailable)?;
         let mut cmd = Command::new(&git);
         cmd.arg("-C").arg(repo_path);
@@ -1093,9 +1111,13 @@ impl GitCli {
         }
         cmd.env("GIT_TERMINAL_PROMPT", "0");
         cmd.args(args);
-        cmd.stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        cmd.stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
@@ -1107,6 +1129,12 @@ impl GitCli {
             .spawn()
             .map_err(|e| GitCliError::CommandFailed(e.to_string()))?;
         let pid = child.id();
+        if let (Some(input), Some(mut pipe)) = (stdin, child.stdin.take()) {
+            std::thread::spawn(move || {
+                use std::io::Write;
+                let _ = pipe.write_all(&input);
+            });
+        }
         let pipe = |mut reader: Box<dyn Read + Send>| {
             let (tx, rx) = mpsc::channel();
             std::thread::spawn(move || {
@@ -1481,20 +1509,37 @@ impl GitCli {
         self.commit_added_size(worktree_path, "HEAD")
     }
 
-    /// [`Self::head_commit_added_size`] for an explicit commit.
+    /// [`Self::head_commit_added_size`] for an explicit commit, within a
+    /// total `budget`: every git call runs under the time left, and when the
+    /// budget runs out mid-way the byte count so far is returned as a lower
+    /// bound (it is a diagnostic, never worth waiting on stalled storage for).
     pub fn commit_added_size(
         &self,
         worktree_path: &Path,
         commit: &str,
     ) -> Result<(usize, u64), GitCliError> {
+        self.commit_added_size_within(worktree_path, commit, std::time::Duration::from_secs(60))
+    }
+
+    pub fn commit_added_size_within(
+        &self,
+        worktree_path: &Path,
+        commit: &str,
+        budget: std::time::Duration,
+    ) -> Result<(usize, u64), GitCliError> {
         use std::collections::HashSet;
+
+        let until = std::time::Instant::now() + budget;
+        let left = || until.saturating_duration_since(std::time::Instant::now());
 
         // Against the first parent (so a merge is measured too), or the empty
         // tree for a root commit. `-z`: `:<modes> <shas> A\0<path>\0`.
         let has_parent = self
-            .git(
+            .git_within(
                 worktree_path,
                 ["rev-parse", "--verify", "--quiet", &format!("{commit}^1")],
+                None,
+                left(),
             )
             .is_ok();
         let mut args = vec!["diff-tree", "-r", "-z", "--no-commit-id", "--no-renames"];
@@ -1505,7 +1550,7 @@ impl GitCli {
         } else {
             args.extend(["--root", commit]);
         }
-        let raw = self.git(worktree_path, args)?;
+        let raw = self.git_within(worktree_path, args, None, left())?;
         let mut files = 0usize;
         let mut blobs: HashSet<&str> = HashSet::new();
         let mut fields = raw.split('\0');
@@ -1524,24 +1569,28 @@ impl GitCli {
                 blobs.insert(parts[3]);
             }
         }
-        // Sizes of exactly those blobs, in batches small enough that neither
-        // the stdin we write (64 x 41 B) nor git's reply exceeds the smallest
-        // pipe buffer POSIX allows (4 KiB): `git_with_stdin` writes all input
-        // before reading any output, so a larger batch could deadlock. At most
-        // `MAX_SIZED_BLOBS` are sized; past that the byte count is a lower
-        // bound, and the file count alone already crosses any sane threshold.
-        const BATCH: usize = 64;
+        // Sizes of exactly those blobs. Input is fed on a thread, so batches
+        // can be large without deadlocking. At most `MAX_SIZED_BLOBS` are
+        // sized; past that (or once the budget is spent) the byte count is a
+        // lower bound, and the file count alone crosses any sane threshold.
+        const BATCH: usize = 2048;
         const MAX_SIZED_BLOBS: usize = 8192;
         let blobs: Vec<&str> = blobs.into_iter().take(MAX_SIZED_BLOBS).collect();
         let mut bytes = 0u64;
         for batch in blobs.chunks(BATCH) {
+            if left().is_zero() {
+                break;
+            }
             let input = batch.join("\n") + "\n";
-            let sizes = self.git_with_stdin(
+            let Ok(sizes) = self.git_within_stdin(
                 worktree_path,
                 ["cat-file", "--batch-check=%(objectsize)"],
                 None,
-                input.as_bytes(),
-            )?;
+                Some(input.into_bytes()),
+                left(),
+            ) else {
+                break;
+            };
             bytes += sizes
                 .lines()
                 .filter_map(|l| l.trim().parse::<u64>().ok())

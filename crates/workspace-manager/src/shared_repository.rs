@@ -328,19 +328,11 @@ impl SharedRepositoryStore {
                     // The old checkout may sit on a stalled mount; the
                     // workspace already works from the store, so never let
                     // this best-effort step hold the request.
+                    // Detached: it logs its own outcome.
                     let current = admin_dir.clone();
-                    let task = tokio::task::spawn_blocking(move || {
+                    tokio::task::spawn_blocking(move || {
                         Self::retire_previous_registration(&previous, &current)
                     });
-                    if tokio::time::timeout(std::time::Duration::from_secs(10), task)
-                        .await
-                        .is_err()
-                    {
-                        warn!(
-                            worktree = %worktree_path.display(),
-                            "retiring the previous registration took over 10s; not waiting"
-                        );
-                    }
                 }
                 Ok(AdoptOutcome::Adopted { common_dir })
             }
@@ -372,7 +364,7 @@ impl SharedRepositoryStore {
             }
             // The caller has just deleted this worktree: that is the
             // evidence, even when it was the last one on its storage.
-            if worktree_linkage::remove_registration_of_deleted_worktree(&entry)? {
+            if Self::preserve_and_remove_deleted(&entry)? {
                 removed += 1;
             }
         }
@@ -413,7 +405,7 @@ impl SharedRepositoryStore {
             let removed = match worktree_linkage::registration_state(&entry) {
                 RegistrationState::Stale(_) => Self::preserve_and_retire(&entry),
                 RegistrationState::WorktreeMissing(_) if storage_present(entry.worktree_path()) => {
-                    worktree_linkage::remove_registration_of_deleted_worktree(&entry)
+                    Self::preserve_and_remove_deleted(&entry)
                 }
                 _ => Ok(false),
             };
@@ -437,6 +429,28 @@ impl SharedRepositoryStore {
     pub(crate) fn preserve_and_retire(
         entry: &worktree_linkage::Registration,
     ) -> Result<bool, String> {
+        if !Self::snapshot_registration_index(entry) {
+            return Ok(false);
+        }
+        worktree_linkage::retire_stale_registration(entry).map(|r| r.is_some())
+    }
+
+    /// Remove a registration whose worktree is gone, on the caller's deletion
+    /// evidence — after snapshotting its index like [`Self::preserve_and_retire`]:
+    /// a deleted directory says nothing about staged-only work in the entry's
+    /// index. Kept if the snapshot cannot be taken. Blocking.
+    pub(crate) fn preserve_and_remove_deleted(
+        entry: &worktree_linkage::Registration,
+    ) -> Result<bool, String> {
+        if !Self::snapshot_registration_index(entry) {
+            return Ok(false);
+        }
+        worktree_linkage::remove_registration_of_deleted_worktree(entry)
+    }
+
+    /// Snapshot `entry`'s index (if any) to `refs/vk-retired/<name>-<epoch>`
+    /// of the repository that owns it. `false` means "keep the registration".
+    fn snapshot_registration_index(entry: &worktree_linkage::Registration) -> bool {
         let index = entry.admin_dir.join("index");
         let has_index = match index.try_exists() {
             Ok(has_index) => has_index,
@@ -446,7 +460,7 @@ impl SharedRepositoryStore {
                     admin_dir = %entry.admin_dir.display(),
                     "kept a stale worktree registration: could not check its index: {e}"
                 );
-                return Ok(false);
+                return false;
             }
         };
         if has_index {
@@ -454,7 +468,7 @@ impl SharedRepositoryStore {
                 entry.admin_dir.file_name(),
                 entry.admin_dir.parent().and_then(Path::parent),
             ) else {
-                return Ok(false);
+                return false;
             };
             let epoch = chrono::Utc::now().timestamp();
             let refname = format!("refs/vk-retired/{}-{epoch}", name.to_string_lossy());
@@ -472,14 +486,14 @@ impl SharedRepositoryStore {
                     admin_dir = %entry.admin_dir.display(),
                     "kept a stale worktree registration: could not snapshot its index: {e}"
                 );
-                return Ok(false);
+                return false;
             }
             info!(
                 admin_dir = %entry.admin_dir.display(),
                 "snapshotted the retiring registration's index to {refname}"
             );
         }
-        worktree_linkage::retire_stale_registration(entry).map(|r| r.is_some())
+        true
     }
 
     /// Filesystem-only, so a sweep or a delete never waits on a git child.
@@ -2726,6 +2740,13 @@ mod tests {
             matches!(outcome, AdoptOutcome::Adopted { .. }),
             "{outcome:?}"
         );
+        // Retirement is detached from the request: give it a bounded moment.
+        for _ in 0..100 {
+            if !old_admin.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
         assert!(
             !old_admin.exists(),
             "the checkout's old registration must be gone after adoption"

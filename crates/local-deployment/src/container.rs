@@ -2737,7 +2737,13 @@ impl LocalContainerService {
         }
         let max_files = threshold("VK_LARGE_COMMIT_WARN_FILES", 5_000);
         let max_mb = threshold("VK_LARGE_COMMIT_WARN_MB", 200);
-        match git::GitCli::new().commit_added_size(worktree_path, commit) {
+        // A total budget with a process-level deadline per call, so a stalled
+        // store never leaves this diagnostic (or its git children) behind.
+        match git::GitCli::new().commit_added_size_within(
+            worktree_path,
+            commit,
+            Duration::from_secs(60),
+        ) {
             Ok((files, bytes)) => {
                 let mb = bytes / (1024 * 1024);
                 if files as u64 > max_files || mb > max_mb {
