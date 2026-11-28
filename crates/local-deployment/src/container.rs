@@ -2815,12 +2815,19 @@ impl LocalContainerService {
                     tracing::info!("Committed changes in repo '{}'", repo.name);
                     // Diagnostic only: measured off the completion path, on
                     // the commit just made (not whatever HEAD is later).
-                    if let Ok(head) = self.git().get_head_info(&worktree_path)
-                        && let Ok(runtime) = tokio::runtime::Handle::try_current()
-                    {
+                    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
                         let (repo, worktree_path) = (repo.clone(), worktree_path.clone());
                         runtime.spawn_blocking(move || {
-                            Self::warn_if_commit_is_large(&repo, &worktree_path, &head.oid)
+                            // Resolved here, first thing, under a deadline.
+                            let Ok(head) = git::GitCli::new().git_within(
+                                &worktree_path,
+                                ["rev-parse", "HEAD"],
+                                None,
+                                Duration::from_secs(10),
+                            ) else {
+                                return;
+                            };
+                            Self::warn_if_commit_is_large(&repo, &worktree_path, head.trim())
                         });
                     }
                 }

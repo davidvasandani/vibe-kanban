@@ -2865,6 +2865,14 @@ mod tests {
             .join("relinked");
         fs::create_dir_all(&elsewhere).unwrap();
         fs::write(
+            elsewhere.join("gitdir"),
+            format!(
+                "{}\n",
+                base.join("relinked").join("repo").join(".git").display()
+            ),
+        )
+        .unwrap();
+        fs::write(
             base.join("relinked").join("repo").join(".git"),
             format!("gitdir: {}\n", elsewhere.display()),
         )

@@ -407,6 +407,15 @@ pub async fn merge_workspace(
         pinned_tip.as_deref(),
     )?;
 
+    Merge::create_direct(
+        pool,
+        workspace.id,
+        workspace_repo.repo_id,
+        &workspace_repo.target_branch,
+        &merge_commit_id,
+    )
+    .await?;
+
     // A clustered workspace's branch lives in the shared store: move it to the
     // squash commit too (compare-and-swap against the pinned tip, so a commit
     // that landed meanwhile is kept), exactly as `merge_changes` does for a
@@ -419,48 +428,44 @@ pub async fn merge_workspace(
             format!("refs/heads/{}", workspace.branch),
             merge_commit_id.clone(),
         );
-        let moved = tokio::task::spawn_blocking(move || {
-            let cli = git::GitCli::new();
-            let deadline = std::time::Duration::from_secs(60);
-            // The squash commit is the checkout target's tip: fetchable as a ref.
-            cli.git_within(
-                &store_dir,
-                [
-                    "fetch",
-                    "--no-tags",
-                    "--no-write-fetch-head",
-                    &checkout_dir.to_string_lossy(),
-                    &target_ref,
-                ],
-                None,
-                deadline,
-            )?;
-            cli.git_within(
-                &store_dir,
-                ["update-ref", &branch_ref, &squash, &pinned],
-                None,
-                deadline,
-            )
-        })
-        .await;
-        if !matches!(moved, Ok(Ok(_))) {
-            tracing::warn!(
-                repo = %repo.path.display(),
-                "merged {}, but could not move the workspace branch in the shared store to \
-                 the squash commit: {moved:?}",
-                workspace.branch
-            );
-        }
+        // Detached: the merge is already recorded; this must finish (or
+        // log) on its own even if the request goes away.
+        let repo_display = repo.path.display().to_string();
+        let branch_name = workspace.branch.clone();
+        tokio::spawn(async move {
+            let moved = tokio::task::spawn_blocking(move || {
+                let cli = git::GitCli::new();
+                let deadline = std::time::Duration::from_secs(60);
+                // The squash commit is the checkout target's tip: fetchable as a ref.
+                cli.git_within(
+                    &store_dir,
+                    [
+                        "fetch",
+                        "--no-tags",
+                        "--no-write-fetch-head",
+                        &checkout_dir.to_string_lossy(),
+                        &target_ref,
+                    ],
+                    None,
+                    deadline,
+                )?;
+                cli.git_within(
+                    &store_dir,
+                    ["update-ref", &branch_ref, &squash, &pinned],
+                    None,
+                    deadline,
+                )
+            })
+            .await;
+            if !matches!(moved, Ok(Ok(_))) {
+                tracing::warn!(
+                    repo = %repo_display,
+                    "merged {branch_name}, but could not move the workspace branch in the shared \
+                     store to the squash commit: {moved:?}"
+                );
+            }
+        });
     }
-
-    Merge::create_direct(
-        pool,
-        workspace.id,
-        workspace_repo.repo_id,
-        &workspace_repo.target_branch,
-        &merge_commit_id,
-    )
-    .await?;
 
     if let Ok(client) = deployment.remote_client() {
         let workspace_id = workspace.id;
@@ -902,6 +907,11 @@ pub async fn get_workspace_branch_status(
 /// authoritative workspace tip even while its courtesy mirror into the
 /// checkout is pending, disabled or failing. Computed in the worktree's
 /// repository; fails if the checkout's target commit is not present there.
+/// Background target fetches in flight (see `counts_against_checkout_target`).
+static TARGET_FETCHES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<(PathBuf, String)>>,
+> = std::sync::LazyLock::new(Default::default);
+
 fn counts_against_checkout_target(
     worktree: &std::path::Path,
     checkout: &std::path::Path,
@@ -947,25 +957,39 @@ fn counts_against_checkout_target(
     };
     if !present(&cli) {
         // The workspace's repository (the shared store, for a clustered
-        // workspace) lacks the checkout's current target commit: fetch just
-        // that ref's objects (FETCH_HEAD only, no ref moves; bounded).
-        let _ = cli.git_within(
-            worktree,
-            [
-                "fetch",
-                "--no-tags",
-                "--no-write-fetch-head",
-                &checkout.to_string_lossy(),
-                &target_ref,
-            ],
-            None,
-            std::time::Duration::from_secs(30),
-        );
-        if !present(&cli) {
-            return Err(format!(
-                "{tip} is not present in the workspace's repository"
-            ));
+        // workspace) lacks the checkout's current target commit. Fetch just
+        // that ref's objects (FETCH_HEAD only, no ref moves; bounded) in the
+        // background, at most once at a time per (repository, ref) however
+        // many polls ask; counts are unknown until it lands.
+        let key = (worktree.to_path_buf(), target_ref.clone());
+        let started = TARGET_FETCHES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key.clone());
+        if started {
+            let checkout = checkout.to_path_buf();
+            std::thread::spawn(move || {
+                let _ = git::GitCli::new().git_within(
+                    &key.0,
+                    [
+                        "fetch",
+                        "--no-tags",
+                        "--no-write-fetch-head",
+                        &checkout.to_string_lossy(),
+                        &key.1,
+                    ],
+                    None,
+                    std::time::Duration::from_secs(120),
+                );
+                TARGET_FETCHES
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&key);
+            });
         }
+        return Err(format!(
+            "{tip} is not in the workspace's repository yet; fetching it"
+        ));
     }
     let out = cli
         .git_within(

@@ -348,11 +348,30 @@ pub fn registration_state(registration: &Registration) -> RegistrationState {
                 return RegistrationState::Live;
             }
             match target.try_exists() {
-                Ok(true) => RegistrationState::Stale(format!(
-                    "{} was re-linked to {}",
-                    worktree.display(),
-                    target.display()
-                )),
+                // Positive evidence of re-linking: the replacement is itself a
+                // registration whose `gitdir` names this very worktree. A
+                // pointer to anything else (a partial repair, a bad write) is
+                // not, and this entry may still be the only valid one.
+                Ok(true) => match fs::read_to_string(target.join("gitdir")) {
+                    Ok(back) if same_path(Path::new(back.trim()), git_entry) => {
+                        RegistrationState::Stale(format!(
+                            "{} was re-linked to {}",
+                            worktree.display(),
+                            target.display()
+                        ))
+                    }
+                    Ok(back) => RegistrationState::Indeterminate(format!(
+                        "{} points at {}, which names {} rather than this worktree",
+                        git_entry.display(),
+                        target.display(),
+                        back.trim()
+                    )),
+                    Err(e) => RegistrationState::Indeterminate(format!(
+                        "{} points at {}, which is not a registration: {e}",
+                        git_entry.display(),
+                        target.display()
+                    )),
+                },
                 Ok(false) => RegistrationState::Indeterminate(format!(
                     "{} points at {}, which does not exist",
                     git_entry.display(),
@@ -759,6 +778,12 @@ mod tests {
         fs::write(admin.join("index"), "staged state").unwrap();
         let other = root.path().join("store").join("worktrees").join("wt");
         fs::create_dir_all(&other).unwrap();
+        // A real replacement registration, pointing back at this worktree.
+        fs::write(
+            other.join("gitdir"),
+            format!("{}\n", worktree.join(".git").display()),
+        )
+        .unwrap();
         fs::write(
             worktree.join(".git"),
             format!("gitdir: {}\n", other.display()),
@@ -843,6 +868,12 @@ mod tests {
         let (common, admin, worktree) = source_registration(root.path());
         let other = root.path().join("store").join("worktrees").join("wt");
         fs::create_dir_all(&other).unwrap();
+        // A real replacement registration, pointing back at this worktree.
+        fs::write(
+            other.join("gitdir"),
+            format!("{}\n", worktree.join(".git").display()),
+        )
+        .unwrap();
         fs::write(
             worktree.join(".git"),
             format!("gitdir: {}\n", other.display()),
@@ -867,6 +898,12 @@ mod tests {
         let (common, admin, worktree) = source_registration(root.path());
         let other = root.path().join("store").join("worktrees").join("wt");
         fs::create_dir_all(&other).unwrap();
+        // A real replacement registration, pointing back at this worktree.
+        fs::write(
+            other.join("gitdir"),
+            format!("{}\n", worktree.join(".git").display()),
+        )
+        .unwrap();
         fs::write(
             worktree.join(".git"),
             format!("gitdir: {}\n", other.display()),
@@ -900,6 +937,25 @@ mod tests {
         fs::write(admin.join("locked"), "").unwrap();
         assert!(!remove_stale_registration(&listed).unwrap());
         assert!(admin.exists());
+    }
+
+    #[test]
+    fn a_pointer_to_something_that_is_not_its_registration_is_indeterminate() {
+        let root = TempDir::new().unwrap();
+        let (common, _, worktree) = source_registration(root.path());
+        // Points at an existing directory that names a different worktree.
+        let other = root.path().join("store").join("worktrees").join("other");
+        fs::create_dir_all(&other).unwrap();
+        fs::write(other.join("gitdir"), "/somewhere/else/.git\n").unwrap();
+        fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", other.display()),
+        )
+        .unwrap();
+        assert!(matches!(
+            registration_state(&only(&common)),
+            RegistrationState::Indeterminate(_)
+        ));
     }
 
     #[test]

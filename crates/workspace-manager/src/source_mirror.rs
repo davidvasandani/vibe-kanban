@@ -1460,6 +1460,11 @@ mod tests {
             .join("repo");
         fs::create_dir_all(&elsewhere).unwrap();
         fs::write(
+            elsewhere.join("gitdir"),
+            format!("{}\n", wt.join(".git").display()),
+        )
+        .unwrap();
+        fs::write(
             wt.join(".git"),
             format!("gitdir: {}\n", elsewhere.display()),
         )
