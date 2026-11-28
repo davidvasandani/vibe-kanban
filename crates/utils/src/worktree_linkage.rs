@@ -378,6 +378,52 @@ pub fn registration_state(registration: &Registration) -> RegistrationState {
     }
 }
 
+/// Moves a [`RegistrationState::Stale`] (re-linked) entry **aside** rather
+/// than deleting it: out of `<common>/worktrees/`, so git no longer counts it
+/// (it stops holding its branch), into `<common>/vk-retired-worktrees/
+/// <name>.<epoch>`. Used after adoption, where the entry's `index` may be the
+/// only record of staged work: the worktree's index was rebuilt from `HEAD`,
+/// so a staged version that was edited again lives nowhere else. Returns the
+/// new location, or `None` when the entry is not (or no longer) stale.
+pub fn retire_stale_registration(registration: &Registration) -> Result<Option<PathBuf>, String> {
+    let current = match read_registration(&registration.admin_dir) {
+        Ok(current) => current,
+        Err(_) => return Ok(None),
+    };
+    if current != *registration {
+        return Ok(None);
+    }
+    let RegistrationState::Stale(reason) = registration_state(&current) else {
+        return Ok(None);
+    };
+    let (Some(name), Some(common_dir)) = (
+        current.admin_dir.file_name(),
+        current.admin_dir.parent().and_then(Path::parent),
+    ) else {
+        return Err(format!(
+            "{} is not under <common>/worktrees",
+            current.admin_dir.display()
+        ));
+    };
+    let retired_root = common_dir.join("vk-retired-worktrees");
+    fs::create_dir_all(&retired_root)
+        .map_err(|e| format!("create {}: {e}", retired_root.display()))?;
+    let epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let target = retired_root.join(format!("{}.{epoch}", name.to_string_lossy()));
+    tracing::info!(
+        admin_dir = %current.admin_dir.display(),
+        retired_to = %target.display(),
+        branch = current.head_branch.as_deref().unwrap_or("-"),
+        "retiring stale worktree registration (kept for its index): {reason}"
+    );
+    fs::rename(&current.admin_dir, &target)
+        .map(|()| Some(target))
+        .map_err(|e| format!("move {} aside: {e}", current.admin_dir.display()))
+}
+
 /// Removes a [`RegistrationState::WorktreeMissing`] entry on the caller's
 /// evidence that the worktree was really deleted rather than made invisible by
 /// offline storage: the caller just deleted it, or the storage it lived on is
@@ -646,6 +692,29 @@ mod tests {
         let reg = only(&common);
         assert_eq!(reg.worktree_path(), worktree.as_path());
         assert_eq!(registration_state(&reg), RegistrationState::Live);
+    }
+
+    #[test]
+    fn a_retired_registration_keeps_its_index_outside_worktrees() {
+        let root = TempDir::new().unwrap();
+        let (common, admin, worktree) = source_registration(root.path());
+        fs::write(admin.join("index"), "staged state").unwrap();
+        let other = root.path().join("store").join("worktrees").join("wt");
+        fs::create_dir_all(&other).unwrap();
+        fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", other.display()),
+        )
+        .unwrap();
+
+        let retired = retire_stale_registration(&only(&common)).unwrap().unwrap();
+        assert!(!admin.exists(), "no longer a registration");
+        assert!(registrations(&common).unwrap().is_empty());
+        assert_eq!(
+            fs::read_to_string(retired.join("index")).unwrap(),
+            "staged state"
+        );
+        assert!(retired.starts_with(common.join("vk-retired-worktrees")));
     }
 
     #[test]

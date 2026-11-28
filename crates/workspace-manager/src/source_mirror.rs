@@ -547,7 +547,7 @@ async fn preflight(
                         ));
                     }
                     RegistrationState::Stale(_) => {
-                        worktree_linkage::remove_stale_registration(&entry)
+                        worktree_linkage::retire_stale_registration(&entry)
                             .map_err(|e| (SourceMirrorFailureKind::Transient, e))?;
                     }
                     // Deleted, or on storage that is offline right now: this
@@ -824,14 +824,12 @@ async fn run_git_bounded(
     let stderr = drain(stderr_task).await;
     if pipes_held {
         // The leader exited but a helper kept the output open past the grace
-        // period. While that helper lives the group exists, so its id cannot
-        // have been reused: kill it, fence on it, and report the attempt as
-        // timed out (a push that did land is confirmed by the next round).
+        // period. The leader is reaped, so the pgid is no longer pinned and is
+        // never signalled from here (it could name someone else by now). Fence
+        // on the group instead — probing only — and report the attempt as
+        // timed out; a push that did land is confirmed by the next round.
         #[cfg(unix)]
         if let Some(pgid) = pid.and_then(|pid| i32::try_from(pid).ok()) {
-            if utils::process::process_group_has_running_members(pgid) {
-                utils::process::kill_process_group_now(pgid as u32);
-            }
             leftovers.push(tokio::spawn(async move {
                 while utils::process::process_group_has_running_members(pgid) {
                     tokio::time::sleep(Duration::from_secs(1)).await;

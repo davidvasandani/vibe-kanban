@@ -325,7 +325,22 @@ impl SharedRepositoryStore {
                     common_dir.display()
                 );
                 if let Some(previous) = previous_admin_dir {
-                    Self::forget_previous_registration(&previous, &admin_dir);
+                    // The old checkout may sit on a stalled mount; the
+                    // workspace already works from the store, so never let
+                    // this best-effort step hold the request.
+                    let current = admin_dir.clone();
+                    let task = tokio::task::spawn_blocking(move || {
+                        Self::retire_previous_registration(&previous, &current)
+                    });
+                    if tokio::time::timeout(std::time::Duration::from_secs(10), task)
+                        .await
+                        .is_err()
+                    {
+                        warn!(
+                            worktree = %worktree_path.display(),
+                            "retiring the previous registration took over 10s; not waiting"
+                        );
+                    }
                 }
                 Ok(AdoptOutcome::Adopted { common_dir })
             }
@@ -396,7 +411,9 @@ impl SharedRepositoryStore {
                 continue;
             }
             let removed = match worktree_linkage::registration_state(&entry) {
-                RegistrationState::Stale(_) => worktree_linkage::remove_stale_registration(&entry),
+                RegistrationState::Stale(_) => {
+                    worktree_linkage::retire_stale_registration(&entry).map(|r| r.is_some())
+                }
                 RegistrationState::WorktreeMissing(_) if storage_present(entry.worktree_path()) => {
                     worktree_linkage::remove_registration_of_deleted_worktree(&entry)
                 }
@@ -419,22 +436,24 @@ impl SharedRepositoryStore {
         worktree_linkage::common_dir_of(repo).map(|(common_dir, _bare)| common_dir)
     }
 
-    /// After a verified adoption: drop the entry the worktree left behind in
-    /// its previous repository, if that entry is now provably orphaned.
-    fn forget_previous_registration(previous: &Path, current: &Path) {
+    /// After a verified adoption: move aside the entry the worktree left behind
+    /// in its previous repository, if that entry is now provably orphaned.
+    fn retire_previous_registration(previous: &Path, current: &Path) {
         if previous == current || !previous.exists() {
             return;
         }
+        // Moved aside, not deleted: its `index` may be the only record of
+        // staged work (constitution XV).
         match worktree_linkage::read_registration(previous)
-            .and_then(|entry| worktree_linkage::remove_stale_registration(&entry))
+            .and_then(|entry| worktree_linkage::retire_stale_registration(&entry))
         {
-            Ok(true) => {}
-            Ok(false) => debug!(
+            Ok(Some(_)) => {}
+            Ok(None) => debug!(
                 "left the previous registration {} in place: it is not provably stale",
                 previous.display()
             ),
             Err(e) => warn!(
-                "could not remove the previous registration {} after adoption: {e}",
+                "could not retire the previous registration {} after adoption: {e}",
                 previous.display()
             ),
         }
@@ -2659,6 +2678,12 @@ mod tests {
         assert!(
             !old_admin.exists(),
             "the checkout's old registration must be gone after adoption"
+        );
+        let retired = checkout.join(".git").join("vk-retired-worktrees");
+        assert_eq!(
+            fs::read_dir(&retired).unwrap().count(),
+            1,
+            "moved aside with its index, not deleted"
         );
         let list = cli()
             .git(&checkout, ["worktree", "list", "--porcelain"])

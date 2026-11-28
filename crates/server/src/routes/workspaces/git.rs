@@ -525,12 +525,26 @@ pub async fn get_workspace_branch_status(
             Default::default()
         };
 
-        // The worktree's own repository first: for a clustered workspace that
-        // is the shared store, which is authoritative — the registered
-        // checkout gets the branch only through the background mirror, which
-        // may be pending, disabled or failing (an older copy there would
-        // under-report commits ahead). The checkout is the fallback; failing
-        // both, report unknown counts rather than failing the response.
+        // Which repository to read. The registered checkout, exactly as
+        // before, whenever it already holds the worktree's HEAD for this
+        // branch: then its target branch is the current one (the same source
+        // rebase uses). Otherwise — a clustered workspace whose background
+        // mirror is pending, disabled or failing — the worktree's own
+        // repository, the shared store, which has the real branch tip. The
+        // other is the fallback; failing both, report unknown counts rather
+        // than failing the response and hiding `source_mirror_error`.
+        let checkout_is_current = head_oid.as_deref().is_some_and(|head| {
+            git::GitCli::new()
+                .resolve_commit(&repo.path, &format!("refs/heads/{}", workspace.branch))
+                .ok()
+                .flatten()
+                .is_some_and(|tip| tip == head)
+        });
+        let (primary, secondary): (&std::path::Path, &std::path::Path) = if checkout_is_current {
+            (&repo.path, &worktree_path)
+        } else {
+            (&worktree_path, &repo.path)
+        };
         let branch_status_in = |repo_path: &std::path::Path| {
             if is_target_remote {
                 deployment.git().get_remote_branch_status(
@@ -546,7 +560,7 @@ pub async fn get_workspace_branch_status(
             }
         };
         let (commits_ahead, commits_behind) =
-            match branch_status_in(&worktree_path).or_else(|_| branch_status_in(&repo.path)) {
+            match branch_status_in(primary).or_else(|_| branch_status_in(secondary)) {
                 Ok((ahead, behind)) => (Some(ahead), Some(behind)),
                 Err(e) => {
                     tracing::debug!(
@@ -568,7 +582,7 @@ pub async fn get_workspace_branch_status(
                     &credentials,
                 )
             };
-            match pr_status_in(&worktree_path).or_else(|_| pr_status_in(&repo.path)) {
+            match pr_status_in(primary).or_else(|_| pr_status_in(secondary)) {
                 Ok((ahead, behind)) => (Some(ahead), Some(behind)),
                 Err(_) => (None, None),
             }
