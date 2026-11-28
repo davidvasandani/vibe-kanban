@@ -1918,3 +1918,34 @@ fn a_pinned_merge_merges_the_verified_tip_and_keeps_a_newer_branch() {
         "the task branch keeps the commit that landed meanwhile"
     );
 }
+
+#[test]
+fn a_pinned_merge_into_an_unchecked_out_target_updates_the_base_repository() {
+    let td = TempDir::new().unwrap();
+    let (repo_path, worktree_path) = setup_repo_with_worktree(&td);
+    let cli = GitCli::new();
+    // Move the base checkout off `main`, so the libgit2 path is taken.
+    cli.git(&repo_path, ["checkout", "-q", "-b", "parking"])
+        .unwrap();
+    let verified = cli
+        .git(&worktree_path, ["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let before = cli.git(&repo_path, ["rev-parse", "main"]).unwrap();
+
+    let sha = GitService::new()
+        .merge_changes_pinned(
+            &repo_path,
+            &worktree_path,
+            "feature",
+            "main",
+            "squash",
+            Some(&verified),
+        )
+        .unwrap();
+
+    let after = cli.git(&repo_path, ["rev-parse", "main"]).unwrap();
+    assert_ne!(before, after);
+    assert_eq!(after.trim(), sha);
+}

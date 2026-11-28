@@ -612,13 +612,21 @@ async fn run_round(
         );
     };
     // Another leader (an aliased registration) may have just pushed this.
-    if let Ok(Some(tip)) = branch_tip(&git, dest, branch, config.probe_timeout, leftovers).await
-        && tip == store_tip
-    {
-        return Round::Synced {
-            pushed: false,
-            tip: Some(tip),
-        };
+    // A probe that fails here stops the round: no push on top of a stall.
+    match branch_tip(&git, dest, branch, config.probe_timeout, leftovers).await {
+        Ok(Some(tip)) if tip == store_tip => {
+            return Round::Synced {
+                pushed: false,
+                tip: Some(tip),
+            };
+        }
+        Ok(_) => {}
+        Err((kind, e)) => {
+            return failed(
+                kind,
+                format!("could not read '{branch}' in {}: {e}", dest.display()),
+            );
+        }
     }
 
     // 4. A push the destination itself refused is not repeated until the

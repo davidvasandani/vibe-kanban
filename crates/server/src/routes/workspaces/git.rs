@@ -793,6 +793,16 @@ pub async fn get_workspace_branch_status(
                 // checkout (a PR opened before the workspace moved to the
                 // store): resolve it there, compare it with the store's branch.
                 Err(_) => {
+                    // Refresh the checkout's remote first (the same
+                    // credentialed fetch this status always did there); its
+                    // own counts may rest on a stale workspace copy, so they
+                    // are ignored in favour of the store's branch below.
+                    let _ = deployment.git().get_remote_branch_status(
+                        &repo.path,
+                        &workspace.branch,
+                        None,
+                        &credentials,
+                    );
                     let (worktree, checkout, branch) = (
                         worktree_path.clone(),
                         repo.path.clone(),

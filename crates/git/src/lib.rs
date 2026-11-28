@@ -810,22 +810,32 @@ impl GitService {
                 Ok(sha)
             }
             None => {
-                // base branch not checked out anywhere - use libgit2 pure ref operations
-                let base_branch = Self::find_branch(&task_repo, base_branch_name)?;
+                // base branch not checked out anywhere - use libgit2 pure ref operations.
+                // Pinned, the task worktree may belong to a different
+                // repository (a clustered workspace's shared store) whose copy
+                // of the base branch is not the registered one: then read the
+                // base from, and write the squash into, the base repository,
+                // which the caller has already given the pinned commit.
+                let merge_repo = if expected_task_tip.is_some() {
+                    &base_repo
+                } else {
+                    &task_repo
+                };
+                let base_branch = Self::find_branch(merge_repo, base_branch_name)?;
 
                 // Resolve commits
                 let base_commit = base_branch.get().peel_to_commit()?;
                 let task_commit = match expected_task_tip {
-                    Some(tip) => task_repo.find_commit(git2::Oid::from_str(tip)?)?,
+                    Some(tip) => merge_repo.find_commit(git2::Oid::from_str(tip)?)?,
                     None => Self::find_branch(&task_repo, task_branch_name)?
                         .get()
                         .peel_to_commit()?,
                 };
 
                 // Create the squash commit in-memory (no checkout) and update the base branch ref
-                let signature = self.signature_with_fallback(&task_repo)?;
+                let signature = self.signature_with_fallback(merge_repo)?;
                 let squash_commit_id = self.perform_squash_merge(
-                    &task_repo,
+                    merge_repo,
                     &base_commit,
                     &task_commit,
                     &signature,
