@@ -2397,10 +2397,21 @@ impl LocalContainerService {
             }
             let source = input.repo.path.clone();
             let worktree = workspace_dir.join(&input.repo.name);
-            let result = tokio::task::spawn_blocking(move || {
+            let task = tokio::task::spawn_blocking(move || {
                 SharedRepositoryStore::forget_source_registrations(&source, &worktree)
-            })
-            .await;
+            });
+            // Bounded: a stalled checkout filesystem must not hold up marking
+            // the workspace deleted. The scan itself finishes (or not) on its
+            // own; it only ever removes provably orphaned bookkeeping.
+            let Ok(result) = tokio::time::timeout(Duration::from_secs(30), task).await else {
+                tracing::warn!(
+                    repo = %input.repo.name,
+                    "clearing the deleted workspace's registrations in {} took over 30s; \
+                     not waiting for it",
+                    input.repo.path.display()
+                );
+                continue;
+            };
             match result {
                 Ok(Ok(0)) => {}
                 Ok(Ok(removed)) => tracing::info!(

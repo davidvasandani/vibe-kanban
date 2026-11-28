@@ -338,8 +338,9 @@ impl SharedRepositoryStore {
 
     /// Remove the registrations a deleted worktree left in the operator's
     /// checkout (`source_repo`), for a clustered workspace whose own
-    /// registration lived in the store. Only entries naming `worktree_path`
-    /// are considered, and only those that are provably stale are removed.
+    /// registration lived in the store. Call only after `worktree_path` was
+    /// deleted. Only entries naming `worktree_path` are considered; each is
+    /// re-read and kept if it changed, is locked, or the path exists again.
     /// Blocking; returns how many were removed.
     pub fn forget_source_registrations(
         source_repo: &Path,
@@ -354,7 +355,9 @@ impl SharedRepositoryStore {
             if entry.worktree_path() != worktree_path {
                 continue;
             }
-            if worktree_linkage::remove_stale_registration(&entry)? {
+            // The caller has just deleted this worktree: that is the
+            // evidence, even when it was the last one on its storage.
+            if worktree_linkage::remove_registration_of_deleted_worktree(&entry)? {
                 removed += 1;
             }
         }

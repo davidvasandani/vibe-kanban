@@ -1755,3 +1755,42 @@ fn head_commit_added_size_counts_only_files_the_commit_adds() {
     assert_eq!(files, 2);
     assert_eq!(bytes, 15);
 }
+
+#[test]
+fn head_commit_added_size_measures_a_merge_against_its_first_parent() {
+    let td = TempDir::new().unwrap();
+    let repo_path = td.path().join("repo");
+    let service = GitService::new();
+    service
+        .initialize_repo_with_main_branch(&repo_path)
+        .unwrap();
+    let repo = Repository::open(&repo_path).unwrap();
+    configure_user(&repo);
+    write_file(&repo_path, "base.txt", "base\n");
+    commit_all(&repo, "base");
+
+    let cli = GitCli::new();
+    cli.git(&repo_path, ["checkout", "-q", "-b", "side"])
+        .unwrap();
+    write_file(&repo_path, "gen/out.bin", "0123456789");
+    commit_all(&repo, "side adds output");
+    cli.git(&repo_path, ["checkout", "-q", "main"]).unwrap();
+    cli.git(
+        &repo_path,
+        [
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "merge",
+            "-q",
+            "--no-ff",
+            "-m",
+            "merge side",
+            "side",
+        ],
+    )
+    .unwrap();
+
+    assert_eq!(cli.head_commit_added_size(&repo_path).unwrap(), (1, 10));
+}

@@ -1302,20 +1302,22 @@ impl GitCli {
     ) -> Result<(usize, u64), GitCliError> {
         use std::collections::HashSet;
 
-        // `-z`: `:<modes> <shas> A\0<path>\0` per entry, paths unquoted.
-        let raw = self.git(
-            worktree_path,
-            [
-                "diff-tree",
-                "-r",
-                "-z",
-                "--root",
-                "--no-commit-id",
-                "--no-renames",
-                "--diff-filter=A",
-                "HEAD",
-            ],
-        )?;
+        // Against the first parent (so a merge is measured too), or the empty
+        // tree for a root commit. `-z`: `:<modes> <shas> A\0<path>\0`.
+        let has_parent = self
+            .git(
+                worktree_path,
+                ["rev-parse", "--verify", "--quiet", "HEAD^1"],
+            )
+            .is_ok();
+        let mut args = vec!["diff-tree", "-r", "-z", "--no-commit-id", "--no-renames"];
+        args.push("--diff-filter=A");
+        if has_parent {
+            args.extend(["HEAD^1", "HEAD"]);
+        } else {
+            args.extend(["--root", "HEAD"]);
+        }
+        let raw = self.git(worktree_path, args)?;
         let mut added: HashSet<&str> = HashSet::new();
         let mut fields = raw.split('\0');
         while let Some(meta) = fields.next() {

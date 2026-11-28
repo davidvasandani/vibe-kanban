@@ -407,9 +407,9 @@ async fn run_round(
     let store_tip = match branch_tip(&git, store, branch, config.probe_timeout, leftovers).await {
         Ok(Some(tip)) => tip,
         Ok(None) => return Round::Synced { pushed: false },
-        Err(e) => {
+        Err((kind, e)) => {
             return failed(
-                SourceMirrorFailureKind::Transient,
+                kind,
                 format!(
                     "could not read '{branch}' in the store {}: {e}",
                     store.display()
@@ -423,9 +423,9 @@ async fn run_round(
     let dest_tip = match branch_tip(&git, dest, branch, config.probe_timeout, leftovers).await {
         Ok(Some(tip)) if tip == store_tip => return Round::Synced { pushed: false },
         Ok(tip) => tip,
-        Err(e) => {
+        Err((kind, e)) => {
             return failed(
-                classify(&e),
+                kind,
                 format!("could not read '{branch}' in {}: {e}", dest.display()),
             );
         }
@@ -582,13 +582,14 @@ async fn preflight(
 }
 
 /// `refs/heads/{branch}` in `repo`, or `None` when the branch does not exist.
+/// A failure carries its kind, so a probe that timed out stays a timeout.
 async fn branch_tip(
     git: &Path,
     repo: &Path,
     branch: &str,
     timeout: Duration,
     leftovers: &mut Leftovers,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, (SourceMirrorFailureKind, String)> {
     let spec = format!("refs/heads/{branch}^{{commit}}");
     match run_git_bounded(
         git,
@@ -602,8 +603,12 @@ async fn branch_tip(
         Ok(out) if out.success => Ok(Some(out.stdout.trim().to_string())),
         // `--verify --quiet` exits 1 with no output for a missing ref.
         Ok(out) if out.code == Some(1) && out.stderr.trim().is_empty() => Ok(None),
-        Ok(out) => Err(excerpt(&out.stderr)),
-        Err(e) => Err(e.to_string()),
+        Ok(out) => {
+            let stderr = excerpt(&out.stderr);
+            Err((classify(&stderr), stderr))
+        }
+        Err(e @ BoundedError::Timeout(_)) => Err((SourceMirrorFailureKind::Timeout, e.to_string())),
+        Err(e) => Err((SourceMirrorFailureKind::Transient, e.to_string())),
     }
 }
 
@@ -729,18 +734,23 @@ async fn run_git_bounded(
             let _ = child.start_kill();
             stdout_task.abort();
             stderr_task.abort();
-            // A process blocked in uninterruptible I/O does not die on
-            // SIGKILL until the I/O returns. Report the timeout now either
-            // way; if it has not been reaped within the grace period, hand the
-            // reaping to a fenced leftover rather than waiting here.
-            if tokio::time::timeout(PIPE_DRAIN_GRACE, child.wait())
-                .await
-                .is_err()
-            {
-                leftovers.push(tokio::spawn(async move {
-                    let _ = child.wait().await;
-                }));
-            }
+            // A process blocked in uninterruptible I/O (a hard NFS mount) does
+            // not die on SIGKILL until the I/O returns, and that may be a
+            // helper like `receive-pack` while the leader is already gone.
+            // Report the timeout now; fence the slot with a leftover that ends
+            // only once the leader is reaped *and* the whole group is gone.
+            leftovers.push(tokio::spawn(async move {
+                let _ = child.wait().await;
+                #[cfg(unix)]
+                if let Some(pid) = pid
+                    && let Ok(pgid) = i32::try_from(pid)
+                {
+                    while utils::process::process_group_alive(pgid) {
+                        utils::process::kill_process_group_now(pid);
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                }
+            }));
             return Err(BoundedError::Timeout(timeout));
         }
     };

@@ -362,6 +362,11 @@ pub fn registration_state(registration: &Registration) -> RegistrationState {
 /// under an offline mount does not hold other workspaces' worktrees, so both
 /// read as "cannot tell". The cost of erring this way is only that a stale
 /// entry is kept, e.g. when the last workspace on some storage goes.
+///
+/// Nested mounts are covered by the same walk: an offline mount's mount point
+/// is itself an existing, empty directory on the worktree's path, so it is the
+/// nearest existing ancestor found here (and holds no worktree), or it lies
+/// more than two levels up and nothing is found at all.
 fn storage_evidence(worktree: &Path) -> RegistrationState {
     let candidates = [worktree.parent(), worktree.parent().and_then(Path::parent)];
     for dir in candidates.into_iter().flatten() {
@@ -418,6 +423,34 @@ fn holds_a_worktree(dir: &Path, except: &Path) -> Result<bool, String> {
         }
     }
     Ok(false)
+}
+
+/// Removes `registration` because the caller has **just deleted** the worktree
+/// it names — positive evidence the generic [`registration_state`] cannot have
+/// when that worktree was the last one on its storage. Still re-reads the entry
+/// and refuses if it changed, is locked, or its worktree path exists again.
+pub fn remove_registration_of_deleted_worktree(
+    registration: &Registration,
+) -> Result<bool, String> {
+    let current = match read_registration(&registration.admin_dir) {
+        Ok(current) => current,
+        Err(_) => return Ok(false),
+    };
+    if current != *registration || current.locked {
+        return Ok(false);
+    }
+    if !matches!(current.worktree_path().try_exists(), Ok(false)) {
+        return Ok(false);
+    }
+    tracing::info!(
+        admin_dir = %current.admin_dir.display(),
+        branch = current.head_branch.as_deref().unwrap_or("-"),
+        "removing the registration of deleted worktree {}",
+        current.worktree_path().display()
+    );
+    fs::remove_dir_all(&current.admin_dir)
+        .map(|()| true)
+        .map_err(|e| format!("remove {}: {e}", current.admin_dir.display()))
 }
 
 /// Where a repository's shared Git directory is, read from the filesystem
@@ -666,6 +699,34 @@ mod tests {
             common_dir_of(&checkout).unwrap(),
             (checkout.join(".git"), false)
         );
+    }
+
+    #[test]
+    fn a_just_deleted_last_worktree_is_removed_on_the_callers_evidence() {
+        let root = TempDir::new().unwrap();
+        let (common, admin, _) = source_registration(root.path());
+        // The last worktree on its storage: no sibling to prove the mount.
+        fs::remove_dir_all(root.path().join("ws")).unwrap();
+        let listed = only(&common);
+        assert!(matches!(
+            registration_state(&listed),
+            RegistrationState::Indeterminate(_)
+        ));
+        assert!(remove_registration_of_deleted_worktree(&listed).unwrap());
+        assert!(!admin.exists());
+    }
+
+    #[test]
+    fn deletion_evidence_does_not_override_a_lock_or_a_recreated_worktree() {
+        let root = TempDir::new().unwrap();
+        let (common, admin, worktree) = source_registration(root.path());
+        let listed = only(&common);
+        // Still there: no evidence of deletion.
+        assert!(!remove_registration_of_deleted_worktree(&listed).unwrap());
+        fs::remove_dir_all(&worktree).unwrap();
+        fs::write(admin.join("locked"), "").unwrap();
+        assert!(!remove_registration_of_deleted_worktree(&listed).unwrap());
+        assert!(admin.exists());
     }
 
     #[test]

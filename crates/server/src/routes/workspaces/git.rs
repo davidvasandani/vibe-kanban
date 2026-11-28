@@ -514,22 +514,38 @@ pub async fn get_workspace_branch_status(
             Default::default()
         };
 
-        let (commits_ahead, commits_behind) = if is_target_remote {
-            let (ahead, behind) = deployment.git().get_remote_branch_status(
-                &repo.path,
-                &workspace.branch,
-                Some(&target_branch),
-                &credentials,
-            )?;
-            (Some(ahead), Some(behind))
-        } else {
-            let (a, b) = deployment.git().get_branch_status(
-                &repo.path,
-                &workspace.branch,
-                &target_branch,
-            )?;
-            (Some(a), Some(b))
+        // The registered checkout first, as before. For a clustered workspace
+        // the branch reaches the checkout only through the background source
+        // mirror, so it may not be there yet (or the mirror may be failing):
+        // fall back to the worktree's own repository — the shared store —
+        // and, failing both, report unknown counts rather than failing the
+        // whole response and hiding `source_mirror_error` with it.
+        let branch_status_in = |repo_path: &std::path::Path| {
+            if is_target_remote {
+                deployment.git().get_remote_branch_status(
+                    repo_path,
+                    &workspace.branch,
+                    Some(&target_branch),
+                    &credentials,
+                )
+            } else {
+                deployment
+                    .git()
+                    .get_branch_status(repo_path, &workspace.branch, &target_branch)
+            }
         };
+        let (commits_ahead, commits_behind) =
+            match branch_status_in(&repo.path).or_else(|_| branch_status_in(&worktree_path)) {
+                Ok((ahead, behind)) => (Some(ahead), Some(behind)),
+                Err(e) => {
+                    tracing::debug!(
+                        repo = %repo.name,
+                        "branch status unavailable for '{}': {e}",
+                        workspace.branch
+                    );
+                    (None, None)
+                }
+            };
 
         let (remote_ahead, remote_behind) = if has_open_pr {
             match deployment.git().get_remote_branch_status(
