@@ -21,6 +21,10 @@
 //!   commit) spawns nothing.
 //! - Every git call has a timeout; on expiry the whole process group is killed,
 //!   so `git pack-objects` dies with its parent.
+//! - Admission is process-local on purpose: only the coordinator provisions
+//!   clustered workspaces, and the registered checkout it pushes into is
+//!   coordinator-local (`/srv/src/<repo>`); the `worker` crate does not depend
+//!   on this one.
 //! - Failures are logged at `warn!` with git's stderr, kept for
 //!   [`SourceMirror::failure`] (shown on the workspace), and backed off. A
 //!   deterministic refusal is retried only once the branch has moved.
@@ -471,7 +475,13 @@ async fn run_round(
             Round::Failed {
                 kind,
                 message: format!("git push failed: {stderr}"),
-                gate: (kind == SourceMirrorFailureKind::Deterministic).then_some(gate),
+                // A checked-out refusal depends on the destination's
+                // checkout, not on the commits: pre-flight re-checks that each
+                // round, so never gate it (a checkout taken between pre-flight
+                // and `receive-pack` must not pin the failure once released).
+                gate: (kind == SourceMirrorFailureKind::Deterministic
+                    && !stderr.to_ascii_lowercase().contains("checked out"))
+                .then_some(gate),
             }
         }
         Err(BoundedError::Timeout(after)) => failed(
@@ -793,17 +803,38 @@ async fn run_git_bounded(
             return Err(BoundedError::Timeout(timeout));
         }
     };
-    let drain = |task: tokio::task::JoinHandle<Vec<u8>>| async move {
-        match tokio::time::timeout(PIPE_DRAIN_GRACE, task).await {
-            Ok(Ok(buf)) => String::from_utf8_lossy(&buf).to_string(),
-            _ => String::new(),
+    // A pipe still open after the leader exited means a helper of the group
+    // is still alive. Keep the slot fenced on it (probing only: the leader is
+    // reaped, so the pgid is no longer pinned and must not be signalled).
+    let mut pipes_held = false;
+    let mut drain = async |task: tokio::task::JoinHandle<Vec<u8>>| match tokio::time::timeout(
+        PIPE_DRAIN_GRACE,
+        task,
+    )
+    .await
+    {
+        Ok(Ok(buf)) => String::from_utf8_lossy(&buf).to_string(),
+        Ok(Err(_)) => String::new(),
+        Err(_) => {
+            pipes_held = true;
+            String::new()
         }
     };
+    let stdout = drain(stdout_task).await;
+    let stderr = drain(stderr_task).await;
+    #[cfg(unix)]
+    if pipes_held && let Some(pgid) = pid.and_then(|pid| i32::try_from(pid).ok()) {
+        leftovers.push(tokio::spawn(async move {
+            while utils::process::process_group_has_running_members(pgid) {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }));
+    }
     Ok(BoundedOutput {
         success: status.success(),
         code: status.code(),
-        stdout: drain(stdout_task).await,
-        stderr: drain(stderr_task).await,
+        stdout,
+        stderr,
     })
 }
 
@@ -1071,7 +1102,7 @@ mod tests {
             backoff_base: Duration::ZERO,
             git_binary: Some(fake_git(
                 tools.path(),
-                "echo ' ! [remote rejected] vk/b -> vk/b (branch is currently checked out)' >&2; false",
+                "echo ' ! [remote rejected] vk/b -> vk/b (hook declined)' >&2; false",
             )),
             ..Default::default()
         });
