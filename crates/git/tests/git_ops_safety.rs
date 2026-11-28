@@ -1850,3 +1850,63 @@ fn git_within_kills_a_hung_command_at_its_deadline() {
         started.elapsed()
     );
 }
+
+#[test]
+fn a_pinned_merge_merges_the_verified_tip_and_keeps_a_newer_branch() {
+    let td = TempDir::new().unwrap();
+    let (repo_path, worktree_path) = setup_repo_with_worktree(&td);
+    let cli = GitCli::new();
+    let verified = cli
+        .git(&worktree_path, ["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+    // A commit lands on the task branch after the tip was verified.
+    write_file(&worktree_path, "late.txt", "late\n");
+    cli.git(&worktree_path, ["add", "late.txt"]).unwrap();
+    cli.git(
+        &worktree_path,
+        [
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "-m",
+            "late",
+        ],
+    )
+    .unwrap();
+    let newer = cli
+        .git(&worktree_path, ["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    GitService::new()
+        .merge_changes_pinned(
+            &repo_path,
+            &worktree_path,
+            "feature",
+            "main",
+            "squash",
+            Some(&verified),
+        )
+        .unwrap();
+
+    let main_tree = cli
+        .git(&repo_path, ["ls-tree", "-r", "--name-only", "main"])
+        .unwrap();
+    assert!(
+        !main_tree.contains("late.txt"),
+        "only the verified tip is merged"
+    );
+    assert_eq!(
+        cli.git(&repo_path, ["rev-parse", "refs/heads/feature"])
+            .unwrap()
+            .trim(),
+        newer,
+        "the task branch keeps the commit that landed meanwhile"
+    );
+}

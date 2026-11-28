@@ -300,6 +300,9 @@ pub async fn merge_workspace(
                 ));
             }
         };
+    // For a clustered workspace, the exact commit verified below is what gets
+    // merged (`merge_changes_pinned`), never a re-read of the branch name.
+    let mut pinned_tip: Option<String> = None;
     if store != checkout_git {
         // The branch `merge_changes` merges, as the store has it — not the
         // worktree's HEAD, which may be detached or on another branch.
@@ -357,14 +360,16 @@ pub async fn merge_workspace(
                     .to_string(),
             ));
         }
+        pinned_tip = Some(head);
     }
 
-    let merge_commit_id = deployment.git().merge_changes(
+    let merge_commit_id = deployment.git().merge_changes_pinned(
         &repo.path,
         &worktree_path,
         &workspace.branch,
         &workspace_repo.target_branch,
         &commit_message,
+        pinned_tip.as_deref(),
     )?;
 
     Merge::create_direct(
@@ -637,9 +642,12 @@ pub async fn get_workspace_branch_status(
         });
         // A checkout that does not hold the worktree's HEAD is never read as a
         // fallback: its copy of the branch is stale and would under-report.
+        // The worktree's repository is always read first (the workspace side
+        // is authoritative there); the checkout is a fallback only while the
+        // mirror last saw it holding this very HEAD.
         let (primary, secondary): (&std::path::Path, Option<&std::path::Path>) =
             if checkout_is_current {
-                (&repo.path, Some(&worktree_path))
+                (&worktree_path, Some(&repo.path))
             } else {
                 (&worktree_path, None)
             };

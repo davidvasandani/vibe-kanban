@@ -695,14 +695,52 @@ impl GitService {
         base_branch_name: &str,
         commit_message: &str,
     ) -> Result<String, GitServiceError> {
+        self.merge_changes_pinned(
+            base_worktree_path,
+            task_worktree_path,
+            task_branch_name,
+            base_branch_name,
+            commit_message,
+            None,
+        )
+    }
+
+    /// [`Self::merge_changes`] that merges exactly `expected_task_tip` (when
+    /// given) rather than whatever `task_branch_name` points at by the time it
+    /// is read: the divergence check and the squash both use that commit, and
+    /// the task branch is moved only if it is still at it (a conditional ref
+    /// update), so a commit landing mid-merge is never silently dropped.
+    pub fn merge_changes_pinned(
+        &self,
+        base_worktree_path: &Path,
+        task_worktree_path: &Path,
+        task_branch_name: &str,
+        base_branch_name: &str,
+        commit_message: &str,
+        expected_task_tip: Option<&str>,
+    ) -> Result<String, GitServiceError> {
         // Open the repositories
         let task_repo = self.open_repo(task_worktree_path)?;
         let base_repo = self.open_repo(base_worktree_path)?;
 
         // Check if base branch is ahead of task branch - this indicates the base has moved
         // ahead since the task was created, which should block the merge
-        let (_, task_behind) =
-            self.get_branch_status(base_worktree_path, task_branch_name, base_branch_name)?;
+        let task_behind = match expected_task_tip {
+            Some(tip) => {
+                let tip = git2::Oid::from_str(tip)?;
+                let base = Self::find_branch(&base_repo, base_branch_name)?;
+                let base_oid = base
+                    .get()
+                    .target()
+                    .ok_or_else(|| GitServiceError::BranchNotFound(base_branch_name.to_string()))?;
+                base_repo.graph_ahead_behind(tip, base_oid)?.1
+            }
+            None => {
+                self.get_branch_status(base_worktree_path, task_branch_name, base_branch_name)?
+                    .1
+            }
+        };
+        let merge_source = expected_task_tip.unwrap_or(task_branch_name);
 
         if task_behind > 0 {
             return Err(GitServiceError::BranchesDiverged(format!(
@@ -735,31 +773,54 @@ impl GitService {
                     .merge_squash_commit(
                         &base_checkout_path,
                         base_branch_name,
-                        task_branch_name,
+                        merge_source,
                         commit_message,
                     )
                     .map_err(|e| {
                         GitServiceError::InvalidRepository(format!("CLI merge failed: {e}"))
                     })?;
 
-                // Update task branch ref for continuity
+                // Update task branch ref for continuity — only from the pinned
+                // tip, so a commit that landed meanwhile is not overwritten.
                 let task_refname = format!("refs/heads/{task_branch_name}");
-                git_cli
-                    .update_ref(base_worktree_path, &task_refname, &sha)
-                    .map_err(|e| {
-                        GitServiceError::InvalidRepository(format!("git update-ref failed: {e}"))
-                    })?;
+                match expected_task_tip {
+                    Some(tip) => {
+                        // The merge itself is done; a branch that moved on
+                        // keeps its newer commit for the next merge.
+                        if let Err(e) = git_cli.git(
+                            base_worktree_path,
+                            ["update-ref", task_refname.as_str(), sha.as_str(), tip],
+                        ) {
+                            tracing::warn!(
+                                "left {task_refname} as is after merging {tip}: it moved on ({e})"
+                            );
+                        }
+                    }
+                    None => {
+                        git_cli
+                            .update_ref(base_worktree_path, &task_refname, &sha)
+                            .map_err(|e| {
+                                GitServiceError::InvalidRepository(format!(
+                                    "git update-ref failed: {e}"
+                                ))
+                            })?;
+                    }
+                }
 
                 Ok(sha)
             }
             None => {
                 // base branch not checked out anywhere - use libgit2 pure ref operations
-                let task_branch = Self::find_branch(&task_repo, task_branch_name)?;
                 let base_branch = Self::find_branch(&task_repo, base_branch_name)?;
 
                 // Resolve commits
                 let base_commit = base_branch.get().peel_to_commit()?;
-                let task_commit = task_branch.get().peel_to_commit()?;
+                let task_commit = match expected_task_tip {
+                    Some(tip) => task_repo.find_commit(git2::Oid::from_str(tip)?)?,
+                    None => Self::find_branch(&task_repo, task_branch_name)?
+                        .get()
+                        .peel_to_commit()?,
+                };
 
                 // Create the squash commit in-memory (no checkout) and update the base branch ref
                 let signature = self.signature_with_fallback(&task_repo)?;
@@ -775,12 +836,29 @@ impl GitService {
                 // Update the task branch to the new squash commit so follow-up
                 // work can continue from the merged state without conflicts.
                 let task_refname = format!("refs/heads/{task_branch_name}");
-                base_repo.reference(
-                    &task_refname,
-                    squash_commit_id,
-                    true,
-                    "Reset task branch after squash merge",
-                )?;
+                match expected_task_tip {
+                    Some(tip) => {
+                        if let Err(e) = base_repo.reference_matching(
+                            &task_refname,
+                            squash_commit_id,
+                            true,
+                            git2::Oid::from_str(tip)?,
+                            "Reset task branch after squash merge",
+                        ) {
+                            tracing::warn!(
+                                "left {task_refname} as is after merging {tip}: it moved on ({e})"
+                            );
+                        }
+                    }
+                    None => {
+                        base_repo.reference(
+                            &task_refname,
+                            squash_commit_id,
+                            true,
+                            "Reset task branch after squash merge",
+                        )?;
+                    }
+                }
 
                 Ok(squash_commit_id.to_string())
             }

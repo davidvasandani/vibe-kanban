@@ -6849,7 +6849,26 @@ impl ContainerService for LocalContainerService {
             return Ok(false);
         }
 
-        Ok(self.commit_repos(repos_with_changes, &message))
+        let committed = self.commit_repos(repos_with_changes, &message);
+        if committed {
+            // A clustered workspace's branch reaches the registered checkout
+            // only through the background mirror: ask for it now, without
+            // waiting, rather than on the next request that happens by.
+            if let Ok(Some(store)) = self.shared_repository_store_for(ctx.workspace.id).await {
+                for repo in &ctx.repos {
+                    let outcome = workspace_manager::SourceMirror::global().request(
+                        &store.path_for(repo.id),
+                        &repo.path,
+                        &ctx.workspace.branch,
+                    );
+                    tracing::debug!(
+                        repo = %repo.name,
+                        "post-commit source mirror request: {outcome:?}"
+                    );
+                }
+            }
+        }
+        Ok(committed)
     }
 
     async fn commit_interrupted_wip(
